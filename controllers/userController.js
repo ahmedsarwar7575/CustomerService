@@ -33,7 +33,19 @@ export const getUserWithTickets = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
-
+export const getAllUsers = async (req, res) => {
+  try {
+    const user = await User.findAll();
+    
+    if (!user) {
+      return res.status(404).json({ error: 'Users not found' });
+    }
+    
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
 // Update user status
 export const updateUserStatus = async (req, res) => {
   try {

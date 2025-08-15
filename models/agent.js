@@ -31,6 +31,10 @@ const Agent = sequelize.define('Agent', {
     type: DataTypes.BOOLEAN,
     defaultValue: true
   },
+  role:{
+    type: DataTypes.STRING,
+    defaultValue: 'agent'
+  },
   rating: {
     type: DataTypes.FLOAT,
     defaultValue: 0.0,

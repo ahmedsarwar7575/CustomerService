@@ -155,8 +155,32 @@
         }
       }
     },
+    "/api/adminLogin": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "description": "",
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/tickets": {
       "post": {
+        "tags": [
+          "Tickets"
+        ],
+        "description": "",
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      },
+      "get": {
         "tags": [
           "Tickets"
         ],
@@ -279,6 +303,17 @@
             "description": ""
           }
         }
+      },
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "description": "",
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
       }
     },
     "/api/users/{id}": {
@@ -389,6 +424,19 @@
             }
           }
         ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/ratings": {
+      "get": {
+        "tags": [
+          "Ratings"
+        ],
+        "description": "",
         "responses": {
           "default": {
             "description": ""

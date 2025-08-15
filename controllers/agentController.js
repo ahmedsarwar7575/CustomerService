@@ -191,10 +191,8 @@ export const adminLogin = async (req, res) => {
       message: 'Admin login successful', 
       token,
       admin: {
-        id: process.env.ADMIN_ID,
-        firstName: process.env.ADMIN_FIRST_NAME,
-        lastName: process.env.ADMIN_LAST_NAME,
-        email: process.env.ADMIN_EMAIL
+        email: process.env.ADMIN_EMAIL,
+        role:  process.env.ADMIN_ROLE
       }
     });
   } catch (error) {
