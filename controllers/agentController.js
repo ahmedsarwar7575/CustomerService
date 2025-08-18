@@ -49,6 +49,10 @@ export const login = async (req, res) => {
 export const createAgent = async (req, res) => {
   try {
     const hashedPassword = await bcrypt.hash(req.body.password, 10);
+    const existingAgent = await Agent.findOne({ where: { email: req.body.email } });
+    if (existingAgent) {
+      return res.status(400).json({ error: 'Agent with this email already exists' });
+    }
     const agent = await Agent.create({
       ...req.body,
       password: hashedPassword

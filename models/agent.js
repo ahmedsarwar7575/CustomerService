@@ -2,11 +2,6 @@ import { DataTypes } from 'sequelize';
 import sequelize from '../config/db.js';
 
 const Agent = sequelize.define('Agent', {
-  id: {
-    type: DataTypes.INTEGER,
-    primaryKey: true,
-    autoIncrement: true
-  },
   firstName: {
     type: DataTypes.STRING(50),
     allowNull: false
