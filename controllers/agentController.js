@@ -70,12 +70,12 @@ export const createAgent = async (req, res) => {
       message: "Agent created successfully",
       agent: {
         id: agent.id,
+        token,
         firstName: agent.firstName,
         lastName: agent.lastName,
         email: agent.email,
         isActive: agent.isActive,
         rating: agent.rating,
-        token,
       },
     });
   } catch (error) {
