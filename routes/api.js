@@ -33,7 +33,7 @@ import {
 const router = express.Router();
 
 // Agent Routes
-router.post('/api/agents/login', /* #swagger.tags = ['Agents'] */ agentLogin);
+router.post('/api/login', /* #swagger.tags = ['Agents'] */ agentLogin);
 router.post('/api/agents', /* #swagger.tags = ['Agents'] */   createAgent);
 router.get('/api/agents', /* #swagger.tags = ['Agents'] */  getAllAgents);
 router.get('/api/agents/:id', /* #swagger.tags = ['Agents'] */  getAgentById);

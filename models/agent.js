@@ -40,7 +40,7 @@ const Agent = sequelize.define('Agent', {
   },
   ticketType: {
     type: DataTypes.ENUM('support', 'sales', 'billing'),
-    allowNull: false
+    allowNull: true
   }
 }, {
   tableName: 'agents',

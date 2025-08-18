@@ -21,13 +21,20 @@ export const login = async (req, res) => {
     if (!isMatch) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
-
-    const token = jwt.sign(
-      { id: agent.id, role: "agent" },
-      process.env.JWT_SECRET,
-      { expiresIn: "8h" }
-    );
-
+    let token;
+    if (agent.role === "admin") {
+      token = jwt.sign(
+        { id: agent.id, role: "admin" },
+        process.env.JWT_SECRET,
+        { expiresIn: "8h" }
+      );
+    } else {
+      token = jwt.sign(
+        { id: agent.id, role: "agent" },
+        process.env.JWT_SECRET,
+        { expiresIn: "8h" }
+      );
+    }
     res.json({
       message: "Login successful",
       token,
@@ -38,6 +45,8 @@ export const login = async (req, res) => {
         email: agent.email,
         isActive: agent.isActive,
         rating: agent.rating,
+        ticketType: agent?.ticketType,
+        role: agent.role,
       },
     });
   } catch (error) {
@@ -76,6 +85,8 @@ export const createAgent = async (req, res) => {
         email: agent.email,
         isActive: agent.isActive,
         rating: agent.rating,
+        ticketType: agent.ticketType,
+        role: agent.role,
       },
     });
   } catch (error) {
