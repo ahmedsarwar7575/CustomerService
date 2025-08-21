@@ -115,6 +115,10 @@ export const getTicketsByStatus = async (req, res) => {
 export const getAllTickets = async (req, res) => {
   try {
     const tickets = await Ticket.findAll({
+      include: [
+        { model: Agent, attributes: ["id", "firstName", "lastName"] },
+        { model: User, attributes: ["id", "name", "email"] },
+      ],
       order: [["updatedAt", "DESC"]],
     });
     if(!tickets){
