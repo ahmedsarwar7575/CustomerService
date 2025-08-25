@@ -15,7 +15,8 @@ import {
   updateTicketStatus,
   getTicketsByStatus,
   escalateTicket,
-  getAllTickets
+  getAllTickets,
+  updatePiority
 } from '../controllers/ticketController.js';
 import {
   createUser,
@@ -47,6 +48,7 @@ router.get('/api/adminLogin', /* #swagger.tags = ['Agents'] */  adminLogin);
 router.post('/api/tickets', /* #swagger.tags = ['Tickets'] */  createTicket);
 router.patch('/api/tickets/:ticketId/assign/:agentId', /* #swagger.tags = ['Tickets'] */  assignTicket);
 router.patch('/api/tickets/:id/status', /* #swagger.tags = ['Tickets'] */  updateTicketStatus);
+router.patch('/api/tickets/:id/piority', /* #swagger.tags = ['Tickets'] */  updatePiority);
 router.get('/api/tickets/status/:status', /* #swagger.tags = ['Tickets'] */  getTicketsByStatus); 
 router.get('/api/tickets', /* #swagger.tags = ['Tickets'] */  getAllTickets); 
 router.patch('/api/tickets/:id/escalate', /* #swagger.tags = ['Tickets'] */  escalateTicket);

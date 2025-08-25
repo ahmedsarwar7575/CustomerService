@@ -30,7 +30,7 @@
     }
   ],
   "paths": {
-    "/api/agents/login": {
+    "/api/login": {
       "post": {
         "tags": [
           "Agents"
@@ -224,6 +224,29 @@
       }
     },
     "/api/tickets/{id}/status": {
+      "patch": {
+        "tags": [
+          "Tickets"
+        ],
+        "description": "",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/tickets/{id}/piority": {
       "patch": {
         "tags": [
           "Tickets"

@@ -92,7 +92,24 @@ export const updateTicketStatus = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+export const updatePiority = async (req, res) => {
+  try {
+    const ticket = await Ticket.findByPk(req.params.id);
 
+    if (!ticket) {
+      return res.status(404).json({ error: "Ticket not found" });
+    }
+
+    await ticket.update({ priority: req.body.priority });
+    res.json({
+      message: "Ticket priority updated",
+      ticketId: ticket.id,
+      newPriority: req.body.priority,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}
 // Get tickets by status
 export const getTicketsByStatus = async (req, res) => {
   try {
