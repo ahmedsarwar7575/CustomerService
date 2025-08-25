@@ -42,7 +42,37 @@ export default async function seedDatabase() {
         id: 'Alpha-Bravo-Charlie-Delta',
         userId: users[0].id,
         ticketType: 'support',
+        description: 'Email not working'
+      },
+      {
+        id: 'JKL',
+        userId: users[0].id,
+        ticketType: 'support',
+        description: 'How can i add user?'
+      },
+      {
+        id: 'XYZ',
+        userId: users[0].id,
+        ticketType: 'support',
         description: 'Cannot login to my account'
+      },
+      {
+        id: 'MNO',
+        userId: users[1].id,
+        ticketType: 'sales',
+        description: 'Cannot login to my dashboard'
+      },
+      {
+        id: 'DEF',
+        userId: users[0].id,
+        ticketType: 'support',
+        description: 'signup failed'
+      },
+      {
+        id: 'ABC',
+        userId: users[1].id,
+        ticketType: 'support',
+        description: 'How much for pro account?'
       },
       {
         id: 'Echo-Foxtrot-Golf-Hotel',

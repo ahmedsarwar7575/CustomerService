@@ -9,7 +9,7 @@ const Ticket = sequelize.define('Ticket', {
     allowNull: false
   },
   status: {
-    type: DataTypes.ENUM('open', 'in_progress', 'resolved', 'closed', 'escalated'),
+    type: DataTypes.ENUM('open', 'in_progress', 'resolved', 'closed'),
     defaultValue: 'open'
   },
   ticketType: {
