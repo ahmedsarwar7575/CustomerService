@@ -247,3 +247,20 @@ export const adminLogin = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+
+export const getAllTicketsByAgentId = async (req, res) => {
+  try {
+    const agentId = req.params.id;
+    if(!agentId){
+      return res.status(400).json({ error: "Agent ID is required" });
+    }
+    const tickets = await Ticket.findAll({ where: { agentId } });
+    if(!tickets){
+      return res.status(404).json({ error: "Tickets not found" });
+    }
+    res.json(tickets);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
