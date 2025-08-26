@@ -11,7 +11,10 @@ import twalioRoutes from "./routes/twilioRoutes.js";
 const app = express();
 
 // Middleware
-app.use(cors());
+const corsOptions = {
+  origin: "*",
+}
+app.use(cors(corsOptions));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
@@ -29,7 +32,7 @@ const syncDatabase = async () => {
     console.log("Database connection established");
 
     // Sync all models
-    await sequelize.sync({ alter: true });
+    await sequelize.sync();
     console.log("Database synchronized");
 
     // Seed initial data

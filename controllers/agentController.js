@@ -4,7 +4,7 @@ import Rating from "../models/rating.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
-
+import User from "../models/user.js";
 dotenv.config();
 
 // Agent authentication
@@ -248,15 +248,26 @@ export const adminLogin = async (req, res) => {
   }
 };
 
-
 export const getAllTicketsByAgentId = async (req, res) => {
   try {
     const agentId = req.params.id;
-    if(!agentId){
+    if (!agentId) {
       return res.status(400).json({ error: "Agent ID is required" });
     }
-    const tickets = await Ticket.findAll({ where: { agentId } });
-    if(!tickets){
+    const tickets = await Ticket.findAll({
+      where: { id: agentId },
+      include: [
+        {
+          model: Agent,
+          attributes: ["firstName", "lastName"],
+        },
+        {
+          model: User,
+          attributes: ["name", "email", "phone"],
+        },
+      ],
+    });
+    if (!tickets) {
       return res.status(404).json({ error: "Tickets not found" });
     }
     res.json(tickets);
