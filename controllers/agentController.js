@@ -183,23 +183,23 @@ export const getAgentById = async (req, res) => {
   }
 };
 
+
 export const updateAgent = async (req, res) => {
   try {
     const agent = await Agent.findByPk(req.params.id);
+    if (!agent) return res.status(404).json({ error: "Agent not found" });
 
-    if (!agent) {
-      return res.status(404).json({ error: "Agent not found" });
+    const { password, ...rest } = req.body || {};
+    const payload = { ...rest };
+
+    if (typeof password === "string" && password.trim() !== "") {
+      payload.password = await bcrypt.hash(password, 10);
     }
 
-    // Update password if provided
-    if (req.body.password) {
-      req.body.password = await bcrypt.hash(req.body.password, 10);
-    }
-
-    await agent.update(req.body);
-    res.json({ message: "Agent updated successfully" });
+    await agent.update(payload);
+    return res.json({ message: "Agent updated successfully" });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return res.status(400).json({ error: error.message });
   }
 };
 
