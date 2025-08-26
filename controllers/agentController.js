@@ -255,7 +255,7 @@ export const getAllTicketsByAgentId = async (req, res) => {
       return res.status(400).json({ error: "Agent ID is required" });
     }
     const tickets = await Ticket.findAll({
-      where: { id: agentId },
+      where: { agentId: agentId },
       include: [
         {
           model: Agent,
