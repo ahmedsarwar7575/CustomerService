@@ -5,7 +5,7 @@ const router = Router();
 
 router.all('/incoming-call', (req, res) => {
   const host = req.get('host');
-  const wsUrl = `wss://${host}/media-stream`;
+  const wsUrl = `wss://customerservice-kabe.onrender.com/media-stream`;
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>

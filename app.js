@@ -5,6 +5,7 @@ import apiRouter from "./routes/api.js";
 import setupSwagger from './config/swagger.js';
 import sequelize from "./config/db.js";
 import { Agent, User, Ticket, Rating } from "./models/index.js";
+import twalioRoutes from "./routes/twilioRoutes.js";
 // import seedDatabase from "./config/seed.js";
 
 const app = express();
@@ -16,6 +17,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 // API Routes
 app.use("/", apiRouter);
+app.use("/", twalioRoutes);
 
 // Swagger Documentation
 setupSwagger(app);

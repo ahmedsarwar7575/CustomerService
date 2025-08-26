@@ -17,12 +17,15 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "http": "^0.0.1-security",
     "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.14.3",
     "nodemailer": "^7.0.5",
     "sequelize": "^6.37.7",
     "swagger-autogen": "^2.23.7",
     "swagger-jsdoc": "^6.2.8",
-    "swagger-ui-express": "^5.0.1"
+    "swagger-ui-express": "^5.0.1",
+    "twilio": "^5.8.0",
+    "ws": "^8.18.3"
   }
 }
