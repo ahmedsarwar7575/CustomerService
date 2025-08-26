@@ -10,9 +10,27 @@ import twalioRoutes from "./routes/twilioRoutes.js";
 
 const app = express();
 
+app.use(
+  cors({
+    origin: (origin, cb) => cb(null, true), // reflect any origin
+    credentials: true, // allow cookies/Authorization
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Origin",
+      "X-Requested-With",
+      "Content-Type",
+      "Accept",
+      "Authorization",
+    ],
+  })
+);
+app.options("*", cors()); // answer all preflights
 
-app.use(cors());
-app.options("*", cors());
+// (optional but helps when some middleware blocks OPTIONS)
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
