@@ -1,8 +1,6 @@
-// src/ws/mediaStream.js
 import WebSocket, { WebSocketServer } from "ws";
 
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
-
 const MODEL = "gpt-4o-realtime-preview-2024-10-01";
 
 const SYSTEM_MESSAGE = `
@@ -95,6 +93,36 @@ const LOG_EVENT_TYPES = [
 
 const SHOW_TIMING_MATH = false;
 
+function createOpenAIWebSocket() {
+  const url = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
+  const ws = new WebSocket(url, {
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "OpenAI-Beta": "realtime=v1",
+    },
+  });
+  return ws;
+}
+
+function buildSessionUpdate() {
+  return {
+    type: "session.update",
+    session: {
+      turn_detection: { type: "server_vad" },
+      input_audio_format: "g711_ulaw",
+      output_audio_format: "g711_ulaw",
+      voice: REALTIME_VOICE,
+      instructions: SYSTEM_MESSAGE,
+      modalities: ["text", "audio"],
+      temperature: 0.8,
+    },
+  };
+}
+
+function now() {
+  return Date.now();
+}
+
 export function attachMediaStreamServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
   console.log("WebSocket server ready at /media-stream");
@@ -108,41 +136,17 @@ export function attachMediaStreamServer(server) {
     let markQueue = [];
     let responseStartTimestampTwilio = null;
 
-    const openAiWs = new WebSocket(
-      `wss://api.openai.com/v1/realtime?model=${MODEL}`,
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "realtime=v1",
-        },
-      }
-    );
+    const openAiWs = createOpenAIWebSocket();
 
     const initializeSession = () => {
-      const sessionUpdate = {
-        type: "session.update",
-        session: {
-          turn_detection: { type: "server_vad" },
-          input_audio_format: "g711_ulaw",
-          output_audio_format: "g711_ulaw",
-          voice: REALTIME_VOICE,
-          instructions: SYSTEM_MESSAGE,
-          modalities: ["text", "audio"],
-          temperature: 0.3,
-        },
-      };
+      const sessionUpdate = buildSessionUpdate();
       openAiWs.send(JSON.stringify(sessionUpdate));
     };
 
     const handleSpeechStartedEvent = () => {
       if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
         const elapsedTime = latestMediaTimestamp - responseStartTimestampTwilio;
-        if (SHOW_TIMING_MATH) {
-          console.log(
-            `Truncate elapsed: ${latestMediaTimestamp} - ${responseStartTimestampTwilio} = ${elapsedTime}ms`
-          );
-        }
-
+        if (SHOW_TIMING_MATH) console.log(`Truncate elapsed: ${latestMediaTimestamp} - ${responseStartTimestampTwilio} = ${elapsedTime}ms`);
         if (lastAssistantItem) {
           const truncateEvent = {
             type: "conversation.item.truncate",
@@ -152,14 +156,7 @@ export function attachMediaStreamServer(server) {
           };
           openAiWs.send(JSON.stringify(truncateEvent));
         }
-
-        connection.send(
-          JSON.stringify({
-            event: "clear",
-            streamSid,
-          })
-        );
-
+        connection.send(JSON.stringify({ event: "clear", streamSid }));
         markQueue = [];
         lastAssistantItem = null;
         responseStartTimestampTwilio = null;
@@ -168,95 +165,49 @@ export function attachMediaStreamServer(server) {
 
     const sendMark = () => {
       if (!streamSid) return;
-      const markEvent = {
-        event: "mark",
-        streamSid,
-        mark: { name: "responsePart" },
-      };
+      const markEvent = { event: "mark", streamSid, mark: { name: "responsePart" } };
       connection.send(JSON.stringify(markEvent));
       markQueue.push("responsePart");
     };
 
-    // --- OpenAI WS events ---
     openAiWs.on("open", () => {
       console.log("Connected to OpenAI Realtime");
       setTimeout(initializeSession, 100);
     });
 
-    openAiWs.on('message', (data) => {
+    openAiWs.on("message", (data) => {
       try {
         const msg = JSON.parse(data);
-    
-        // Optional: log selected event types
-        if (LOG_EVENT_TYPES.includes(msg.type)) {
-          console.log('[OpenAI]', msg.type);
-        }
-    
-        // Streamed AUDIO from OpenAI -> forward to Twilio <Stream>
-        if (msg.type === 'response.audio.delta' && msg.delta) {
-          const audioDelta = {
-            event: 'media',
-            streamSid,
-            media: { payload: msg.delta },
-          };
+        if (LOG_EVENT_TYPES.includes(msg.type)) console.log("OpenAI event:", msg.type);
+
+        if (msg.type === "response.audio.delta" && msg.delta) {
+          const audioDelta = { event: "media", streamSid, media: { payload: msg.delta } };
           connection.send(JSON.stringify(audioDelta));
-    
           if (!responseStartTimestampTwilio) {
             responseStartTimestampTwilio = latestMediaTimestamp;
-            if (SHOW_TIMING_MATH) {
-              console.log(`[timing] start ts set: ${responseStartTimestampTwilio}ms`);
-            }
+            if (SHOW_TIMING_MATH) console.log(`Start timestamp set: ${responseStartTimestampTwilio}ms`);
           }
-    
-          if (msg.item_id) {
-            lastAssistantItem = msg.item_id;
-          }
-    
+          if (msg.item_id) lastAssistantItem = msg.item_id;
           sendMark();
         }
-    
-        // Optional: capture streamed TEXT (useful if model outputs a final JSON summary)
-        if (msg.type === 'response.output_text.delta' && msg.delta) {
-          console.log('[OpenAI text]', msg.delta);
-          // stream partial text if you want:
-          // console.log('[OpenAI text]', msg.delta);
-        }
-    
-        // Final response arrived — dump full text, try to parse JSON
-        if (msg.type === 'response.done') {
-          const fullText = msg.response?.output_text?.join('') ?? '';
-          if (fullText) {
-            console.log('=== FINAL AI TEXT OUTPUT ===');
-            console.log(fullText);
-    
-            try {
-              const parsed = JSON.parse(fullText);
-              console.log('=== PARSED JSON SUMMARY ===');
-              console.dir(parsed, { depth: null });
-            } catch {
-              // Not JSON — that's fine if the AI didn't send JSON this turn
-            }
-          }
-        }
-    
-        // User started speaking (from Twilio) — truncate any ongoing TTS
-        if (msg.type === 'input_audio_buffer.speech_started') {
+
+        if (msg.type === "input_audio_buffer.speech_started") {
           handleSpeechStartedEvent();
         }
+        if (msg.type === "response.done") {
+          console.log("Response done", msg?.response);
+        }
       } catch (e) {
-        console.error('OpenAI message parse error:', e, 'raw:', data);
+        console.error("OpenAI message parse error:", e, "raw:", data);
       }
     });
-    
 
     openAiWs.on("close", () => console.log("OpenAI WS closed"));
     openAiWs.on("error", (err) => console.error("OpenAI WS error:", err));
 
-    // --- Twilio <Stream> WS events ---
     connection.on("message", (message) => {
       try {
         const data = JSON.parse(message);
-
         switch (data.event) {
           case "start":
             streamSid = data.start.streamSid;
@@ -264,32 +215,21 @@ export function attachMediaStreamServer(server) {
             responseStartTimestampTwilio = null;
             latestMediaTimestamp = 0;
             break;
-
           case "media":
             latestMediaTimestamp = data.media.timestamp;
-            if (SHOW_TIMING_MATH) {
-              console.log(`media ts: ${latestMediaTimestamp}ms`);
-            }
+            if (SHOW_TIMING_MATH) console.log(`media ts: ${latestMediaTimestamp}ms`);
             if (openAiWs.readyState === WebSocket.OPEN) {
-              const audioAppend = {
-                type: "input_audio_buffer.append",
-                audio: data.media.payload,
-              };
+              const audioAppend = { type: "input_audio_buffer.append", audio: data.media.payload };
               openAiWs.send(JSON.stringify(audioAppend));
             }
             break;
-
           case "mark":
             if (markQueue.length) markQueue.shift();
             break;
-
           case "stop":
-            // Call ended by Twilio
             if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
             break;
-
           default:
-            // other events: dtmf, dtmf_received, etc.
             break;
         }
       } catch (e) {
@@ -303,6 +243,3 @@ export function attachMediaStreamServer(server) {
     });
   });
 }
-
-
-
