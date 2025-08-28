@@ -183,65 +183,71 @@ export function attachMediaStreamServer(server) {
       setTimeout(initializeSession, 100);
     });
 
-    openAiWs.on("message", (data) => {
+    openAiWs.on('message', (data) => {
       try {
         const msg = JSON.parse(data);
-
+    
+        // Optional: log selected event types
         if (LOG_EVENT_TYPES.includes(msg.type)) {
-          console.log("OpenAI event:", msg.type);
+          console.log('[OpenAI]', msg.type);
         }
-
-        // 👇 Capture text output (JSON summary at the end will appear here)
-        if (msg.type === "response.output_text.delta") {
-          if (msg.delta) {
-            console.log("AI text:", msg.delta); // log partial text output
-          }
-        }
-
-        if (msg.type === "response.done") {
-          if (msg.response?.output_text) {
-            const fullText = msg.response.output_text.join("");
-            console.log("=== FINAL AI TEXT OUTPUT ===");
-            console.log(fullText);
-
-            try {
-              // If it's JSON, parse and pretty-print
-              const parsed = JSON.parse(fullText);
-              console.log("=== PARSED JSON SUMMARY ===");
-              console.dir(parsed, { depth: null });
-            } catch (err) {
-              console.warn("Output was not valid JSON:", fullText);
-            }
-          }
-        }
-
-        // Your existing audio handling
-        if (msg.type === "response.audio.delta" && msg.delta) {
+    
+        // Streamed AUDIO from OpenAI -> forward to Twilio <Stream>
+        if (msg.type === 'response.audio.delta' && msg.delta) {
           const audioDelta = {
-            event: "media",
+            event: 'media',
             streamSid,
             media: { payload: msg.delta },
           };
           connection.send(JSON.stringify(audioDelta));
-
+    
           if (!responseStartTimestampTwilio) {
             responseStartTimestampTwilio = latestMediaTimestamp;
+            if (SHOW_TIMING_MATH) {
+              console.log(`[timing] start ts set: ${responseStartTimestampTwilio}ms`);
+            }
           }
-
+    
           if (msg.item_id) {
             lastAssistantItem = msg.item_id;
           }
-
+    
           sendMark();
         }
-
-        if (msg.type === "input_audio_buffer.speech_started") {
+    
+        // Optional: capture streamed TEXT (useful if model outputs a final JSON summary)
+        if (msg.type === 'response.output_text.delta' && msg.delta) {
+          console.log('[OpenAI text]', msg.delta);
+          // stream partial text if you want:
+          // console.log('[OpenAI text]', msg.delta);
+        }
+    
+        // Final response arrived — dump full text, try to parse JSON
+        if (msg.type === 'response.done') {
+          const fullText = msg.response?.output_text?.join('') ?? '';
+          if (fullText) {
+            console.log('=== FINAL AI TEXT OUTPUT ===');
+            console.log(fullText);
+    
+            try {
+              const parsed = JSON.parse(fullText);
+              console.log('=== PARSED JSON SUMMARY ===');
+              console.dir(parsed, { depth: null });
+            } catch {
+              // Not JSON — that's fine if the AI didn't send JSON this turn
+            }
+          }
+        }
+    
+        // User started speaking (from Twilio) — truncate any ongoing TTS
+        if (msg.type === 'input_audio_buffer.speech_started') {
           handleSpeechStartedEvent();
         }
       } catch (e) {
-        console.error("OpenAI message parse error:", e, "raw:", data);
+        console.error('OpenAI message parse error:', e, 'raw:', data);
       }
     });
+    
 
     openAiWs.on("close", () => console.log("OpenAI WS closed"));
     openAiWs.on("error", (err) => console.error("OpenAI WS error:", err));
@@ -297,3 +303,6 @@ export function attachMediaStreamServer(server) {
     });
   });
 }
+
+
+
