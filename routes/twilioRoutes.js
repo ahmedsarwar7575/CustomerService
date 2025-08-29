@@ -1,22 +1,17 @@
-// src/routes/twilioRoutes.js
 import { Router } from 'express';
 
 const router = Router();
 
 router.all('/incoming-call', (req, res) => {
-  const host = req.get('host');
-  const wsUrl = `wss://customerservice-kabe.onrender.com/media-stream`;
-
+  const WS_HOST = process.env.WS_HOST || 'customerservice-kabe.onrender.com';
+  const wsUrl = `wss://${WS_HOST}/media-stream`;
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open A. I. Realtime API.</Say>
-  <Pause length="1"/>
-  <Say>O.K., you can start talking!</Say>
+  <Say>Please wait while we connect your call to the A. I. voice assistant.</Say>
   <Connect>
-    <Stream url="${wsUrl}" bidirectional="true" />
+    <Stream url="${wsUrl}" />
   </Connect>
 </Response>`;
-
   res.type('text/xml').send(twiml);
 });
 
