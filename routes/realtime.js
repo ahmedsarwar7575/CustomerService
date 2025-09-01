@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router } from "express";
 
 const SYSTEM_MESSAGE = `
 You are a professional, friendly customer service AI for a website. Speak clearly and briefly.
@@ -46,25 +46,31 @@ FINAL SUMMARY — JSON Schema (produce keys exactly)
 }
 `;
 
-
 const router = Router();
 
-
-router.get('/realtime-session', async (req, res) => {
+router.get("/realtime-session", async (req, res) => {
   try {
-    const r = await fetch('https://api.openai.com/v1/realtime/sessions', {
-      method: 'POST',
+    const r = await fetch("https://api.openai.com/v1/realtime/sessions", {
+      method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-        'OpenAI-Beta': 'realtime=v1',
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "realtime=v1",
       },
       body: JSON.stringify({
         instructions: SYSTEM_MESSAGE,
-        model: 'gpt-4o-realtime-preview-2024-12-17',
-        voice: 'alloy',
-        modalities: ['audio','text'],
-        turn_detection: { type: 'server_vad', threshold: 0.6, prefix_padding_ms: 200, silence_duration_ms: 300 }
+        model: "gpt-4o-realtime-preview-2024-12-17",
+        voice: "alloy",
+        modalities: ["audio", "text"],
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.6,
+          prefix_padding_ms: 200,
+          silence_duration_ms: 300,
+        },
+        input_audio_transcription: {
+          model: "gpt-4o-mini-transcribe",
+        },
       }),
     });
 
@@ -74,7 +80,8 @@ router.get('/realtime-session', async (req, res) => {
 
     const json = JSON.parse(txt);
     const key = json.client_secret?.value || json.client_secret;
-    if (!key) return res.status(500).json({ error: 'No client_secret in response' });
+    if (!key)
+      return res.status(500).json({ error: "No client_secret in response" });
     res.json({ client_secret: key });
   } catch (e) {
     console.error(e);
@@ -83,5 +90,3 @@ router.get('/realtime-session', async (req, res) => {
 });
 
 export default router;
-
-

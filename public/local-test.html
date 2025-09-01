@@ -1,12 +1,25 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
     <title>Local Realtime Test</title>
     <style>
-      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 24px auto; }
-      button { padding: 10px 16px; margin-right: 8px; }
-      #log { white-space: pre-wrap; border: 1px solid #ddd; padding: 8px; height: 200px; overflow:auto; }
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 24px auto;
+      }
+      button {
+        padding: 10px 16px;
+        margin-right: 8px;
+      }
+      #log {
+        white-space: pre-wrap;
+        border: 1px solid #ddd;
+        padding: 8px;
+        height: 200px;
+        overflow: auto;
+      }
     </style>
   </head>
   <body>
@@ -20,47 +33,107 @@
     <h3>Log</h3>
     <div id="log"></div>
     <script>
-      const log = (...args) => { const el = document.getElementById('log'); el.textContent += args.join(' ') + '\n'; el.scrollTop = el.scrollHeight; };
+      const log = (...args) => {
+        const el = document.getElementById("log");
+
+        try {
+          // Flatten args into a string
+          const str = args.join(" ");
+
+          // Match event lines like: event: { ...json... }
+          const match = str.match(/^event:\s*(\{.*\})$/);
+          if (!match) return; // ignore ice state, pc state, etc.
+
+          const obj = JSON.parse(match[1]);
+
+          if (obj.type === "conversation.item.input_audio_transcription.completed") {
+            console.log("input_audio_transcription.completed", obj?.transcript);
+
+            el.textContent += `Q: ${obj?.transcript}\n`;
+          }
+
+          if (obj.type === "response.done") {
+            const outputs = obj.response?.output || [];
+            for (const out of outputs) {
+              if (out.role === "assistant") {
+                const part = out.content?.find((c) => c.transcript);
+                if (part) {
+                  el.textContent += `A: ${part.transcript}\n`;
+                }
+              }
+            }
+          }
+          el.scrollTop = el.scrollHeight;
+        } catch (e) {
+          // ignore parse errors
+        }
+      };
+
       let pc, dc, localStream;
       async function startCall() {
-        document.getElementById('startBtn').disabled = true;
-        document.getElementById('hangupBtn').disabled = false;
-        const tokenRes = await fetch('/realtime-session');
+        document.getElementById("startBtn").disabled = true;
+        document.getElementById("hangupBtn").disabled = false;
+        const tokenRes = await fetch("/realtime-session");
         const { client_secret } = await tokenRes.json();
-        if (!client_secret) { log('No client_secret'); return; }
+        if (!client_secret) {
+          log("No client_secret");
+          return;
+        }
         pc = new RTCPeerConnection();
-        pc.onconnectionstatechange = () => log('pc state:', pc.connectionState);
-        pc.oniceconnectionstatechange = () => log('ice state:', pc.iceConnectionState);
-        dc = pc.createDataChannel('oai-events');
-        dc.onmessage = (ev) => log('event:', ev.data);
-        pc.ontrack = (e) => { document.getElementById('remoteAudio').srcObject = e.streams[0]; };
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        localStream.getAudioTracks().forEach(t => pc.addTrack(t, localStream));
+        pc.onconnectionstatechange = () => log("pc state:", pc.connectionState);
+        pc.oniceconnectionstatechange = () =>
+          log("ice state:", pc.iceConnectionState);
+        dc = pc.createDataChannel("oai-events");
+        dc.onmessage = (ev) => {
+          log("event:", ev.data?.transcript || ev.data);
+          console.log("Here is abcd", JSON.parse(ev.data));
+        }
+
+        pc.ontrack = (e) => {
+          document.getElementById("remoteAudio").srcObject = e.streams[0];
+        };
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+        localStream
+          .getAudioTracks()
+          .forEach((t) => pc.addTrack(t, localStream));
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        const resp = await fetch(`https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01&voice=${encodeURIComponent('alloy')}`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${client_secret}`,
-            'Content-Type': 'application/sdp',
-            'OpenAI-Beta': 'realtime=v1',
-          },
-          body: offer.sdp,
-        });
-        const answer = { type: 'answer', sdp: await resp.text() };
+        const resp = await fetch(
+          `https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01&voice=${encodeURIComponent(
+            "alloy"
+          )}`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${client_secret}`,
+              "Content-Type": "application/sdp",
+              "OpenAI-Beta": "realtime=v1",
+            },
+            body: offer.sdp,
+          }
+        );
+        const answer = { type: "answer", sdp: await resp.text() };
         await pc.setRemoteDescription(answer);
-        log('Connected. Speak!');
+        log("Connected. Speak!");
       }
       async function hangup() {
-        document.getElementById('hangupBtn').disabled = true;
-        try { dc && dc.close(); } catch {}
-        try { pc && pc.close(); } catch {}
-        try { localStream && localStream.getTracks().forEach(t => t.stop()); } catch {}
-        document.getElementById('startBtn').disabled = false;
-        log('Call ended.');
+        document.getElementById("hangupBtn").disabled = true;
+        try {
+          dc && dc.close();
+        } catch {}
+        try {
+          pc && pc.close();
+        } catch {}
+        try {
+          localStream && localStream.getTracks().forEach((t) => t.stop());
+        } catch {}
+        document.getElementById("startBtn").disabled = false;
+        log("Call ended.");
       }
-      document.getElementById('startBtn').onclick = startCall;
-      document.getElementById('hangupBtn').onclick = hangup;
+      document.getElementById("startBtn").onclick = startCall;
+      document.getElementById("hangupBtn").onclick = hangup;
     </script>
   </body>
 </html>
