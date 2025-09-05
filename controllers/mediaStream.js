@@ -120,16 +120,18 @@ function buildSessionUpdate() {
     type: "session.update",
     session: {
       type: "realtime",
-      model: "gpt-realtime",                  
-      output_modalities: ["audio"],  
+      model: "gpt-4o-realtime-preview-2024-12-17",                       // gpt-4o-realtime-preview-2024-12-17
+      output_modalities: ["audio", "text"],
       temperature: 0.2,
       instructions: SYSTEM_MESSAGE,
 
+      // IMPORTANT: Twilio <Stream> is PCMU 8k. Match it exactly.
       audio: {
         input: {
           format: { type: "audio/pcmu", sample_rate_hz: 8000 },
           turn_detection: {
             type: "server_vad",
+            create_response: true,        // let server auto-create responses
             threshold: 0.6,
             prefix_padding_ms: 200,
             silence_duration_ms: 300,
@@ -137,10 +139,11 @@ function buildSessionUpdate() {
         },
         output: {
           format: { type: "audio/pcmu", sample_rate_hz: 8000 },
-          voice: REALTIME_VOICE,
+          voice: "alloy",
         },
       },
 
+      // keep your live transcription
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
@@ -148,6 +151,7 @@ function buildSessionUpdate() {
 
 
 export function attachMediaStreamServer(server) {
+  try {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
   wss.on("connection", (connection) => {
     let streamSid = null,
@@ -410,4 +414,8 @@ export function attachMediaStreamServer(server) {
       emitFinalOnce();
     });
   });
+
+} catch (error) {
+    console.error(error);
+}
 }
