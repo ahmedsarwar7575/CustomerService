@@ -3,10 +3,9 @@ import sequelize from '../config/db.js';
 
 const Ticket = sequelize.define('Ticket', {
   id: {
-    type: DataTypes.STRING(50),
+    type: DataTypes.INTEGER,
     primaryKey: true,
-    unique: true,
-    allowNull: false
+    autoIncrement: true,            // ✅ add autoIncrement
   },
   status: {
     type: DataTypes.ENUM('open', 'in_progress', 'resolved', 'closed'),
@@ -14,15 +13,31 @@ const Ticket = sequelize.define('Ticket', {
   },
   ticketType: {
     type: DataTypes.ENUM('support', 'sales', 'billing'),
-    allowNull: false
+    allowNull: true                 // ✅ allow null when model says "not specified"
   },
   priority: {
     type: DataTypes.ENUM('low', 'medium', 'high', 'critical'),
     defaultValue: 'medium'
   },
-  description: {
+  proposedSolution: {
+    type: DataTypes.TEXT,
+    allowNull: true                 // ✅ "not specified" → null instead of forcing text
+  },
+  isSatisfied: {
+    type: DataTypes.BOOLEAN,
+    allowNull: true                 // ✅ allow null when unknown
+  },
+  summary: {
     type: DataTypes.TEXT,
     allowNull: false
+  },
+  userId: {
+    type: DataTypes.INTEGER,        // ✅ INTEGER (not NUMBER)
+    allowNull: true
+  },
+  agentId: {
+    type: DataTypes.INTEGER,
+    allowNull: true
   }
 }, {
   tableName: 'tickets',

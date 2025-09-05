@@ -9,11 +9,11 @@ const User = sequelize.define('User', {
   },
   name: {
     type: DataTypes.STRING(100),
-    allowNull: false
+    allowNull: true
   },
   email: {
     type: DataTypes.STRING(100),
-    allowNull: false,
+    allowNull: true,
     unique: true,
     validate: {
       isEmail: true
@@ -25,23 +25,11 @@ const User = sequelize.define('User', {
   },
   phone: {
     type: DataTypes.STRING(20),
-    allowNull: false
-  },
-  ticketType: {
-    type: DataTypes.ENUM('support', 'sales', 'billing'),
-    allowNull: false
+    allowNull: true
   },
   status: {
     type: DataTypes.ENUM('active', 'inactive', 'pending'),
     defaultValue: 'active'
-  },
-  isOutbound: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: false
-  },
-  isUpsales: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: false
   }
 }, {
   tableName: 'users',

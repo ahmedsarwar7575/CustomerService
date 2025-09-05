@@ -1,0 +1,194 @@
+/* ===== CSS Variables (light/dark aware) ===== */
+:root {
+    --bg: #0b0d12;
+    --card: #111520;
+    --card-2: #0e131d;
+    --text: #eaf0ff;
+    --muted: #9fb0d3;
+    --border: #1f2a3d;
+    --ring: #5ea0ff;
+  
+    --btn-primary-from: #6aa1ff;
+    --btn-primary-to: #3b82f6;
+    --btn-danger-from: #ff7d7d;
+    --btn-danger-to: #ef4444;
+  
+    --radius: 14px;
+    --shadow-1: 0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05);
+    --shadow-2: 0 12px 40px rgba(16,54,150,.25);
+    --shadow-3: 0 12px 40px rgba(150,16,16,.18);
+  }
+  
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fc;
+      --card: #ffffff;
+      --card-2: #f9fbff;
+      --text: #0b1324;
+      --muted: #5a6a86;
+      --border: #e3e8f3;
+      --ring: #2563eb;
+    }
+  }
+  
+  /* ===== Base ===== */
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    color: var(--text);
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.20), transparent 60%),
+      radial-gradient(1000px 800px at 100% 0%, rgba(99,102,241,.15), transparent 60%),
+      var(--bg);
+    display: grid;
+    place-items: start center;
+    padding: 32px 16px 48px;
+  }
+  
+  .app {
+    width: 100%;
+    max-width: 860px;
+  }
+  
+  /* ===== Header ===== */
+  .header {
+    background: linear-gradient(180deg, var(--card), var(--card-2));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 18px 16px;
+    box-shadow: var(--shadow-1);
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 16px;
+    align-items: center;
+  }
+  
+  .brand { display: flex; gap: 14px; align-items: center; }
+  .logo {
+    width: 44px; height: 44px; flex: none;
+    fill: url(#grad-logo);
+    filter: drop-shadow(0 6px 14px rgba(59,130,246,.35));
+  }
+  .logo + div h1 {
+    font-size: 22px; margin: 0 0 4px; letter-spacing: .2px;
+  }
+  .subtitle {
+    margin: 0; color: var(--muted); font-size: 14px;
+  }
+  
+  /* gradient for SVG fill */
+  .logo {
+    --g1: #6aa1ff; --g2: #a78bfa; --g3: #60a5fa;
+    background: linear-gradient(135deg, var(--g1), var(--g2), var(--g3));
+    -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg"></svg>') no-repeat;
+  }
+  
+  /* ===== Buttons ===== */
+  .controls { display: flex; gap: 10px; }
+  
+  button {
+    cursor: pointer;
+    position: relative;
+    border: 0;
+    padding: 12px 18px;
+    border-radius: 12px;
+    font-weight: 650;
+    letter-spacing: .2px;
+    color: #fff;
+    transition: transform .12s ease, box-shadow .2s ease, filter .2s ease, opacity .2s ease;
+    user-select: none;
+    outline: none;
+  }
+  
+  .btn-primary {
+    background: linear-gradient(180deg, var(--btn-primary-from), var(--btn-primary-to));
+    box-shadow: var(--shadow-2);
+  }
+  .btn-danger {
+    background: linear-gradient(180deg, var(--btn-danger-from), var(--btn-danger-to));
+    box-shadow: var(--shadow-3);
+  }
+  
+  button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.02); }
+  button:active:not(:disabled) { transform: translateY(0); filter: brightness(.96); }
+  button:focus-visible {
+    outline: 3px solid transparent;
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 55%, transparent);
+  }
+  
+  button:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+    filter: saturate(.7);
+  }
+  
+  /* ===== Panel / Log ===== */
+  .panel {
+    margin-top: 16px;
+    background: linear-gradient(180deg, var(--card), var(--card-2));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+  }
+  
+  .panel-head {
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .panel-head h3 { margin: 0; font-size: 16px; letter-spacing: .2px; }
+  .status-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: radial-gradient(circle at 40% 40%, #34d399, #10b981);
+    box-shadow: 0 0 0 4px rgba(16,185,129,.12), 0 0 12px rgba(52,211,153,.45);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: .9; }
+    50% { transform: scale(1.1); opacity: 1; }
+  }
+  
+  #log.log {
+    white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    padding: 14px 16px;
+    height: 260px;
+    overflow: auto;
+    color: var(--text);
+  }
+  
+  /* subtle separators for Q/A lines if you prefix with "Q:" / "A:" */
+  #log.log { 
+    background:
+      linear-gradient(transparent 23px, rgba(255,255,255,.04) 24px) repeat-y;
+    background-size: 100% 24px;
+  }
+  
+  /* nice scrollbars */
+  #log.log::-webkit-scrollbar { width: 10px; }
+  #log.log::-webkit-scrollbar-track { background: transparent; border-left: 1px solid var(--border); }
+  #log.log::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #94a3b8, #64748b);
+    border-radius: 10px;
+  }
+  #log.log::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, #aab6c8, #7a8aa1); }
+  
+  /* ===== Audio ===== */
+  /* keep it present for a11y, but low-impact visually */
+  #remoteAudio {
+    position: absolute;
+    width: 1px; height: 1px;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    overflow: hidden; white-space: nowrap;
+  }
+  
+  /* ===== Small screens ===== */
+  @media (max-width: 520px) {
+    .header { grid-template-columns: 1fr; }
+    .controls { justify-content: stretch; }
+    .controls .btn { flex: 1; }
+  }
+  

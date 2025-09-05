@@ -3,137 +3,48 @@
   <head>
     <meta charset="utf-8" />
     <title>Local Realtime Test</title>
-    <style>
-      body {
-        font-family: system-ui, sans-serif;
-        max-width: 640px;
-        margin: 24px auto;
-      }
-      button {
-        padding: 10px 16px;
-        margin-right: 8px;
-      }
-      #log {
-        white-space: pre-wrap;
-        border: 1px solid #ddd;
-        padding: 8px;
-        height: 200px;
-        overflow: auto;
-      }
-    </style>
+   <link rel="stylesheet" href="/style.css">
   </head>
   <body>
-    <h1>OpenAI Realtime (WebRTC) — Local Test</h1>
-    <p>Click “Call” to talk to your agent without Twilio.</p>
-    <p>
-      <button id="startBtn">Call</button>
-      <button id="hangupBtn" disabled>Hang up</button>
-    </p>
-    <audio id="remoteAudio" autoplay></audio>
-    <h3>Log</h3>
-    <div id="log"></div>
-    <script>
-      const log = (...args) => {
-        const el = document.getElementById("log");
+    <div class="app">
+      <header class="header">
+        <div class="brand">
+          <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M12 3a9 9 0 0 1 9 9v2.5a2.5 2.5 0 0 1-5 0V12a4 4 0 1 0-8 0v2.5a2.5 2.5 0 0 1-5 0V12a9 9 0 0 1 9-9z"
+            ></path>
+          </svg>
+          <div>
+            <h1>OpenAI Realtime (WebRTC)</h1>
+            <p class="subtitle">
+              Click “Call” to talk to your agent without Twilio.
+            </p>
+          </div>
+        </div>
+        <div class="controls">
+          <button id="startBtn" class="btn btn-primary" type="button">
+            Call
+          </button>
+          <button id="hangupBtn" class="btn btn-danger" type="button" disabled>
+            Hang up
+          </button>
+        </div>
+      </header>
 
-        try {
-          // Flatten args into a string
-          const str = args.join(" ");
+      <section class="panel">
+        <div class="panel-head">
+          <h3>Conversation Log</h3>
+          <span class="status-dot" aria-hidden="true"></span>
+        </div>
+        <p id="connecting" style="display: none;">Connecting...</p>
+        <div id="log" class="log" role="log" aria-live="polite"></div>
+        <p id="Summary" style="display: none;">Generating Summary...</p>
+      </section>
 
-          // Match event lines like: event: { ...json... }
-          const match = str.match(/^event:\s*(\{.*\})$/);
-          if (!match) return; // ignore ice state, pc state, etc.
+      <!-- keep the audio element; we visually tuck it away but leave it accessible -->
+      <audio id="remoteAudio" autoplay></audio>
+    </div>
 
-          const obj = JSON.parse(match[1]);
-
-          if (obj.type === "conversation.item.input_audio_transcription.completed") {
-            console.log("input_audio_transcription.completed", obj?.transcript);
-
-            el.textContent += `Q: ${obj?.transcript}\n`;
-          }
-
-          if (obj.type === "response.done") {
-            const outputs = obj.response?.output || [];
-            for (const out of outputs) {
-              if (out.role === "assistant") {
-                const part = out.content?.find((c) => c.transcript);
-                if (part) {
-                  el.textContent += `A: ${part.transcript}\n`;
-                }
-              }
-            }
-          }
-          el.scrollTop = el.scrollHeight;
-        } catch (e) {
-          // ignore parse errors
-        }
-      };
-
-      let pc, dc, localStream;
-      async function startCall() {
-        document.getElementById("startBtn").disabled = true;
-        document.getElementById("hangupBtn").disabled = false;
-        const tokenRes = await fetch("/realtime-session");
-        const { client_secret } = await tokenRes.json();
-        if (!client_secret) {
-          log("No client_secret");
-          return;
-        }
-        pc = new RTCPeerConnection();
-        pc.onconnectionstatechange = () => log("pc state:", pc.connectionState);
-        pc.oniceconnectionstatechange = () =>
-          log("ice state:", pc.iceConnectionState);
-        dc = pc.createDataChannel("oai-events");
-        dc.onmessage = (ev) => {
-          log("event:", ev.data?.transcript || ev.data);
-          console.log("Here is abcd", JSON.parse(ev.data));
-        }
-
-        pc.ontrack = (e) => {
-          document.getElementById("remoteAudio").srcObject = e.streams[0];
-        };
-        localStream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
-        localStream
-          .getAudioTracks()
-          .forEach((t) => pc.addTrack(t, localStream));
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        const resp = await fetch(
-          `https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01&voice=${encodeURIComponent(
-            "alloy"
-          )}`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${client_secret}`,
-              "Content-Type": "application/sdp",
-              "OpenAI-Beta": "realtime=v1",
-            },
-            body: offer.sdp,
-          }
-        );
-        const answer = { type: "answer", sdp: await resp.text() };
-        await pc.setRemoteDescription(answer);
-        log("Connected. Speak!");
-      }
-      async function hangup() {
-        document.getElementById("hangupBtn").disabled = true;
-        try {
-          dc && dc.close();
-        } catch {}
-        try {
-          pc && pc.close();
-        } catch {}
-        try {
-          localStream && localStream.getTracks().forEach((t) => t.stop());
-        } catch {}
-        document.getElementById("startBtn").disabled = false;
-        log("Call ended.");
-      }
-      document.getElementById("startBtn").onclick = startCall;
-      document.getElementById("hangupBtn").onclick = hangup;
-    </script>
+    <script src="/script.js"></script>
   </body>
 </html>

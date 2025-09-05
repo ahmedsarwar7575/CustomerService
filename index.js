@@ -11,6 +11,6 @@ attachMediaStreamServer(server);
 server.listen(PORT, () => {
   // seedDatabase()
   console.log(`Server running on port ${PORT}`);
-  console.log(`API Documentation: http://localhost:${PORT}/api-docs`);
+  console.log(`API Documentation: http://localhost:${PORT}/local-test.html`);
 });
 
