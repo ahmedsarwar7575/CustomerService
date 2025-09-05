@@ -360,6 +360,7 @@ const summarizer = async (pairs) => {
     if (!Array.isArray(pairs) || pairs.length === 0) {
       return { error: "no_pairs" };
     }
+
     const system = [
       "You are an accurate, terse extractor for GETPIE customer support logs.",
       "English only. Output ONLY JSON, no extra words.",
@@ -371,6 +372,7 @@ const summarizer = async (pairs) => {
       "Derive is_satisfied from the conversation (true/false) if explicit; else 'not specified'.",
       "Keep the summary <= 80 words."
     ].join(" ");
+
     const user = `
 From these Q/A pairs, return ONLY this JSON:
 
@@ -399,18 +401,21 @@ From these Q/A pairs, return ONLY this JSON:
 Q/A PAIRS:
 ${JSON.stringify(pairs, null, 2)}
 `.trim();
+
     const ctrl = new AbortController();
     const timeoutId = setTimeout(() => ctrl.abort(), 20000);
+
     const payload = {
       model: "gpt-4o-mini",
       temperature: 0.6,
       max_output_tokens: 1200,
-      response_format: { type: "json_object" },
+      text: { format: { type: "json_object" } },
       input: [
         { role: "system", content: [{ type: "text", text: system }] },
         { role: "user", content: [{ type: "text", text: user }] }
       ]
     };
+
     const r = await fetch("https://api.openai.com/v1/responses", {
       signal: ctrl.signal,
       method: "POST",
@@ -420,12 +425,15 @@ ${JSON.stringify(pairs, null, 2)}
       },
       body: JSON.stringify(payload)
     });
+
     clearTimeout(timeoutId);
+
     const raw = await r.text();
     if (!r.ok) {
       console.error("openai.responses error", raw);
       return { error: "openai", status: r.status, body: raw };
     }
+
     let outText = null;
     try {
       const data = JSON.parse(raw);
@@ -437,6 +445,7 @@ ${JSON.stringify(pairs, null, 2)}
     } catch {
       outText = null;
     }
+
     let parsed = null;
     try {
       parsed = JSON.parse(outText || "{}");
@@ -444,7 +453,9 @@ ${JSON.stringify(pairs, null, 2)}
       console.error("responses JSON parse error", outText);
       return { error: "parse", text: outText };
     }
+
     const ns = (v) => (v === "not specified" ? null : v);
+
     const safe = {
       customer: {
         name: ns(parsed?.customer?.name),
@@ -462,6 +473,7 @@ ${JSON.stringify(pairs, null, 2)}
       summary: parsed?.summary || "",
       non_english_detected: Array.isArray(parsed?.non_english_detected) ? parsed.non_english_detected : []
     };
+
     const result = await sequelize.transaction(async (t) => {
       let userRecord = null;
       if (safe.customer.email) {
@@ -498,6 +510,7 @@ ${JSON.stringify(pairs, null, 2)}
       );
       return { user: userRecord, ticket, call, extracted: safe };
     });
+
     console.log("db.write ok", { userId: result.user.id, ticketId: result.ticket.id, callId: result.call.id });
     return result;
   } catch (e) {
@@ -505,3 +518,4 @@ ${JSON.stringify(pairs, null, 2)}
     return { error: "summarizer_exception", message: String(e) };
   }
 };
+
