@@ -119,24 +119,33 @@ function buildSessionUpdate() {
   return {
     type: "session.update",
     session: {
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.6,
-        prefix_padding_ms: 200,
-        silence_duration_ms: 300,
-      },
-      input_audio_format: "g711_ulaw",
-      output_audio_format: "g711_ulaw",
-      voice: REALTIME_VOICE,
-      instructions: SYSTEM_MESSAGE,
-      modalities: ["text", "audio"],
+      type: "realtime",
+      model: "gpt-realtime",                  
+      output_modalities: ["audio"],  
       temperature: 0.2,
-      input_audio_transcription: {
-        model: "gpt-4o-mini-transcribe",
+      instructions: SYSTEM_MESSAGE,
+
+      audio: {
+        input: {
+          format: { type: "audio/pcmu", sample_rate_hz: 8000 },
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.6,
+            prefix_padding_ms: 200,
+            silence_duration_ms: 300,
+          },
+        },
+        output: {
+          format: { type: "audio/pcmu", sample_rate_hz: 8000 },
+          voice: REALTIME_VOICE,
+        },
       },
+
+      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
 }
+
 
 export function attachMediaStreamServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
@@ -240,7 +249,18 @@ export function attachMediaStreamServer(server) {
             finalJsonString = JSON.stringify(maybe);
           textBuffer = "";
         }
-
+        if (msg.type === "response.output_audio.delta" && msg.delta) {
+          // msg.delta is already base64 PCMU @ 8kHz
+          connection.send(JSON.stringify({
+            event: "media",
+            streamSid,
+            media: { payload: typeof msg.delta === "string" ? msg.delta : Buffer.from(msg.delta).toString("base64") }
+          }));
+    
+          if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
+          if (msg.item_id) lastAssistantItem = msg.item_id;
+          sendMark();
+        }
         // === NEW: catch the user's completed transcription (Q) ===
         // Structure mirrors your snippet: { type: "conversation.item.input_audio_transcription.completed", transcript: "..." }
         if (
