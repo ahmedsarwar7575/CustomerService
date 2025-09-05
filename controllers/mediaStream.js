@@ -76,6 +76,7 @@ function safeParse(s) {
     return null;
   }
 }
+
 function classifyIssue(t = "") {
   t = t.toLowerCase();
   if (/(bill|payment|invoice|refund|charge|card)/.test(t)) return "billing";
@@ -85,6 +86,7 @@ function classifyIssue(t = "") {
   if (/(support|help|question|how to)/.test(t)) return "support";
   return "other";
 }
+
 function toQAPairs(tr = []) {
   const out = [];
   let q = null;
@@ -102,6 +104,7 @@ function toQAPairs(tr = []) {
   if (q) out.push({ q, a: "" });
   return out;
 }
+
 function createOpenAIWebSocket() {
   if (!OPENAI_API_KEY) console.error("OPENAI_API_KEY missing");
   const url = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
@@ -112,32 +115,18 @@ function createOpenAIWebSocket() {
     },
   });
 }
+
 function buildSessionUpdate() {
   return {
-    type: "session.update",
-    session: {
-      type: "realtime",
-      model: MODEL,
-      output_modalities: ["audio", "text"],
-      temperature: 0.2,
-      instructions: SYSTEM_MESSAGE,
+      type: "session.update",
+      model: "gpt-realtime",
+      output_modalities: ["audio"],
       audio: {
-        input: {
-          format: { type: "audio/pcmu", sample_rate_hz: 8000 },
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.6,
-            prefix_padding_ms: 200,
-            silence_duration_ms: 300,
-          },
-        },
-        output: {
-          format: { type: "audio/pcmu", sample_rate_hz: 8000 },
-          voice: REALTIME_VOICE,
-        },
+          input: { format: { type: 'audio/pcmu' }, turn_detection: { type: "server_vad" } },
+          output: { format: { type: 'audio/pcmu' }, voice: "alloy" },
       },
+      instructions: SYSTEM_MESSAGE,
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
-    },
   };
 }
 
@@ -158,15 +147,16 @@ export function attachMediaStreamServer(server) {
       let pendingUserQ = null;
 
       const openAiWs = createOpenAIWebSocket();
+
       const initializeSession = () => {
         try {
-          const payload = buildSessionUpdate();
-          openAiWs.send(JSON.stringify(payload));
+          openAiWs.send(JSON.stringify(buildSessionUpdate()));
           console.log("session.update sent");
         } catch (e) {
           console.error("session.update error", e);
         }
       };
+
       const handleSpeechStartedEvent = () => {
         if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
           const elapsed = latestMediaTimestamp - responseStartTimestampTwilio;
@@ -189,6 +179,7 @@ export function attachMediaStreamServer(server) {
           responseStartTimestampTwilio = null;
         }
       };
+
       const sendMark = () => {
         if (!streamSid) return;
         try {
@@ -203,14 +194,17 @@ export function attachMediaStreamServer(server) {
         console.log("openai.ws open");
         setTimeout(initializeSession, 100);
       });
+
       openAiWs.on("message", (data) => {
         try {
           const msg = JSON.parse(data);
           if (msg.type === "session.created" || msg.type === "session.updated") console.log("openai.session", msg.type);
           if (msg.type === "error") console.error("openai.error", msg);
+
           if ((msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") && msg.delta) {
             try {
-              connection.send(JSON.stringify({ event: "media", streamSid, media: { payload: typeof msg.delta === "string" ? msg.delta : Buffer.from(msg.delta).toString("base64") } }));
+              const payload = typeof msg.delta === "string" ? msg.delta : Buffer.from(msg.delta).toString("base64");
+              connection.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
               if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
               if (msg.item_id) lastAssistantItem = msg.item_id;
               sendMark();
@@ -218,6 +212,7 @@ export function attachMediaStreamServer(server) {
               console.error("twilio.media send error", e);
             }
           }
+
           if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
             textBuffer += msg.delta;
             if (!finalJsonString && textBuffer.includes('"session"') && textBuffer.includes('"customer"') && textBuffer.trim().startsWith("{")) {
@@ -225,16 +220,19 @@ export function attachMediaStreamServer(server) {
               if (maybe && maybe.session && maybe.customer && maybe.resolution && maybe.satisfaction) finalJsonString = JSON.stringify(maybe);
             }
           }
+
           if (msg.type === "response.output_text.done" && !finalJsonString) {
             const maybe = safeParse(textBuffer);
             if (maybe && maybe.session && maybe.customer) finalJsonString = JSON.stringify(maybe);
             textBuffer = "";
           }
+
           if (msg.type === "conversation.item.input_audio_transcription.completed") {
             const q = (typeof msg.transcript === "string" && msg.transcript.trim()) || (msg.item?.content?.find?.((c) => typeof c?.transcript === "string")?.transcript || "").trim();
             if (q) pendingUserQ = q;
             console.log("user.transcript", q || null);
           }
+
           if (msg.type === "response.done") {
             const outputs = msg.response?.output || [];
             for (const out of outputs) {
@@ -253,6 +251,7 @@ export function attachMediaStreamServer(server) {
               }
             }
           }
+
           if (msg.type === "input_audio_buffer.speech_started") handleSpeechStartedEvent();
           if (msg.type === "input_audio_buffer.speech_stopped") {
             try {
@@ -285,6 +284,9 @@ export function attachMediaStreamServer(server) {
         try {
           const data = JSON.parse(message);
           switch (data.event) {
+            case "connected":
+              console.log("twilio.event connected");
+              break;
             case "start":
               streamSid = data.start.streamSid;
               callSid = data.start.callSid || null;
