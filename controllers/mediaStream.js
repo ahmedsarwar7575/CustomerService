@@ -144,7 +144,6 @@ export function attachMediaStreamServer(server) {
       let streamSid = null;
       let callSid = null;
       let latestMediaTimestamp = 0;
-      let lastAssistantItem = null;
       let markQueue = [];
       let responseStartTimestampTwilio = null;
       let textBuffer = "";
@@ -152,6 +151,7 @@ export function attachMediaStreamServer(server) {
       let printed = false;
       let qaPairs = [];
       let pendingUserQ = null;
+      let hasActiveResponse = false;
 
       const openAiWs = createOpenAIWebSocket();
 
@@ -165,15 +165,12 @@ export function attachMediaStreamServer(server) {
       };
 
       const handleSpeechStartedEvent = () => {
-        if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
-          const elapsed = latestMediaTimestamp - responseStartTimestampTwilio;
-          if (lastAssistantItem) {
-            try {
-              openAiWs.send(JSON.stringify({ type: "conversation.item.truncate", item_id: lastAssistantItem, content_index: 0, audio_end_ms: Math.max(0, elapsed) }));
-              console.log("truncate sent", { item: lastAssistantItem, ms: Math.max(0, elapsed) });
-            } catch (e) {
-              console.error("truncate error", e);
-            }
+        if (markQueue.length > 0) {
+          try {
+            openAiWs.send(JSON.stringify({ type: "response.cancel" }));
+            console.log("response.cancel sent");
+          } catch (e) {
+            console.error("response.cancel error", e);
           }
           try {
             connection.send(JSON.stringify({ event: "clear", streamSid }));
@@ -182,7 +179,6 @@ export function attachMediaStreamServer(server) {
             console.error("twilio.clear error", e);
           }
           markQueue = [];
-          lastAssistantItem = null;
           responseStartTimestampTwilio = null;
         }
       };
@@ -207,19 +203,20 @@ export function attachMediaStreamServer(server) {
           const msg = JSON.parse(data);
           if (msg.type === "session.created" || msg.type === "session.updated") console.log("openai.session", msg.type);
           if (msg.type === "error") console.error("openai.error", msg);
-
+          if (msg.type === "response.created") {
+            hasActiveResponse = true;
+            console.log("openai.response created", { id: msg.response?.id || null });
+          }
           if ((msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") && msg.delta) {
             try {
               const payload = typeof msg.delta === "string" ? msg.delta : Buffer.from(msg.delta).toString("base64");
               connection.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
               if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
-              if (msg.item_id) lastAssistantItem = msg.item_id;
               sendMark();
             } catch (e) {
               console.error("twilio.media send error", e);
             }
           }
-
           if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
             textBuffer += msg.delta;
             if (!finalJsonString && textBuffer.includes('"session"') && textBuffer.includes('"customer"') && textBuffer.trim().startsWith("{")) {
@@ -227,20 +224,18 @@ export function attachMediaStreamServer(server) {
               if (maybe && maybe.session && maybe.customer && maybe.resolution && maybe.satisfaction) finalJsonString = JSON.stringify(maybe);
             }
           }
-
           if (msg.type === "response.output_text.done" && !finalJsonString) {
             const maybe = safeParse(textBuffer);
             if (maybe && maybe.session && maybe.customer) finalJsonString = JSON.stringify(maybe);
             textBuffer = "";
           }
-
           if (msg.type === "conversation.item.input_audio_transcription.completed") {
             const q = (typeof msg.transcript === "string" && msg.transcript.trim()) || (msg.item?.content?.find?.((c) => typeof c?.transcript === "string")?.transcript || "").trim();
             if (q) pendingUserQ = q;
             console.log("user.transcript", q || null);
           }
-
           if (msg.type === "response.done") {
+            hasActiveResponse = false;
             const outputs = msg.response?.output || [];
             for (const out of outputs) {
               if (out?.role === "assistant") {
@@ -258,16 +253,7 @@ export function attachMediaStreamServer(server) {
               }
             }
           }
-
           if (msg.type === "input_audio_buffer.speech_started") handleSpeechStartedEvent();
-          if (msg.type === "input_audio_buffer.speech_stopped") {
-            try {
-              openAiWs.send(JSON.stringify({ type: "response.create" }));
-              console.log("response.create sent");
-            } catch (e) {
-              console.error("response.create error", e);
-            }
-          }
         } catch (e) {
           console.error("openai.message parse error", e, String(data).slice(0, 200));
         }
