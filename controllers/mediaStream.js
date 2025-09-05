@@ -118,15 +118,22 @@ function createOpenAIWebSocket() {
 
 function buildSessionUpdate() {
   return {
-      type: "session.update",
-      model: "gpt-realtime",
-      output_modalities: ["audio"],
-      audio: {
-          input: { format: { type: 'audio/pcmu' }, turn_detection: { type: "server_vad" } },
-          output: { format: { type: 'audio/pcmu' }, voice: "alloy" },
+    type: "session.update",
+    session: {
+      turn_detection: {
+        type: "server_vad",
+        threshold: 0.6,
+        prefix_padding_ms: 200,
+        silence_duration_ms: 300,
       },
+      input_audio_format: "g711_ulaw",
+      output_audio_format: "g711_ulaw",
+      voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
+      modalities: ["text", "audio"],
+      temperature: 0.2,
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+    },
   };
 }
 
