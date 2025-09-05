@@ -409,10 +409,10 @@ ${JSON.stringify(pairs, null, 2)}
       model: "gpt-4o-mini",
       temperature: 0.6,
       max_output_tokens: 1200,
-      text: { format: { type: "json_object" } },
+      response_format: { type: "json_object" },
       input: [
-        { role: "system", content: [{ type: "input_text", text: system }] },
-        { role: "user", content: [{ type: "output_text", text: user }] }
+        { role: "system", content: [{ type: "text", text: system }] },
+        { role: "user", content: [{ type: "input_text", text: user }] }
       ]
     };
 
