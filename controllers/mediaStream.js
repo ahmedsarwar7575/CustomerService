@@ -407,13 +407,13 @@ ${JSON.stringify(pairs, null, 2)}
 
     const payload = {
       model: "gpt-4o-mini",
-      temperature: 0.6,
+      temperature: 0.4,
       max_output_tokens: 1200,
-      response_format: { type: "json_object" },
+      text: { format: { type: "json_object" } },
       input: [
-        { role: "system", content: [{ type: "text", text: system }] },
-        { role: "user", content: [{ type: "input_text", text: user }] }
-      ]
+        { role: "system", content: [{ type: "input_text", text: system }] },
+        { role: "user", content: [{ type: "input_text", text: user }] },
+      ],
     };
 
     const r = await fetch("https://api.openai.com/v1/responses", {
