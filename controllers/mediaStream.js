@@ -79,12 +79,9 @@ function safeParse(s) {
 function classifyIssue(t = "") {
   t = t.toLowerCase();
   if (/(bill|payment|invoice|refund|charge|card)/.test(t)) return "billing";
-  if (/(login|password|verify|otp|lock|unlock|2fa|account)/.test(t))
-    return "account";
-  if (/(bug|error|crash|fail|broken|not working|issue)/.test(t))
-    return "technical";
-  if (/(buy|pricing|quote|plan|subscription|upgrade|downgrade)/.test(t))
-    return "sales";
+  if (/(login|password|verify|otp|lock|unlock|2fa|account)/.test(t)) return "account";
+  if (/(bug|error|crash|fail|broken|not working|issue)/.test(t)) return "technical";
+  if (/(buy|pricing|quote|plan|subscription|upgrade|downgrade)/.test(t)) return "sales";
   if (/(support|help|question|how to)/.test(t)) return "support";
   return "other";
 }
@@ -105,8 +102,8 @@ function toQAPairs(tr = []) {
   if (q) out.push({ q, a: "" });
   return out;
 }
-
 function createOpenAIWebSocket() {
+  if (!OPENAI_API_KEY) console.error("OPENAI_API_KEY missing");
   const url = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
   return new WebSocket(url, {
     headers: {
@@ -120,18 +117,15 @@ function buildSessionUpdate() {
     type: "session.update",
     session: {
       type: "realtime",
-      model: "gpt-4o-realtime-preview-2024-12-17",                       // gpt-4o-realtime-preview-2024-12-17
+      model: MODEL,
       output_modalities: ["audio", "text"],
       temperature: 0.2,
       instructions: SYSTEM_MESSAGE,
-
-      // IMPORTANT: Twilio <Stream> is PCMU 8k. Match it exactly.
       audio: {
         input: {
           format: { type: "audio/pcmu", sample_rate_hz: 8000 },
           turn_detection: {
             type: "server_vad",
-            create_response: true,        // let server auto-create responses
             threshold: 0.6,
             prefix_padding_ms: 200,
             silence_duration_ms: 300,
@@ -139,283 +133,215 @@ function buildSessionUpdate() {
         },
         output: {
           format: { type: "audio/pcmu", sample_rate_hz: 8000 },
-          voice: "alloy",
+          voice: REALTIME_VOICE,
         },
       },
-
-      // keep your live transcription
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
 }
 
-
 export function attachMediaStreamServer(server) {
   try {
-  const wss = new WebSocketServer({ server, path: "/media-stream" });
-  wss.on("connection", (connection) => {
-    let streamSid = null,
-      callSid = null,
-      latestMediaTimestamp = 0,
-      lastAssistantItem = null,
-      markQueue = [],
-      responseStartTimestampTwilio = null,
-      textBuffer = "",
-      finalJsonString = null,
-      printed = false;
+    const wss = new WebSocketServer({ server, path: "/media-stream" });
+    wss.on("connection", (connection) => {
+      let streamSid = null;
+      let callSid = null;
+      let latestMediaTimestamp = 0;
+      let lastAssistantItem = null;
+      let markQueue = [];
+      let responseStartTimestampTwilio = null;
+      let textBuffer = "";
+      let finalJsonString = null;
+      let printed = false;
+      let qaPairs = [];
+      let pendingUserQ = null;
 
-    // NEW: capture Q↔A in real time from specific events
-    let qaPairs = [];
-    let pendingUserQ = null;
-
-    const openAiWs = createOpenAIWebSocket();
-    const initializeSession = () => {
-      openAiWs.send(JSON.stringify(buildSessionUpdate()));
-    };
-    const handleSpeechStartedEvent = () => {
-      if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
-        const elapsed = latestMediaTimestamp - responseStartTimestampTwilio;
-        if (lastAssistantItem) {
-          openAiWs.send(
-            JSON.stringify({
-              type: "conversation.item.truncate",
-              item_id: lastAssistantItem,
-              content_index: 0,
-              audio_end_ms: Math.max(0, elapsed),
-            })
-          );
+      const openAiWs = createOpenAIWebSocket();
+      const initializeSession = () => {
+        try {
+          const payload = buildSessionUpdate();
+          openAiWs.send(JSON.stringify(payload));
+          console.log("session.update sent");
+        } catch (e) {
+          console.error("session.update error", e);
         }
-        connection.send(JSON.stringify({ event: "clear", streamSid }));
-        markQueue = [];
-        lastAssistantItem = null;
-        responseStartTimestampTwilio = null;
-      }
-    };
-    const sendMark = () => {
-      if (!streamSid) return;
-      connection.send(
-        JSON.stringify({
-          event: "mark",
-          streamSid,
-          mark: { name: "responsePart" },
-        })
-      );
-      markQueue.push("responsePart");
-    };
-
-    openAiWs.on("open", () => setTimeout(initializeSession, 100));
-    openAiWs.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data);
-
-        // === audio stream out ===
-        if (msg.type === "response.audio.delta" && msg.delta) {
-          connection.send(
-            JSON.stringify({
-              event: "media",
-              streamSid,
-              media: { payload: msg.delta },
-            })
-          );
-          if (!responseStartTimestampTwilio)
-            responseStartTimestampTwilio = latestMediaTimestamp;
-          if (msg.item_id) lastAssistantItem = msg.item_id;
-          sendMark();
-        }
-
-        // === text stream out (final JSON collection you already had) ===
-        if (
-          msg.type === "response.output_text.delta" &&
-          typeof msg.delta === "string"
-        ) {
-          textBuffer += msg.delta;
-          if (
-            !finalJsonString &&
-            textBuffer.includes('"session"') &&
-            textBuffer.includes('"customer"') &&
-            textBuffer.trim().startsWith("{")
-          ) {
-            const maybe = safeParse(textBuffer);
-            if (
-              maybe &&
-              maybe.session &&
-              maybe.customer &&
-              maybe.resolution &&
-              maybe.satisfaction
-            ) {
-              finalJsonString = JSON.stringify(maybe);
+      };
+      const handleSpeechStartedEvent = () => {
+        if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
+          const elapsed = latestMediaTimestamp - responseStartTimestampTwilio;
+          if (lastAssistantItem) {
+            try {
+              openAiWs.send(JSON.stringify({ type: "conversation.item.truncate", item_id: lastAssistantItem, content_index: 0, audio_end_ms: Math.max(0, elapsed) }));
+              console.log("truncate sent", { item: lastAssistantItem, ms: Math.max(0, elapsed) });
+            } catch (e) {
+              console.error("truncate error", e);
             }
           }
-        }
-        if (msg.type === "response.output_text.done" && !finalJsonString) {
-          const maybe = safeParse(textBuffer);
-          if (maybe && maybe.session && maybe.customer)
-            finalJsonString = JSON.stringify(maybe);
-          textBuffer = "";
-        }
-        if (msg.type === "response.output_audio.delta" && msg.delta) {
-          // msg.delta is already base64 PCMU @ 8kHz
-          connection.send(JSON.stringify({
-            event: "media",
-            streamSid,
-            media: { payload: typeof msg.delta === "string" ? msg.delta : Buffer.from(msg.delta).toString("base64") }
-          }));
-    
-          if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
-          if (msg.item_id) lastAssistantItem = msg.item_id;
-          sendMark();
-        }
-        // === NEW: catch the user's completed transcription (Q) ===
-        // Structure mirrors your snippet: { type: "conversation.item.input_audio_transcription.completed", transcript: "..." }
-        if (
-          msg.type === "conversation.item.input_audio_transcription.completed"
-        ) {
-          const q =
-            (typeof msg.transcript === "string" && msg.transcript.trim()) ||
-            // fallback if the event nests it
-            (
-              msg.item?.content?.find?.(
-                (c) => typeof c?.transcript === "string"
-              )?.transcript || ""
-            ).trim();
-          if (q) {
-            pendingUserQ = q;
+          try {
+            connection.send(JSON.stringify({ event: "clear", streamSid }));
+            console.log("twilio.clear sent");
+          } catch (e) {
+            console.error("twilio.clear error", e);
           }
+          markQueue = [];
+          lastAssistantItem = null;
+          responseStartTimestampTwilio = null;
         }
+      };
+      const sendMark = () => {
+        if (!streamSid) return;
+        try {
+          connection.send(JSON.stringify({ event: "mark", streamSid, mark: { name: "responsePart" } }));
+          markQueue.push("responsePart");
+        } catch (e) {
+          console.error("twilio.mark error", e);
+        }
+      };
 
-        // === NEW: pair with assistant answer when response is done (A) ===
-        // Structure mirrors your snippet: { type: "response.done", response: { output: [...] } }
-        if (msg.type === "response.done") {
-          const outputs = msg.response?.output || [];
-          for (const out of outputs) {
-            if (out?.role === "assistant") {
-              const part =
-                (Array.isArray(out.content) &&
-                  out.content.find(
-                    (c) =>
-                      typeof c?.transcript === "string" && c.transcript.trim()
-                  )) ||
-                null;
-              const a = (part?.transcript || "").trim();
-              if (a) {
-                if (pendingUserQ) {
-                  qaPairs.push({ q: pendingUserQ, a });
-                  pendingUserQ = null;
-                } else {
-                  qaPairs.push({ q: null, a });
+      openAiWs.on("open", () => {
+        console.log("openai.ws open");
+        setTimeout(initializeSession, 100);
+      });
+      openAiWs.on("message", (data) => {
+        try {
+          const msg = JSON.parse(data);
+          if (msg.type === "session.created" || msg.type === "session.updated") console.log("openai.session", msg.type);
+          if (msg.type === "error") console.error("openai.error", msg);
+          if ((msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") && msg.delta) {
+            try {
+              connection.send(JSON.stringify({ event: "media", streamSid, media: { payload: typeof msg.delta === "string" ? msg.delta : Buffer.from(msg.delta).toString("base64") } }));
+              if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
+              if (msg.item_id) lastAssistantItem = msg.item_id;
+              sendMark();
+            } catch (e) {
+              console.error("twilio.media send error", e);
+            }
+          }
+          if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
+            textBuffer += msg.delta;
+            if (!finalJsonString && textBuffer.includes('"session"') && textBuffer.includes('"customer"') && textBuffer.trim().startsWith("{")) {
+              const maybe = safeParse(textBuffer);
+              if (maybe && maybe.session && maybe.customer && maybe.resolution && maybe.satisfaction) finalJsonString = JSON.stringify(maybe);
+            }
+          }
+          if (msg.type === "response.output_text.done" && !finalJsonString) {
+            const maybe = safeParse(textBuffer);
+            if (maybe && maybe.session && maybe.customer) finalJsonString = JSON.stringify(maybe);
+            textBuffer = "";
+          }
+          if (msg.type === "conversation.item.input_audio_transcription.completed") {
+            const q = (typeof msg.transcript === "string" && msg.transcript.trim()) || (msg.item?.content?.find?.((c) => typeof c?.transcript === "string")?.transcript || "").trim();
+            if (q) pendingUserQ = q;
+            console.log("user.transcript", q || null);
+          }
+          if (msg.type === "response.done") {
+            const outputs = msg.response?.output || [];
+            for (const out of outputs) {
+              if (out?.role === "assistant") {
+                const part = Array.isArray(out.content) ? out.content.find((c) => typeof c?.transcript === "string" && c.transcript.trim()) : null;
+                const a = (part?.transcript || "").trim();
+                if (a) {
+                  if (pendingUserQ) {
+                    qaPairs.push({ q: pendingUserQ, a });
+                    pendingUserQ = null;
+                  } else {
+                    qaPairs.push({ q: null, a });
+                  }
+                  console.log("assistant.transcript", a);
                 }
               }
             }
           }
-        }
-
-        if (msg.type === "input_audio_buffer.speech_started")
-          handleSpeechStartedEvent();
-      } catch {
-        // swallow malformed frames
-      }
-    });
-
-    function emitFinalOnce() {
-      if (printed) return;
-
-      // Prefer the live-built qaPairs; otherwise fall back to transcript→pairs
-      const raw = safeParse(finalJsonString) || safeParse(textBuffer) || {};
-      const fallbackPairs = Array.isArray(raw?.transcript)
-        ? toQAPairs(raw.transcript)
-        : [];
-      const pairs = qaPairs.length ? qaPairs : fallbackPairs;
-
-      const name = raw?.customer?.name ?? null;
-      const email = raw?.customer?.email?.normalized ?? null;
-      const summary = raw?.issue?.user_description ?? null;
-      const isIssueResolved = !!raw?.satisfaction?.is_satisfied;
-      const issue = classifyIssue(
-        [raw?.resolution?.escalation_reason, summary].filter(Boolean).join(" ")
-      );
-
-      // Your existing summary log, now with qaPairs included
-      console.log(
-        JSON.stringify({
-          name,
-          email,
-          summary,
-          isIssueResolved,
-          issue,
-          qaPairs: pairs,
-        })
-      );
-
-      // If you *also* want a minimal log of just Q/A array, uncomment:
-      // console.log(JSON.stringify({ qaPairs: pairs }));
-
-      printed = true;
-    }
-
-    connection.on("message", (message) => {
-      try {
-        const data = JSON.parse(message);
-        switch (data.event) {
-          case "start":
-            streamSid = data.start.streamSid;
-            callSid = data.start.callSid || null;
-            responseStartTimestampTwilio = null;
-            latestMediaTimestamp = 0;
-            break;
-          case "media":
-            latestMediaTimestamp =
-              Number(data.media.timestamp) || latestMediaTimestamp;
-            if (openAiWs.readyState === WebSocket.OPEN)
-              openAiWs.send(
-                JSON.stringify({
-                  type: "input_audio_buffer.append",
-                  audio: data.media.payload,
-                })
-              );
-            break;
-          case "mark":
-            if (markQueue.length) markQueue.shift();
-            break;
-          case "stop":
-            // finish audio to OpenAI
-            if (openAiWs.readyState === WebSocket.OPEN) {
-              try {
-                openAiWs.send(
-                  JSON.stringify({ type: "input_audio_buffer.commit" })
-                );
-              } catch {}
-              try {
-                openAiWs.close();
-              } catch {}
+          if (msg.type === "input_audio_buffer.speech_started") handleSpeechStartedEvent();
+          if (msg.type === "input_audio_buffer.speech_stopped") {
+            try {
+              openAiWs.send(JSON.stringify({ type: "response.create" }));
+              console.log("response.create sent");
+            } catch (e) {
+              console.error("response.create error", e);
             }
-            // "Return" Q/A array on stop/close: we print it once here.
-            emitFinalOnce();
-            break;
-          default:
-            break;
+          }
+        } catch (e) {
+          console.error("openai.message parse error", e, String(data).slice(0, 200));
         }
-      } catch {
-        // ignore non-JSON frames
-      }
-    });
+      });
 
-    connection.on("close", () => {
-      if (openAiWs.readyState === WebSocket.OPEN) {
+      function emitFinalOnce() {
+        if (printed) return;
+        const raw = safeParse(finalJsonString) || safeParse(textBuffer) || {};
+        const fallbackPairs = Array.isArray(raw?.transcript) ? toQAPairs(raw.transcript) : [];
+        const pairs = qaPairs.length ? qaPairs : fallbackPairs;
+        const name = raw?.customer?.name ?? null;
+        const email = raw?.customer?.email?.normalized ?? null;
+        const summary = raw?.issue?.user_description ?? null;
+        const isIssueResolved = !!raw?.satisfaction?.is_satisfied;
+        const issue = classifyIssue([raw?.resolution?.escalation_reason, summary].filter(Boolean).join(" "));
+        console.log(JSON.stringify({ name, email, summary, isIssueResolved, issue, qaPairs: pairs }));
+        printed = true;
+      }
+
+      connection.on("message", (message) => {
         try {
-          console.log(
-            JSON.stringify({
-              qaPairs,
-            })
-          );
-          openAiWs.close();
-        } catch {}
-      }
-      // Print the Q/A array (and summary fields) once on socket close as well.
-      emitFinalOnce();
-    });
-  });
+          const data = JSON.parse(message);
+          switch (data.event) {
+            case "start":
+              streamSid = data.start.streamSid;
+              callSid = data.start.callSid || null;
+              responseStartTimestampTwilio = null;
+              latestMediaTimestamp = 0;
+              console.log("twilio.start", { streamSid, callSid });
+              break;
+            case "media":
+              latestMediaTimestamp = Number(data.media.timestamp) || latestMediaTimestamp;
+              if (openAiWs.readyState === WebSocket.OPEN) {
+                try {
+                  openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload }));
+                } catch (e) {
+                  console.error("openai.append error", e);
+                }
+              }
+              break;
+            case "mark":
+              if (markQueue.length) markQueue.shift();
+              break;
+            case "stop":
+              if (openAiWs.readyState === WebSocket.OPEN) {
+                try {
+                  openAiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+                } catch (e) {
+                  console.error("openai.commit error", e);
+                }
+                try {
+                  openAiWs.close();
+                } catch (e) {
+                  console.error("openai.close error", e);
+                }
+              }
+              emitFinalOnce();
+              break;
+            default:
+              console.log("twilio.event", data.event);
+              break;
+          }
+        } catch (e) {
+          console.error("twilio.message parse error", e, String(message).slice(0, 200));
+        }
+      });
 
-} catch (error) {
-    console.error(error);
-}
+      connection.on("close", () => {
+        if (openAiWs.readyState === WebSocket.OPEN) {
+          try {
+            openAiWs.close();
+          } catch (e) {
+            console.error("openai.close error", e);
+          }
+        }
+        console.log(JSON.stringify({ qaPairs }));
+        emitFinalOnce();
+      });
+    });
+  } catch (error) {
+    console.error("attachMediaStreamServer error", error);
+  }
 }
