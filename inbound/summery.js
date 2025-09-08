@@ -3,7 +3,7 @@ import Call from "../models/Call.js";
 import User from "../models/user.js";
 import sequelize from "../config/db.js";
 
-export const summarizer = async (pairs) => {
+export const summarizer = async (pairs, callSid) => {
   try {
     if (!Array.isArray(pairs) || pairs.length === 0) {
       return { error: "no_pairs" };
@@ -182,6 +182,7 @@ export const summarizer = async (pairs) => {
           isResolvedByAi: safe.ticket.isSatisfied,
           languages: safe.non_english_detected,
           summary: safe.summary,
+          callSid: callSid
         },
         { transaction: t }
       );

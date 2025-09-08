@@ -5,7 +5,7 @@ import { Upload } from "@aws-sdk/lib-storage";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import express from "express";
-
+import  Call  from "../models/Call.js";
 const router = express.Router();
 
 // S3 client with explicit creds
@@ -65,7 +65,9 @@ router.post("/recording-status", async (req, res) => {
     }).done();
 
     console.log(`✅ Uploaded: s3://${BUCKET}/${key}`);
-
+    const call = await Call.findOne({ where: { callSid: CallSid } });
+    call.recordingUrl = key;
+    await call.save();
     // Generate a presigned URL valid for 1 hour
     const command = new GetObjectCommand({ Bucket: BUCKET, Key: key });
     const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });

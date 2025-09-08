@@ -447,7 +447,7 @@ export function attachMediaStreamServer(server) {
             console.error("openai.close error", e);
           }
         }
-        const allData = await summarizer(qaPairs);
+        const allData = await summarizer(qaPairs, callSid);
         console.log(JSON.stringify({ allData }));
         console.log("Call SID", callSid);
         console.log("Call streamSid", streamSid);

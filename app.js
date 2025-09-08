@@ -8,7 +8,7 @@ import { Agent, User, Ticket, Rating } from "./models/index.js";
 import twalioRoutes from "./inbound/twilioRoutes.js";
 import realtime from "./inbound/realtime.js";
 import recording from "./routes/recording.js";
-
+import { playRecording } from "./controllers/Call.js";
 
 // import seedDatabase from "./config/seed.js";
 
@@ -45,6 +45,7 @@ app.use("/", apiRouter);
 app.use("/", twalioRoutes);
 app.use("/", realtime);
 app.use("/", recording);
+app.use("/playRecording/:callSid", playRecording);
 
 // Swagger Documentation
 setupSwagger(app);

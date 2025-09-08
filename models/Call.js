@@ -30,6 +30,14 @@ const Call = sequelize.define('Call', {
   summary: {
     type: DataTypes.TEXT,
     defaultValue: ''                // ✅ TEXT should default to string
+  },
+  recordingUrl: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  callSid:{
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'calls',
