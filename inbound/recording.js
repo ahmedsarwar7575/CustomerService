@@ -6,7 +6,7 @@ const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken  = process.env.TWILIO_AUTH_TOKEN;
 const client = twilio(accountSid, authToken);
 
-const CALL_SID = "CA95387ae0247e65f5b9678ce71788fddc";
+const CALL_SID = "CAc75d86c65d0f59e6f1a50417a2c0f48c";
 
 export async function debug() {
   // Fetch the call to confirm account + status

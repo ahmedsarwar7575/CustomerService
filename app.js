@@ -32,7 +32,8 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
-
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static("public"));
@@ -40,11 +41,17 @@ app.use(express.static("public"));
 app.use("/", apiRouter);
 app.use("/", twalioRoutes);
 app.use("/", realtime);
-app.post("/recording-status", (req, res) => {
+router.post("/recording-status", (req, res) => {
+  const { RecordingUrl, RecordingSid, CallSid } = req.body;
   console.log("Recording data:", req.body);
-  // req.body.RecordingUrl gives you the file URL
+
+  if (RecordingUrl) {
+    console.log("🎙️ Recording available:", RecordingUrl + ".mp3");
+  }
+
   res.sendStatus(200);
 });
+
 // Swagger Documentation
 setupSwagger(app);
 
