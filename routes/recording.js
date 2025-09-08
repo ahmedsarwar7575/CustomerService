@@ -7,8 +7,14 @@ import express from "express";
 const router = express.Router();
 
 // Set your region; e.g. "ap-south-1" (Mumbai) or whichever you use
-const REGION = process.env.AWS_REGION || "ap-south-1";
-const s3 = new S3Client({ region: REGION });
+// const REGION = process.env.AWS_REGION || "ap-south-1";
+export const s3 = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+});
 
 // Use your bucket name "customersupport"
 const BUCKET = process.env.AWS_S3_BUCKET || "customersupport";
