@@ -41,7 +41,7 @@ app.use(express.static("public"));
 app.use("/", apiRouter);
 app.use("/", twalioRoutes);
 app.use("/", realtime);
-router.post("/recording-status", (req, res) => {
+app.post("/recording-status", (req, res) => {
   const { RecordingUrl, RecordingSid, CallSid } = req.body;
   console.log("Recording data:", req.body);
 
