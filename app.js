@@ -5,8 +5,8 @@ import apiRouter from "./routes/api.js";
 import setupSwagger from "./config/swagger.js";
 import sequelize from "./config/db.js";
 import { Agent, User, Ticket, Rating } from "./models/index.js";
-import twalioRoutes from "./routes/twilioRoutes.js";
-import realtime from "./routes/realtime.js";
+import twalioRoutes from "./inbound/twilioRoutes.js";
+import realtime from "./inbound/realtime.js";
 // import seedDatabase from "./config/seed.js";
 
 const app = express();
@@ -40,7 +40,11 @@ app.use(express.static("public"));
 app.use("/", apiRouter);
 app.use("/", twalioRoutes);
 app.use("/", realtime);
-
+app.post("/recording-status", (req, res) => {
+  console.log("Recording data:", req.body);
+  // req.body.RecordingUrl gives you the file URL
+  res.sendStatus(200);
+});
 // Swagger Documentation
 setupSwagger(app);
 

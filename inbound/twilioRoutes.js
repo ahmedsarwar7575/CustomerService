@@ -6,12 +6,19 @@ router.all("/incoming-call", (req, res) => {
   const WS_HOST = process.env.WS_HOST || "customerservice-kabe.onrender.com";
   const wsUrl = `wss://${WS_HOST}/media-stream`;
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>Please wait while we connect your call to the A. I. voice assistant.</Say>
-  <Connect>
-    <Stream url="${wsUrl}" />
-  </Connect>
-</Response>`;
+  <Response>
+    <Start>
+      <Record
+        recordingStatusCallback="/recording-status"
+        recordingStatusCallbackEvent="completed"
+      />
+    </Start>
+    <Say>Please wait while we connect your call to the AI assistant.</Say>
+    <Connect>
+      <Stream url="${wsUrl}" />
+    </Connect>
+  </Response>`;
+
   res.type("text/xml").send(twiml);
 });
 
