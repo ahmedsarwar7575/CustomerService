@@ -9,7 +9,7 @@ router.all("/incoming-call", (req, res) => {
   <Response>
     <Start>
       <Record
-        recordingStatusCallback="https://customerservice-kabe.onrender.com/recording-status"
+        recordingStatusCallback="/recording-status"
         recordingStatusCallbackEvent="completed"
       />
     </Start>
