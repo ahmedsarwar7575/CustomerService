@@ -53,22 +53,34 @@ const padOrTrim = (vals, dim) => {
 };
 
 export const semanticSearch = async (query, { topK = Number(process.env.TOPK || 6), minScore = Number(process.env.RAG_MIN_SCORE || 0.6) } = {}) => {
-  console.log(`[RAG] embed: model=${EMBED_MODEL} query="${query}"`);
-  const emb = await openai.embeddings.create({ model: EMBED_MODEL, input: query });
-  const vec = padOrTrim(emb.data[0].embedding, indexDim);
-  console.log(`[RAG] query: topK=${topK} minScore=${minScore} dim=${vec.length}`);
-  const res = await index.query({ topK, vector: vec, includeMetadata: true });
-  const matches = (res?.matches || []).map(m => ({
-    id: m.id,
-    score: m.score,
-    text: String(m.metadata?.text || m.metadata?.chunk_text || m.metadata?.content || m.metadata?.body || "")
-  }));
-  const top3 = matches.slice(0, 3).map(m => ({ id: m.id, score: m.score }));
-  console.log(`[RAG] matches: total=${matches.length} top3=${JSON.stringify(top3)}`);
-  const filtered = matches.filter(m => (m.score ?? 0) >= minScore);
-  console.log(`[RAG] filtered >= ${minScore}: ${filtered.length}`);
-  return { matches, filtered };
-};
+    console.log(`[RAG] embed: model=${EMBED_MODEL} query="${query}"`);
+    const emb = await openai.embeddings.create({ model: EMBED_MODEL, input: query });
+    const vec = padOrTrim(emb.data[0].embedding, indexDim);
+    console.log(`[RAG] query: topK=${topK} minScore=${minScore} dim=${vec.length}`);
+    const res = await index.query({ topK, vector: vec, includeMetadata: true });
+    
+    const matches = (res?.matches || []).map(m => ({
+      id: m.id,
+      score: m.score,
+      text: String(m.metadata?.text || m.metadata?.chunk_text || m.metadata?.content || m.metadata?.body || "")
+    }));
+    
+    // Enhanced debugging
+    console.log(`[RAG] ALL matches (${matches.length}):`);
+    matches.forEach((m, i) => {
+      console.log(`  ${i+1}. Score: ${m.score?.toFixed(3)} | ID: ${m.id} | Text: "${m.text.slice(0, 100)}..."`);
+    });
+    
+    const filtered = matches.filter(m => (m.score ?? 0) >= minScore);
+    console.log(`[RAG] FILTERED >= ${minScore}: ${filtered.length} items`);
+    
+    if (filtered.length === 0 && matches.length > 0) {
+      console.log(`[RAG] WARNING: No matches above threshold! Best score was ${matches[0]?.score?.toFixed(3)}`);
+      console.log(`[RAG] Consider lowering RAG_MIN_SCORE from ${minScore}`);
+    }
+    
+    return { matches, filtered };
+  };
 
 export const buildSnippetsBlock = (query, items) =>
   items.map((m, i) => `● (${i + 1}) id=${m.id} score=${(m.score ?? 0).toFixed(3)}\n${m.text.slice(0, 800)}`).join("\n\n");
