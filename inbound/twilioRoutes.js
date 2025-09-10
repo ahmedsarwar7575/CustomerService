@@ -16,23 +16,6 @@ router.all("/incoming-call", async (req, res) => {
 
   res.type("text/xml").send(twiml);
 
-  // IMPORTANT: Start recording via REST on the live call
-  const callSid =
-    (req.body && req.body.CallSid) || (req.query && req.query.CallSid);
-  if (!callSid) return console.warn("No CallSid in /incoming-call webhook");
-
-  const base = process.env.PUBLIC_BASE_URL; // e.g. https://your-app.onrender.com
-  try {
-    const recording = await req.twilioClient.calls(callSid).recordings.create({
-      recordingStatusCallback: `${base}/recording-status`,
-      recordingStatusCallbackEvent: ["in-progress", "completed", "absent"],
-      recordingChannels: "dual",
-      recordingTrack: "both",
-    });
-    console.log("▶️ started recording:", recording.sid);
-  } catch (e) {
-    console.error("❌ failed to start recording:", e);
-  }
 });
 
 export default router;
