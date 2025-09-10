@@ -2,76 +2,90 @@ import WebSocket, { WebSocketServer } from "ws";
 import { summarizer } from "./summery.js";
 import twilio from "twilio";
 import dotenv from "dotenv";
+import {
+  connectIndex,
+  semanticSearch,
+  buildSnippetsBlock,
+} from "../utils/pinecone.js";
 
 dotenv.config();
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const MODEL = "gpt-4o-realtime-preview-2024-12-17";
 
 const SYSTEM_MESSAGE = `
-Important you have to importanly take name email and phone from user at end of convosation
 ROLE & VOICE
-You are **John Smith**, a friendly, professional **GETPIE** customer service agent for a marketing company.
-Speak **English only**. Keep replies short and natural (1–2 sentences), friendly, calm, and confident—never robotic or salesy. Ask one clear question at a time. If the user speaks another language, reply once: “I’ll continue in English.”
+You are **John Smith**, a friendly, professional **GETPIE** customer support agent for a marketing company.
+Speak **English only**. Keep replies short and natural (1–2 sentences), friendly, calm, and confident—never robotic or salesy. Ask **one** clear question at a time.
+If the user speaks another language, reply once: “I’ll continue in English.”
 
 ABOUT GETPIE (DUMMY DETAILS)
-• We are a full-service marketing company helping SMBs with ads, SEO, content, and analytics.  
-• Support hours: **Mon–Fri 9:00–18:00 ET**, **Sat 10:00–14:00 ET**, closed Sunday.  
-• Phone: **(800) 555-0199**  •  Email: **support@getpie.example**  •  Website: **getpie.example**  
-• SLAs: first response **within 1 business hour** during support hours; most tickets resolved **within 2–3 business days**.  
-• Billing handled via secure links only; **we never take payment over the phone**.  
+• We are a full-service marketing company helping SMBs with ads, SEO, content, and analytics.
+• Support hours: **Mon–Fri 9:00–18:00 ET**, **Sat 10:00–14:00 ET**, closed Sunday.
+• Email: **support@getpie.example** • Website: **getpie.example**
+• SLAs: first response **within 1 business hour** during support hours; most tickets resolved **within 2–3 business days**.
+• Billing handled via secure links only; **we never take payment over the phone**.
 
 FIRST TURN (MANDATORY OPENING; RESUME IF INTERRUPTED)
-Say this in full unless the user is already speaking; if interrupted, pause, answer briefly, and **continue from the next unfinished line**:
-“Hello, this is John Smith with GETPIE Customer Support.  
-Thanks for reaching out to us today. I’m here to listen to your issue and get you a clear solution or next step.”
+Say this in full unless the user is already speaking. If interrupted, pause, answer briefly, then **continue from the next unfinished line**:
+“Hello, this is John Smith with GETPIE Customer Support.
+Thanks for reaching out today. I’m here to listen to your issue and get you a clear solution or next step.”
+After the opening, ask: **“How can I help you today?”**
 
-After the opening (or after resuming to complete it), ask: **“How can I help you today?”**
+RAG INSTRUCTIONS (IF SNIPPETS ARE PROVIDED)
+If you receive a **SNIPPETS** block:
+• Prefer facts from the snippets. If not found, say so briefly and continue the workflow.
+• If you cite, do it naturally (e.g., “from snippet 2”), but keep answers brief.
 
 CONVERSATION WORKFLOW
 1) LISTEN
-   - Let the user explain. Acknowledge in 1 sentence, then clarify with **one** focused question at a time until the issue is clear.
+   • Let the user explain. Acknowledge in 1 sentence, then clarify with **one** focused question at a time until the issue is clear.
 
 2) PROPOSE A SOLUTION
-   - Give a concise, actionable plan (1–3 short sentences). If needed, offer options (self-serve steps, assign to specialist, schedule callback, or escalate).
+   • Give a concise, actionable plan (1–3 short sentences). If useful, offer options (self-serve steps, assign to specialist, schedule callback, or escalate).
 
-3) IMPORTANT REMINDERS
-    Always collect **contact details** for follow-up.
-   - Natural tone, keep it brief:
-     • “We never take payments over the phone—only secure links from billing@getpie.example.”  
-     • Expected timelines (SLA above).  
-     • Availability (support hours above).  
+3) REMINDERS (BRIEF)
+   • “We never take payments over the phone—only secure links from billing@getpie.example.”
+   • Set expectations (SLA + support hours) when relevant.
 
-4) COLLECT & VERIFY CONTACT DETAILS (ONE AT A TIME) (important)
-   - Ask for **full name** → reflect/confirm.  
-   - Ask for **email** → reflect/confirm and spell back if unclear.  
-   - Ask for **phone** → reflect/confirm with digits.  
-   - Classify **Ticket Type** from context or by asking if unclear: **support**, **sales**, or **billing**. Confirm the chosen type.
+4) CONTACT DETAILS (MANDATORY; ONE AT A TIME)
+   • You **must** collect and confirm **full name** and **email** before closing the conversation.
+   • **Never ask for phone**. If the user offers a phone number, politely decline: “Email is enough for now.”
+   • Steps:
+     – Ask for **full name** → reflect/confirm.
+     – Ask for **email** → reflect/confirm and spell back if unclear.
+   • If the user refuses to share email, proceed but note: “email not provided”.
 
-5) SATISFACTION CHECK & NEXT STEPS
-   - Ask: “Are you satisfied with this solution, or would you like more support?”  
-   - If more support: propose the next concrete step (e.g., create ticket, schedule callback, or escalate).
+5) CLASSIFY TICKET TYPE
+   • Determine **support**, **sales**, or **billing** from context. If unclear, ask one brief question.
+   • Confirm the chosen type.
+
+6) SATISFACTION CHECK & NEXT STEPS
+   • Ask: “Are you satisfied with this solution, or would you like more support?”
+   • If more support: propose the next concrete step (create ticket, schedule callback, or escalate).
 
 NATURAL Q&A DURING FLOW
-- User can ask questions anytime. Answer briefly (1–2 sentences), then **return to the current step** and continue.
-- If off-topic twice: “Let’s wrap this support request, then I’ll help route other questions.”
+• The user may ask questions anytime. Answer briefly (1–2 sentences), then **return to the current step** and continue.
+• If off-topic twice: “Let’s wrap this support request, then I’ll help route other questions.”
 
 BEHAVIORAL GUARDRAILS
-- English only; brief and human.  
-- Don’t provide legal/financial/tax advice.  
-- Always track **current_step** and **last_completed_line**; after side questions, resume from the next line.  
-- If user seems confused, give a one-sentence recap and proceed.
+• English only. Be brief and human.
+• Do not provide legal/financial/tax advice.
+• **Never collect phone numbers.** Do not ask for payment info. Remind that payments are via secure links only.
+• Track **current_step** and **last_completed_line**; after side questions, resume properly.
+• If the user seems confused, give a one-sentence recap and proceed.
 
 MICRO-REPLY EXAMPLES (TONE CHECK)
-- “Thanks for the details—I can help with that.”  
-- “Got it—ads performance dropped after the update. Is that correct?”  
-- “Here’s the plan: we’ll audit the campaign, revert risky changes, and send you a report within 2 business days.”  
-- “Please share your best email so we can send updates.”  
-- “Great—last question: are you satisfied with this solution, or do you need more support?”
+• “Thanks for the details—I can help with that.”
+• “Got it—ads performance dropped after the update. Is that correct?”
+• “Here’s the plan: we’ll audit the campaign and send a report within 2 business days.”
+• “What’s your full name so I can note it?” / “Thanks, and what’s the best email for updates?”
+• “Great—last question: are you satisfied with this solution, or do you need more support?”
 
 OUTPUT STYLE
-- Keep turns short (1–2 sentences) except the **mandatory opening**, which must be delivered fully (with resume on interruption).  
-- Ask and confirm each detail right after the answer.  
-- Stay on topic; be warm and human.
+• Keep turns short (1–2 sentences) except the **mandatory opening**.
+• Ask and confirm each detail right after the answer.
+• Stay on topic; be warm and human.
+• Before ending, ensure **name and email are collected**. If not, ask for them. If refused, note it clearly and proceed.
 `;
 
 function safeParse(s) {
@@ -145,6 +159,8 @@ function buildSessionUpdate() {
   };
 }
 
+await connectIndex();
+
 export function attachMediaStreamServer(server) {
   try {
     const wss = new WebSocketServer({ server, path: "/media-stream" });
@@ -160,13 +176,14 @@ export function attachMediaStreamServer(server) {
       let qaPairs = [];
       let pendingUserQ = null;
       let hasActiveResponse = false;
+      let lastRagItemId = null;
+      let ragItemPending = false;
 
       const openAiWs = createOpenAIWebSocket();
 
       const initializeSession = () => {
         try {
           openAiWs.send(JSON.stringify(buildSessionUpdate()));
-          // console.log("session.update sent");
         } catch (e) {
           console.error("session.update error", e);
         }
@@ -176,13 +193,11 @@ export function attachMediaStreamServer(server) {
         if (markQueue.length > 0) {
           try {
             openAiWs.send(JSON.stringify({ type: "response.cancel" }));
-            // console.log("response.cancel sent");
           } catch (e) {
             console.error("response.cancel error", e);
           }
           try {
             connection.send(JSON.stringify({ event: "clear", streamSid }));
-            // console.log("twilio.clear sent");
           } catch (e) {
             console.error("twilio.clear error", e);
           }
@@ -208,22 +223,23 @@ export function attachMediaStreamServer(server) {
       };
 
       openAiWs.on("open", () => {
-        // console.log("openai.ws open");
         setTimeout(initializeSession, 100);
       });
 
-      openAiWs.on("message", (data) => {
+      openAiWs.on("message", async (data) => {
         try {
           const msg = JSON.parse(data);
-          if (msg.type === "session.created" || msg.type === "session.updated")
-            console.log("openai.session", msg.type);
-          if (msg.type === "error") console.error("openai.error", msg);
+
+          if (msg.type === "conversation.item.created" && ragItemPending) {
+            lastRagItemId = msg.item?.id || null;
+            ragItemPending = false;
+          }
+
           if (msg.type === "response.created") {
             hasActiveResponse = true;
-            console.log("openai.response created", {
-              id: msg.response?.id || null,
-            });
           }
+          if (msg.type === "error") console.error("openai.error", msg);
+
           if (
             (msg.type === "response.audio.delta" ||
               msg.type === "response.output_audio.delta") &&
@@ -248,6 +264,7 @@ export function attachMediaStreamServer(server) {
               console.error("twilio.media send error", e);
             }
           }
+
           if (
             msg.type === "response.output_text.delta" &&
             typeof msg.delta === "string"
@@ -270,12 +287,14 @@ export function attachMediaStreamServer(server) {
                 finalJsonString = JSON.stringify(maybe);
             }
           }
+
           if (msg.type === "response.output_text.done" && !finalJsonString) {
             const maybe = safeParse(textBuffer);
             if (maybe && maybe.session && maybe.customer)
               finalJsonString = JSON.stringify(maybe);
             textBuffer = "";
           }
+
           if (
             msg.type === "conversation.item.input_audio_transcription.completed"
           ) {
@@ -287,21 +306,68 @@ export function attachMediaStreamServer(server) {
                 )?.transcript || ""
               ).trim();
             if (q) pendingUserQ = q;
-            // console.log("user.transcript", q || null);
           }
+
           if (
             msg.type === "input_audio_buffer.speech_stopped" &&
             !hasActiveResponse
           ) {
             try {
+              const q = (pendingUserQ || "").trim();
+              if (q) {
+                try {
+                  const minScore = Number(process.env.RAG_MIN_SCORE || 0.6);
+                  const topK = Number(process.env.TOPK || 6);
+                  const items = await semanticSearch(q, { topK, minScore });
+                  if (items.length) {
+                    const block = buildSnippetsBlock(q, items);
+                    ragItemPending = true;
+                    openAiWs.send(
+                      JSON.stringify({
+                        type: "conversation.item.create",
+                        item: {
+                          type: "message",
+                          role: "system",
+                          content: [
+                            {
+                              type: "input_text",
+                              text: [
+                                "Use these KB snippets briefly. If not relevant, say so and continue the workflow.",
+                                "",
+                                "### SNIPPETS",
+                                block,
+                                "",
+                                `### USER QUESTION\n${q}`,
+                              ].join("\n"),
+                            },
+                          ],
+                        },
+                      })
+                    );
+                  }
+                } catch (e) {
+                  console.error("RAG retrieval failed:", e);
+                }
+              }
               openAiWs.send(JSON.stringify({ type: "response.create" }));
-              // console.log("response.create sent");
             } catch (e) {
               console.error("response.create error", e);
             }
           }
+
           if (msg.type === "response.done") {
             hasActiveResponse = false;
+            if (lastRagItemId) {
+              try {
+                openAiWs.send(
+                  JSON.stringify({
+                    type: "conversation.item.delete",
+                    item_id: lastRagItemId,
+                  })
+                );
+              } catch {}
+              lastRagItemId = null;
+            }
             const outputs = msg.response?.output || [];
             for (const out of outputs) {
               if (out?.role === "assistant") {
@@ -319,11 +385,11 @@ export function attachMediaStreamServer(server) {
                   } else {
                     qaPairs.push({ q: null, a });
                   }
-                  // console.log("assistant.transcript", a);
                 }
               }
             }
           }
+
           if (msg.type === "input_audio_buffer.speech_started")
             handleSpeechStartedEvent();
         } catch (e) {
@@ -351,16 +417,15 @@ export function attachMediaStreamServer(server) {
             .filter(Boolean)
             .join(" ")
         );
-        // console.log(JSON.stringify({ name, email, summary, isIssueResolved, issue, qaPairs: pairs }));
         printed = true;
       }
+
       const started = new Set();
       connection.on("message", async (message) => {
         try {
           const data = JSON.parse(message);
           switch (data.event) {
             case "connected":
-              console.log("twilio.event connected");
               break;
             case "start":
               streamSid = data.start.streamSid;
@@ -373,7 +438,7 @@ export function attachMediaStreamServer(server) {
               const client = twilio(accountSid, authToken);
               try {
                 const rec = await client.calls(callSid).recordings.create({
-                  recordingStatusCallback: `${base}/recording-status`, // MUST be a full https URL
+                  recordingStatusCallback: `${base}/recording-status`,
                   recordingStatusCallbackEvent: [
                     "in-progress",
                     "completed",
@@ -388,7 +453,6 @@ export function attachMediaStreamServer(server) {
               }
               responseStartTimestampTwilio = null;
               latestMediaTimestamp = 0;
-              // console.log("twilio.start", { streamSid, callSid });
               break;
             case "media":
               latestMediaTimestamp =
@@ -427,7 +491,6 @@ export function attachMediaStreamServer(server) {
               emitFinalOnce();
               break;
             default:
-              // console.log("twilio.event", data.event);
               break;
           }
         } catch (e) {
