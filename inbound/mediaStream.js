@@ -8,34 +8,28 @@ dotenv.config();
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const MODEL = "gpt-4o-realtime-preview-2024-12-17";
 
-// const SYSTEM_MESSAGE = `
-// ROLE
-// You are John Smith, a friendly, professional GETPIE customer support agent.
-
-// STYLE
-// English only. Short, natural replies (1–2 sentences). One clear question at a time. Warm, calm, confident.
-
-// STRICT RAG
-// Only answer with facts found in the provided SNIPPETS. If no relevant snippet exists, say: "That isn't in our knowledge base yet." Then continue the workflow (clarify, offer next steps). Do not invent or assume facts.
-
-// WORKFLOW
-// 1) Listen → acknowledge briefly → ask one focused question until clear.
-// 2) Propose a concise plan (1–3 short sentences). Offer options if useful.
-// 3) Always collect and confirm full name and email before ending. Never ask for phone. If offered, politely decline.
-// 4) Classify ticket: support / sales / billing (ask once if unclear). Confirm.
-// 5) End: “Are you satisfied with this solution, or would you like more support?” If more, propose next step.
-
-// FIRST TURN
-// “Hello, this is John Smith with GETPIE Customer Support. Thanks for reaching out today. I’m here to listen to your issue and get you a clear solution or next step.”
-// Then ask: “How can I help you today?”
-// `;
 const SYSTEM_MESSAGE = `
-You are John Smith from GETPIE Customer Support.
-CRITICAL: You can ONLY answer questions using information that will be provided to you in SNIPPETS sections.
-If you receive a message with "SNIPPETS:", you MUST base your entire response on those snippets.
-If no snippets are provided, you MUST say: "I need to look that up in our GETPIE knowledge base. Can you be more specific about what you're looking for?"
-NEVER use your general AI knowledge about any topic - only use provided SNIPPETS.
+ROLE
+You are John Smith, a friendly, professional GETPIE customer support agent.
+
+STYLE
+English only. Short, natural replies (1–2 sentences). One clear question at a time. Warm, calm, confident.
+
+STRICT RAG
+Only answer with facts found in the provided SNIPPETS. If no relevant snippet exists for this turn, you must say: "That isn't in our knowledge base yet." Then continue the workflow (clarify, offer next steps). Do not invent or assume facts.
+
+WORKFLOW
+1) Listen → acknowledge briefly → ask one focused question until clear.
+2) Propose a concise plan (1–3 short sentences). Offer options if useful.
+3) Always collect and confirm full name and email before ending. Never ask for phone. If offered, politely decline.
+4) Classify ticket: support / sales / billing (ask once if unclear). Confirm.
+5) End: “Are you satisfied with this solution, or would you like more support?” If more, propose next step.
+
+FIRST TURN
+“Hello, this is John Smith with GETPIE Customer Support. Thanks for reaching out today. I’m here to listen to your issue and get you a clear solution or next step.”
+Then ask: “How can I help you today?”
 `;
+
 function safeParse(s) { try { return JSON.parse((s || "").trim()); } catch { return null; } }
 
 function classifyIssue(t = "") {
@@ -62,9 +56,7 @@ function createOpenAIWebSocket() {
   if (!OPENAI_API_KEY) console.error("[OPENAI] OPENAI_API_KEY missing");
   const url = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
   console.log(`[OPENAI] connect: ${url}`);
-  return new WebSocket(url, {
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" },
-  });
+  return new WebSocket(url, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" } });
 }
 
 function buildSessionUpdate() {
@@ -77,16 +69,12 @@ function buildSessionUpdate() {
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.7,
-      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+      temperature: 0.2
     },
   };
 }
 
-await connectIndex().catch(e => {
-  console.error("[PINECONE] connect error", e);
-  process.exit(1);
-});
+await connectIndex().catch(e => { console.error("[PINECONE] connect error", e); process.exit(1); });
 
 export function attachMediaStreamServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
@@ -111,13 +99,8 @@ export function attachMediaStreamServer(server) {
     const openAiWs = createOpenAIWebSocket();
 
     const initializeSession = () => {
-      try {
-        const payload = JSON.stringify(buildSessionUpdate());
-        openAiWs.send(payload);
-        console.log("[OPENAI] session.update sent");
-      } catch (e) {
-        console.error("[OPENAI] session.update error", e);
-      }
+      try { openAiWs.send(JSON.stringify(buildSessionUpdate())); console.log("[OPENAI] session.update sent"); }
+      catch (e) { console.error("[OPENAI] session.update error", e); }
     };
 
     const handleSpeechStartedEvent = () => {
@@ -131,14 +114,11 @@ export function attachMediaStreamServer(server) {
 
     const sendMark = () => {
       if (!streamSid) return;
-      try {
-        connection.send(JSON.stringify({ event: "mark", streamSid, mark: { name: "responsePart" } }));
-        markQueue.push("responsePart");
-      } catch (e) { console.error("[TWILIO] mark error", e); }
+      try { connection.send(JSON.stringify({ event: "mark", streamSid, mark: { name: "responsePart" } })); markQueue.push("responsePart"); }
+      catch (e) { console.error("[TWILIO] mark error", e); }
     };
 
     openAiWs.on("open", () => { console.log("[OPENAI] WS open"); setTimeout(initializeSession, 100); });
-
     openAiWs.on("close", (c, r) => { console.log("[OPENAI] WS closed", c, r?.toString()); });
     openAiWs.on("error", (e) => { console.error("[OPENAI] WS error", e); });
 
@@ -150,7 +130,12 @@ export function attachMediaStreamServer(server) {
       if (msg.type === "session.updated") console.log("[OPENAI] session.updated");
       if (msg.type === "error") console.error("[OPENAI] error", msg);
       if (msg.type === "response.created") { hasActiveResponse = true; console.log("[OPENAI] response.created", msg.response?.id || null); }
-      if (msg.type === "conversation.item.created" && ragItemPending) { lastRagItemId = msg.item?.id || null; ragItemPending = false; console.log("[RAG] snippet item created", lastRagItemId); }
+
+      if (msg.type === "conversation.item.created" && ragItemPending) {
+        lastRagItemId = msg.item?.id || null;
+        ragItemPending = false;
+        console.log("[RAG] guard/snippets item created", lastRagItemId);
+      }
 
       if ((msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") && msg.delta) {
         try {
@@ -161,9 +146,7 @@ export function attachMediaStreamServer(server) {
         } catch (e) { console.error("[TWILIO] media send error", e); }
       }
 
-      if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
-        textBuffer += msg.delta;
-      }
+      if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") textBuffer += msg.delta;
 
       if (msg.type === "response.output_text.done" && !finalJsonString) {
         const maybe = safeParse(textBuffer);
@@ -182,34 +165,54 @@ export function attachMediaStreamServer(server) {
         try {
           const q = (pendingUserQ || "").trim();
           console.log("[TURN] speech_stopped; pendingUserQ=", q || "(none)");
+          let injectedSomething = false;
+
           if (q) {
             try {
               const minScore = Number(process.env.RAG_MIN_SCORE || 0.6);
               const topK = Number(process.env.TOPK || 6);
-              const { filtered, matches } = await semanticSearch(q, { topK, minScore });
+              const { filtered } = await semanticSearch(q, { topK, minScore });
+
               if (filtered.length) {
                 const block = buildSnippetsBlock(q, filtered);
                 ragItemPending = true;
+                injectedSomething = true;
                 openAiWs.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: { type: "message", role: "system", content: [{ type: "input_text", text: `### SNIPPETS\n${block}\n\n### USER QUESTION\n${q}` }] }
                 }));
                 console.log(`[RAG] injected ${filtered.length} snippets`);
               } else {
-                console.log("[RAG] no snippets >= minScore; will answer with strict fallback");
-                ragItemPending = false;
+                ragItemPending = true;
+                injectedSomething = true;
+                openAiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{ type: "input_text", text:
+                      `### NO_SNIPPETS_GUARD
+No relevant knowledge base snippets were found for this turn.
+You must respond: "That isn't in our knowledge base yet." Then continue the workflow:
+• Ask one concise clarifying question or
+• Offer the next step (create ticket, escalate, or share our support email).
+Never invent facts. Keep replies 1–2 sentences.` }]
+                  }
+                }));
+                console.log("[RAG] injected NO_SNIPPETS_GUARD");
               }
             } catch (e) { console.error("[RAG] retrieval failed", e); }
           }
+
           openAiWs.send(JSON.stringify({ type: "response.create" }));
-          console.log("[OPENAI] response.create sent");
+          console.log("[OPENAI] response.create sent (injected=", injectedSomething, ")");
         } catch (e) { console.error("[OPENAI] response.create error", e); }
       }
 
       if (msg.type === "response.done") {
         hasActiveResponse = false;
         if (lastRagItemId) {
-          try { openAiWs.send(JSON.stringify({ type: "conversation.item.delete", item_id: lastRagItemId })); console.log("[RAG] snippet item deleted"); }
+          try { openAiWs.send(JSON.stringify({ type: "conversation.item.delete", item_id: lastRagItemId })); console.log("[RAG] guard/snippets item deleted"); }
           catch (e) { console.error("[RAG] snippet delete error", e); }
           lastRagItemId = null;
         }
@@ -234,8 +237,6 @@ export function attachMediaStreamServer(server) {
     });
 
     const started = new Set();
-
-    wss.clients && console.log(`[WS] active clients: ${wss.clients.size}`);
 
     connection.on("message", async (message) => {
       let data;
@@ -269,9 +270,8 @@ export function attachMediaStreamServer(server) {
         case "media":
           latestMediaTimestamp = Number(data.media.timestamp) || latestMediaTimestamp;
           if (openAiWs.readyState === WebSocket.OPEN) {
-            try {
-              openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload }));
-            } catch (e) { console.error("[OPENAI] append error", e); }
+            try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload })); }
+            catch (e) { console.error("[OPENAI] append error", e); }
           }
           break;
         case "mark":
