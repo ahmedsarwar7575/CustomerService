@@ -31,6 +31,13 @@ FIRST TURN
 Then ask: “How can I help you today?”
 `;
 
+const jlog = (event, payload = {}) => {
+  try { console.log(JSON.stringify({ ts: Date.now(), event, payload })); } catch {}
+};
+const jerr = (where, e) => {
+  console.error(JSON.stringify({ ts: Date.now(), event: "error", where, message: e?.message || String(e) }));
+};
+
 function safeParse(s) { try { return JSON.parse((s || "").trim()); } catch { return null; } }
 
 function classifyIssue(t = "") {
@@ -54,12 +61,12 @@ function toQAPairs(tr = []) {
 }
 
 function createOpenAIWebSocket() {
-  if (!OPENAI_API_KEY) console.error("[OPENAI] OPENAI_API_KEY missing");
-  const url = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
-  console.log(`[OPENAI] connect: ${url}`);
-  return new WebSocket(url, {
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" },
-  });
+  try {
+    const url = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
+    return new WebSocket(url, {
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" },
+    });
+  } catch (e) { jerr("openai.ws.create", e); throw e; }
 }
 
 function buildSessionUpdate() {
@@ -68,7 +75,7 @@ function buildSessionUpdate() {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.5,
+        threshold: 0.7,
         prefix_padding_ms: 300,
         silence_duration_ms: 800,
       },
@@ -77,8 +84,8 @@ function buildSessionUpdate() {
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.8,
-      input_audio_transcription: { model: "whisper-1" },
+      temperature: 0.2,
+      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
 }
@@ -90,14 +97,12 @@ function b64(x) {
   try { return Buffer.from(x).toString("base64"); } catch { return ""; }
 }
 
-await connectIndex().catch(e => { console.error("[PINECONE] connect error", e); process.exit(1); });
+await connectIndex().catch(e => { jerr("pinecone.connectIndex", e); process.exit(1); });
 
 export function attachMediaStreamServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
-  console.log("[WS] /media-stream listening");
 
   wss.on("connection", (connection) => {
-    console.log("[WS] connection opened]");
     let streamSid = null;
     let callSid = null;
     let latestMediaTimestamp = 0;
@@ -117,26 +122,17 @@ export function attachMediaStreamServer(server) {
     const initializeSession = () => {
       try {
         openAiWs.send(JSON.stringify(buildSessionUpdate()));
-        console.log("[OPENAI] session.update sent");
         setTimeout(() => {
-          try {
-            openAiWs.send(JSON.stringify({ type: "response.create" }));
-            console.log("[OPENAI] response.create (greeting) sent");
-          } catch (e) {
-            console.error("[OPENAI] response.create greeting error", e);
-          }
+          try { openAiWs.send(JSON.stringify({ type: "response.create" })); }
+          catch (e) { jerr("openai.response.create.greeting", e); }
         }, 150);
-      } catch (e) {
-        console.error("[OPENAI] session.update error", e);
-      }
+      } catch (e) { jerr("openai.session.update", e); }
     };
 
     const handleSpeechStartedEvent = () => {
       if (markQueue.length > 0) {
-        try { openAiWs.send(JSON.stringify({ type: "response.cancel" })); console.log("[OPENAI] response.cancel"); }
-        catch (e) { console.error("[OPENAI] response.cancel error", e); }
-        try { connection.send(JSON.stringify({ event: "clear", streamSid })); console.log("[TWILIO] clear sent"); }
-        catch (e) { console.error("[TWILIO] clear error", e); }
+        try { openAiWs.send(JSON.stringify({ type: "response.cancel" })); } catch (e) { jerr("openai.response.cancel", e); }
+        try { connection.send(JSON.stringify({ event: "clear", streamSid })); } catch (e) { jerr("twilio.clear", e); }
         markQueue = [];
         responseStartTimestampTwilio = null;
       }
@@ -147,33 +143,22 @@ export function attachMediaStreamServer(server) {
       try {
         connection.send(JSON.stringify({ event: "mark", streamSid, mark: { name: "responsePart" } }));
         markQueue.push("responsePart");
-      } catch (e) { console.error("[TWILIO] mark error", e); }
+      } catch (e) { jerr("twilio.mark", e); }
     };
 
-    openAiWs.on("open", () => { console.log("[OPENAI] WS open"); setTimeout(initializeSession, 100); });
-    openAiWs.on("close", (c, r) => { console.log("[OPENAI] WS closed", c, r?.toString()); });
-    openAiWs.on("error", (e) => { console.error("[OPENAI] WS error", e); });
+    openAiWs.on("open", () => { setTimeout(initializeSession, 100); });
+    openAiWs.on("close", () => {});
+    openAiWs.on("error", (e) => { jerr("openai.ws", e); });
 
     openAiWs.on("message", async (data) => {
       let msg;
-      try { msg = JSON.parse(data); } catch (e) {
-        console.error("[OPENAI] parse error", e, String(data).slice(0, 120));
-        return;
-      }
+      try { msg = JSON.parse(data); } catch (e) { jerr("openai.parse", e); return; }
 
-      if (msg.type === "session.created") console.log("[OPENAI] session.created");
-      if (msg.type === "session.updated") console.log("[OPENAI] session.updated");
-      if (msg.type === "error") console.error("[OPENAI] error", msg);
-
-      if (msg.type === "response.created") {
-        hasActiveResponse = true;
-        console.log("[OPENAI] response.created", msg.response?.id || null);
-      }
+      if (msg.type === "response.created") { hasActiveResponse = true; }
 
       if (msg.type === "conversation.item.created" && awaitingInjectedAck && msg.item?.metadata?.rag_injected) {
         lastInjectedItemId = msg.item.id;
         awaitingInjectedAck = false;
-        console.log("[RAG] injected item ack", lastInjectedItemId);
       }
 
       if ((msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") && msg.delta) {
@@ -184,7 +169,7 @@ export function attachMediaStreamServer(server) {
             if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
             sendMark();
           }
-        } catch (e) { console.error("[TWILIO] media send error", e); }
+        } catch (e) { jerr("twilio.media.send", e); }
       }
 
       if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
@@ -201,25 +186,34 @@ export function attachMediaStreamServer(server) {
         const q =
           (typeof msg.transcript === "string" && msg.transcript.trim()) ||
           (msg.item?.content?.find?.((c) => typeof c?.transcript === "string")?.transcript || "").trim();
-        if (q) { pendingUserQ = q; console.log(`[ASR] user: "${q}"`); }
+        if (q) pendingUserQ = q;
       }
 
       if (msg.type === "input_audio_buffer.speech_started") {
-        console.log("[TURN] speech_started");
         handleSpeechStartedEvent();
       }
 
       if (msg.type === "input_audio_buffer.speech_stopped" && !hasActiveResponse) {
         try {
           const q = (pendingUserQ || "").trim();
-          console.log("[TURN] speech_stopped; pendingUserQ=", q || "(none)");
           let injected = false;
 
           if (q) {
+            jlog("question", { text: q });
             try {
               const minScore = Number(process.env.RAG_MIN_SCORE || 0.6);
               const topK = Number(process.env.TOPK || 6);
               const results = await semanticSearch(q, { topK, minScore });
+
+              jlog("retrieval", {
+                query: q,
+                count: results.length,
+                items: results.map(r => ({
+                  id: r.id,
+                  score: Number(r.score?.toFixed ? r.score.toFixed(3) : r.score),
+                  preview: r.text.slice(0, 500)
+                }))
+              });
 
               if (results.length) {
                 const block = buildSnippetsBlock(q, results);
@@ -233,7 +227,6 @@ export function attachMediaStreamServer(server) {
                     metadata: { rag_injected: true }
                   }
                 }));
-                console.log(`[RAG] injected ${results.length} snippets`);
               } else {
                 awaitingInjectedAck = true; injected = true;
                 openAiWs.send(JSON.stringify({
@@ -251,21 +244,19 @@ Never invent facts. Keep replies 1–2 sentences.` }],
                     metadata: { rag_injected: true }
                   }
                 }));
-                console.log("[RAG] injected NO_SNIPPETS_GUARD");
               }
-            } catch (e) { console.error("[RAG] retrieval failed", e); }
+            } catch (e) { jerr("rag.retrieval", e); }
           }
 
           openAiWs.send(JSON.stringify({ type: "response.create" }));
-          console.log("[OPENAI] response.create sent (injected=", injected, ")");
-        } catch (e) { console.error("[OPENAI] response.create error", e); }
+        } catch (e) { jerr("openai.response.create", e); }
       }
 
       if (msg.type === "response.done") {
         hasActiveResponse = false;
         if (lastInjectedItemId) {
-          try { openAiWs.send(JSON.stringify({ type: "conversation.item.delete", item_id: lastInjectedItemId })); console.log("[RAG] injected item deleted"); }
-          catch (e) { console.error("[RAG] injected item delete error", e); }
+          try { openAiWs.send(JSON.stringify({ type: "conversation.item.delete", item_id: lastInjectedItemId })); }
+          catch (e) { jerr("openai.item.delete", e); }
           lastInjectedItemId = null;
         }
         const outputs = msg.response?.output || [];
@@ -274,9 +265,7 @@ Never invent facts. Keep replies 1–2 sentences.` }],
             const part = Array.isArray(out.content) ? out.content.find((c) => typeof c?.transcript === "string" && c.transcript.trim()) : null;
             const a = (part?.transcript || "").trim();
             if (a) {
-              if (pendingUserQ) { qaPairs.push({ q: pendingUserQ, a }); pendingUserQ = null; }
-              else { qaPairs.push({ q: null, a }); }
-              console.log("[ASSISTANT]", a);
+              jlog("answer", { text: a });
             }
           }
         }
@@ -287,15 +276,13 @@ Never invent facts. Keep replies 1–2 sentences.` }],
 
     connection.on("message", async (message) => {
       let data;
-      try { data = JSON.parse(message); } catch (e) { console.error("[WS] parse error", e, String(message).slice(0, 160)); return; }
+      try { data = JSON.parse(message); } catch (e) { jerr("ws.parse", e); return; }
       switch (data.event) {
         case "connected":
-          console.log("[TWILIO] connected");
           break;
         case "start":
           streamSid = data.start.streamSid;
           callSid = data.start.callSid || null;
-          console.log("[TWILIO] start streamSid=", streamSid, "callSid=", callSid);
           if (!callSid || started.has(callSid)) return;
           started.add(callSid);
           const base = process.env.PUBLIC_BASE_URL;
@@ -303,14 +290,13 @@ Never invent facts. Keep replies 1–2 sentences.` }],
           const authToken = process.env.TWILIO_AUTH_TOKEN;
           const client = twilio(accountSid, authToken);
           try {
-            const rec = await client.calls(callSid).recordings.create({
+            await client.calls(callSid).recordings.create({
               recordingStatusCallback: `${base}/recording-status`,
               recordingStatusCallbackEvent: ["in-progress", "completed", "absent"],
               recordingChannels: "dual",
               recordingTrack: "both",
             });
-            console.log("▶️ recording started:", rec.sid);
-          } catch (e) { console.error("[TWILIO] start recording failed:", e?.message || e); }
+          } catch (e) { jerr("twilio.recording.start", e); }
           responseStartTimestampTwilio = null;
           latestMediaTimestamp = 0;
           break;
@@ -318,7 +304,7 @@ Never invent facts. Keep replies 1–2 sentences.` }],
           latestMediaTimestamp = Number(data.media.timestamp) || latestMediaTimestamp;
           if (openAiWs.readyState === WebSocket.OPEN) {
             try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload })); }
-            catch (e) { console.error("[OPENAI] append error", e); }
+            catch (e) { jerr("openai.buffer.append", e); }
           }
           break;
         case "mark":
@@ -326,13 +312,12 @@ Never invent facts. Keep replies 1–2 sentences.` }],
           break;
         case "stop":
           if (openAiWs.readyState === WebSocket.OPEN) {
-            try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch (e) { console.error("[OPENAI] commit error", e); }
-            try { openAiWs.close(); } catch (e) { console.error("[OPENAI] close error", e); }
+            try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch (e) { jerr("openai.buffer.commit", e); }
+            try { openAiWs.close(); } catch (e) { jerr("openai.ws.close", e); }
           }
           emitFinalOnce();
           break;
         default:
-          console.log("[TWILIO] event", data.event);
           break;
       }
     });
@@ -347,21 +332,18 @@ Never invent facts. Keep replies 1–2 sentences.` }],
       const summary = raw?.issue?.user_description ?? null;
       const isIssueResolved = !!raw?.satisfaction?.is_satisfied;
       const issue = classifyIssue([raw?.resolution?.escalation_reason, summary].filter(Boolean).join(" "));
-      console.log("[FINAL]", { name, email, issue, isIssueResolved, qaCount: pairs.length });
+      jlog("final", { name, email, issue, isIssueResolved, qaCount: pairs.length });
       printed = true;
     }
 
     connection.on("close", async () => {
-      console.log("[WS] connection closed");
       if (openAiWs.readyState === WebSocket.OPEN) {
-        try { openAiWs.close(); } catch (e) { console.error("[OPENAI] close error", e); }
+        try { openAiWs.close(); } catch (e) { jerr("openai.ws.close.onClientClose", e); }
       }
       try {
         const allData = await summarizer(qaPairs, callSid);
-        console.log("[SUMMARY]", JSON.stringify({ allData }));
-      } catch (e) {
-        console.error("[SUMMARY] error", e);
-      }
+        jlog("summary", { ok: true, meta: !!allData });
+      } catch (e) { jerr("summary.generate", e); }
     });
   });
 }

@@ -19,30 +19,29 @@ export let index;
 export let indexDim = DIMENV;
 
 export const connectIndex = async () => {
-  console.log(`[PINECONE] connect name=${NAME} ns=${NS} host=${HOST || "(auto)"}`);
-  const list = await pc.listIndexes();
-  const exists = list.indexes?.some(i => i.name === NAME);
-  if (!exists) {
-    console.log(`[PINECONE] creating index ${NAME} dim=${DIMENV}`);
-    await pc.createIndex({
-      name: NAME,
-      dimension: DIMENV,
-      metric: "cosine",
-      spec: { serverless: { cloud: CLOUD, region: REGION } }
-    });
-    console.log("[PINECONE] waiting 30s for readiness");
-    await new Promise(r => setTimeout(r, 30000));
-  }
-  const base = HOST ? pc.index(NAME, HOST) : pc.index(NAME);
-  index = base.namespace(NS);
-
   try {
-    const info = await pc.describeIndex(NAME);
-    indexDim = Number(info?.dimension || DIMENV);
-    console.log(`[PINECONE] ready name=${NAME} ns=${NS} dim=${indexDim} host=${info?.host || "(runtime)"}`);
+    const list = await pc.listIndexes();
+    const exists = list.indexes?.some(i => i.name === NAME);
+    if (!exists) {
+      await pc.createIndex({
+        name: NAME,
+        dimension: DIMENV,
+        metric: "cosine",
+        spec: { serverless: { cloud: CLOUD, region: REGION } }
+      });
+      await new Promise(r => setTimeout(r, 30000));
+    }
+    const base = HOST ? pc.index(NAME, HOST) : pc.index(NAME);
+    index = base.namespace(NS);
+    try {
+      const info = await pc.describeIndex(NAME);
+      indexDim = Number(info?.dimension || DIMENV);
+    } catch {
+      indexDim = DIMENV;
+    }
   } catch (e) {
-    console.warn("[PINECONE] describeIndex failed; using env dim", e?.message || e);
-    indexDim = DIMENV;
+    console.error(JSON.stringify({ event: "error", where: "pinecone.connectIndex", message: e?.message || String(e) }));
+    throw e;
   }
 };
 
@@ -56,28 +55,25 @@ const fitDim = (v, dim) => {
 };
 
 export const semanticSearch = async (query, { topK = TOPK, minScore = MIN_SCORE } = {}) => {
-  console.log(`[RAG] embed model=${EMBED_MODEL} query="${query}"`);
-  const emb = await openai.embeddings.create({ model: EMBED_MODEL, input: query });
-  const vec = fitDim(emb.data[0].embedding, indexDim);
-
-  console.log(`[RAG] query topK=${topK} minScore=${minScore} dim=${vec.length}`);
-  const res = await index.query({ topK, vector: vec, includeMetadata: true });
-
-  const matches = (res?.matches || []).map(m => ({
-    id: m.id,
-    score: m.score,
-    text: String(
-      m.metadata?.text ||
-      m.metadata?.chunk_text ||
-      m.metadata?.content ||
-      m.metadata?.body || ""
-    )
-  }));
-
-  console.log(`[RAG] matches=${matches.length} sample=${JSON.stringify(matches.slice(0,2))}`);
-  const filtered = matches.filter(m => (m.score ?? 0) >= minScore);
-  console.log(`[RAG] filtered>=${minScore}: ${filtered.length}`);
-  return filtered;
+  try {
+    const emb = await openai.embeddings.create({ model: EMBED_MODEL, input: query });
+    const vec = fitDim(emb.data[0].embedding, indexDim);
+    const res = await index.query({ topK, vector: vec, includeMetadata: true });
+    const matches = (res?.matches || []).map(m => ({
+      id: m.id,
+      score: m.score,
+      text: String(
+        m.metadata?.text ||
+        m.metadata?.chunk_text ||
+        m.metadata?.content ||
+        m.metadata?.body || ""
+      )
+    }));
+    return matches.filter(m => (m.score ?? 0) >= minScore);
+  } catch (e) {
+    console.error(JSON.stringify({ event: "error", where: "pinecone.semanticSearch", message: e?.message || String(e) }));
+    return [];
+  }
 };
 
 export const buildSnippetsBlock = (query, items) =>
