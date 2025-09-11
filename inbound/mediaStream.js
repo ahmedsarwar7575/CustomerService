@@ -17,22 +17,18 @@ STYLE
 English only. Replies are short (1–2 sentences). One clear question at a time. Warm, calm, confident.
 
 STRICT RAG
-CRITICAL: You MUST ONLY answer based on the knowledge base snippets provided in the SNIPPETS section. 
-- If relevant snippets are provided, use ONLY that information to answer
-- If no snippets are provided or snippets don't contain the answer, say: "That isn't in our knowledge base yet."
-- NEVER make up information or answer from general knowledge
-- Always reference the knowledge base when answering
+Only answer with facts from SNIPPETS. If no relevant snippet exists for this turn, say: “That isn’t in our knowledge base yet.” Then continue the workflow (clarify or next step). Do not invent facts.
 
 WORKFLOW
 1) Listen → acknowledge briefly → ask one focused question until clear.
 2) Propose a concise plan (1–3 short sentences). Offer options if useful.
 3) Always collect and confirm full name and email before ending. Never ask for phone. If offered, politely decline.
 4) Classify ticket: support / sales / billing (ask once if unclear). Confirm.
-5) End: "Are you satisfied with this solution, or would you like more support?" If more, propose next step.
+5) End: “Are you satisfied with this solution, or would you like more support?” If more, propose next step.
 
 FIRST TURN
-"Hello, this is John Smith with GETPIE Customer Support. Thanks for reaching out today. I'm here to listen to your issue and get you a clear solution or next step."
-Then ask: "How can I help you today?"
+“Hello, this is John Smith with GETPIE Customer Support. Thanks for reaching out today. I’m here to listen to your issue and get you a clear solution or next step.”
+Then ask: “How can I help you today?”
 `;
 
 function safeParse(s) { try { return JSON.parse((s || "").trim()); } catch { return null; } }
@@ -58,8 +54,9 @@ function toQAPairs(tr = []) {
 }
 
 function createOpenAIWebSocket() {
-  if (!OPENAI_API_KEY) console.error("ERROR: OPENAI_API_KEY missing");
+  if (!OPENAI_API_KEY) console.error("[OPENAI] OPENAI_API_KEY missing");
   const url = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
+  console.log(`[OPENAI] connect: ${url}`);
   return new WebSocket(url, {
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" },
   });
@@ -71,7 +68,7 @@ function buildSessionUpdate() {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.5,
+        threshold: 0.7,
         prefix_padding_ms: 300,
         silence_duration_ms: 800,
       },
@@ -80,8 +77,8 @@ function buildSessionUpdate() {
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.8,
-      input_audio_transcription: { model: "whisper-1" },
+      temperature: 0.2,
+      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
 }
@@ -93,12 +90,14 @@ function b64(x) {
   try { return Buffer.from(x).toString("base64"); } catch { return ""; }
 }
 
-await connectIndex().catch(e => { console.error("PINECONE CONNECTION ERROR:", e); process.exit(1); });
+await connectIndex().catch(e => { console.error("[PINECONE] connect error", e); process.exit(1); });
 
 export function attachMediaStreamServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
+  console.log("[WS] /media-stream listening");
 
   wss.on("connection", (connection) => {
+    console.log("[WS] connection opened]");
     let streamSid = null;
     let callSid = null;
     let latestMediaTimestamp = 0;
@@ -112,31 +111,32 @@ export function attachMediaStreamServer(server) {
     let hasActiveResponse = false;
     let lastInjectedItemId = null;
     let awaitingInjectedAck = false;
-    let openAiConnected = false;
 
     const openAiWs = createOpenAIWebSocket();
 
     const initializeSession = () => {
       try {
         openAiWs.send(JSON.stringify(buildSessionUpdate()));
+        console.log("[OPENAI] session.update sent");
         setTimeout(() => {
           try {
             openAiWs.send(JSON.stringify({ type: "response.create" }));
+            console.log("[OPENAI] response.create (greeting) sent");
           } catch (e) {
-            console.error("GREETING ERROR:", e);
+            console.error("[OPENAI] response.create greeting error", e);
           }
-        }, 300);
+        }, 150);
       } catch (e) {
-        console.error("SESSION INIT ERROR:", e);
+        console.error("[OPENAI] session.update error", e);
       }
     };
 
     const handleSpeechStartedEvent = () => {
       if (markQueue.length > 0) {
-        try { openAiWs.send(JSON.stringify({ type: "response.cancel" })); }
-        catch (e) { console.error("CANCEL ERROR:", e); }
-        try { connection.send(JSON.stringify({ event: "clear", streamSid })); }
-        catch (e) { console.error("CLEAR ERROR:", e); }
+        try { openAiWs.send(JSON.stringify({ type: "response.cancel" })); console.log("[OPENAI] response.cancel"); }
+        catch (e) { console.error("[OPENAI] response.cancel error", e); }
+        try { connection.send(JSON.stringify({ event: "clear", streamSid })); console.log("[TWILIO] clear sent"); }
+        catch (e) { console.error("[TWILIO] clear error", e); }
         markQueue = [];
         responseStartTimestampTwilio = null;
       }
@@ -147,35 +147,33 @@ export function attachMediaStreamServer(server) {
       try {
         connection.send(JSON.stringify({ event: "mark", streamSid, mark: { name: "responsePart" } }));
         markQueue.push("responsePart");
-      } catch (e) { console.error("MARK ERROR:", e); }
+      } catch (e) { console.error("[TWILIO] mark error", e); }
     };
 
-    openAiWs.on("open", () => { setTimeout(initializeSession, 100); });
-    openAiWs.on("close", (c, r) => { console.log("OpenAI closed:", c); });
-    openAiWs.on("error", (e) => { console.error("OPENAI WS ERROR:", e); });
+    openAiWs.on("open", () => { console.log("[OPENAI] WS open"); setTimeout(initializeSession, 100); });
+    openAiWs.on("close", (c, r) => { console.log("[OPENAI] WS closed", c, r?.toString()); });
+    openAiWs.on("error", (e) => { console.error("[OPENAI] WS error", e); });
 
     openAiWs.on("message", async (data) => {
       let msg;
       try { msg = JSON.parse(data); } catch (e) {
-        console.error("OPENAI PARSE ERROR:", e);
+        console.error("[OPENAI] parse error", e, String(data).slice(0, 120));
         return;
       }
 
-      if (msg.type === "session.updated") {
-        openAiConnected = true;
-      }
-      
-      if (msg.type === "error") {
-        console.error("OPENAI API ERROR:", msg);
-      }
+      if (msg.type === "session.created") console.log("[OPENAI] session.created");
+      if (msg.type === "session.updated") console.log("[OPENAI] session.updated");
+      if (msg.type === "error") console.error("[OPENAI] error", msg);
 
       if (msg.type === "response.created") {
         hasActiveResponse = true;
+        console.log("[OPENAI] response.created", msg.response?.id || null);
       }
 
-      if (msg.type === "conversation.item.created" && awaitingInjectedAck) {
-        lastInjectedItemId = msg.item?.id || null;
+      if (msg.type === "conversation.item.created" && awaitingInjectedAck && msg.item?.metadata?.rag_injected) {
+        lastInjectedItemId = msg.item.id;
         awaitingInjectedAck = false;
+        console.log("[RAG] injected item ack", lastInjectedItemId);
       }
 
       if ((msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") && msg.delta) {
@@ -186,7 +184,7 @@ export function attachMediaStreamServer(server) {
             if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
             sendMark();
           }
-        } catch (e) { console.error("AUDIO SEND ERROR:", e); }
+        } catch (e) { console.error("[TWILIO] media send error", e); }
       }
 
       if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
@@ -203,110 +201,82 @@ export function attachMediaStreamServer(server) {
         const q =
           (typeof msg.transcript === "string" && msg.transcript.trim()) ||
           (msg.item?.content?.find?.((c) => typeof c?.transcript === "string")?.transcript || "").trim();
-        if (q) { 
-          pendingUserQ = q; 
-          console.log("USER QUESTION:", q);
-        }
+        if (q) { pendingUserQ = q; console.log(`[ASR] user: "${q}"`); }
       }
 
       if (msg.type === "input_audio_buffer.speech_started") {
+        console.log("[TURN] speech_started");
         handleSpeechStartedEvent();
       }
 
       if (msg.type === "input_audio_buffer.speech_stopped" && !hasActiveResponse) {
-        const q = (pendingUserQ || "").trim();
-        
         try {
+          const q = (pendingUserQ || "").trim();
+          console.log("[TURN] speech_stopped; pendingUserQ=", q || "(none)");
+          let injected = false;
+
           if (q) {
-            console.log("SEARCHING PINECONE FOR:", q);
-            const minScore = Number(process.env.RAG_MIN_SCORE || 0.3);  // Lower for testing
-            const topK = Number(process.env.TOPK || 10);  // Higher for testing
-            
-            const searchResults = await semanticSearch(q, { topK: topK, minScore: minScore });
-            
-            console.log("PINECONE RESULTS:", searchResults.length > 0 ? 
-              searchResults.map(r => ({ id: r.id, score: r.score?.toFixed(3), text: r.text?.slice(0, 200) })) : 
-              "NO MATCHES FOUND"
-            );
-            
-            if (searchResults.length > 0) {
-              const snippetsBlock = buildSnippetsBlock(q, searchResults);
-              
-              awaitingInjectedAck = true;
-              const contextMessage = {
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "text",
-                    text: `### KNOWLEDGE BASE SNIPPETS
-${snippetsBlock}
+            try {
+              const minScore = Number(process.env.RAG_MIN_SCORE || 0.6);
+              const topK = Number(process.env.TOPK || 6);
+              const results = await semanticSearch(q, { topK, minScore });
 
-### USER QUESTION: "${q}"
-
-Answer using ONLY the above information. If not covered, say "That isn't in our knowledge base yet."`
-                  }]
-                }
-              };
-              
-              openAiWs.send(JSON.stringify(contextMessage));
-              console.log("INJECTED", searchResults.length, "SNIPPETS");
-            } else {
-              awaitingInjectedAck = true;
-              const guardMessage = {
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "text",
-                    text: `No knowledge base results for: "${q}". Respond: "That isn't in our knowledge base yet. Let me help you another way." Then ask how else you can help.`
-                  }]
-                }
-              };
-              
-              openAiWs.send(JSON.stringify(guardMessage));
-              console.log("NO PINECONE MATCHES - GUARD INJECTED");
-            }
+              if (results.length) {
+                const block = buildSnippetsBlock(q, results);
+                awaitingInjectedAck = true; injected = true;
+                openAiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{ type: "input_text", text: `### SNIPPETS\n${block}\n\n### USER QUESTION\n${q}` }],
+                    metadata: { rag_injected: true }
+                  }
+                }));
+                console.log(`[RAG] injected ${results.length} snippets`);
+              } else {
+                awaitingInjectedAck = true; injected = true;
+                openAiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{ type: "input_text", text:
+`### NO_SNIPPETS_GUARD
+No relevant knowledge base snippets were found for this turn.
+You must respond: "That isn’t in our knowledge base yet." Then continue the workflow:
+• Ask one concise clarifying question or
+• Offer the next step (create ticket, escalate, or share our support email).
+Never invent facts. Keep replies 1–2 sentences.` }],
+                    metadata: { rag_injected: true }
+                  }
+                }));
+                console.log("[RAG] injected NO_SNIPPETS_GUARD");
+              }
+            } catch (e) { console.error("[RAG] retrieval failed", e); }
           }
-          
+
           openAiWs.send(JSON.stringify({ type: "response.create" }));
-          
-        } catch (error) {
-          console.error("PINECONE SEARCH ERROR:", error.message);
-          openAiWs.send(JSON.stringify({ type: "response.create" }));
-        }
+          console.log("[OPENAI] response.create sent (injected=", injected, ")");
+        } catch (e) { console.error("[OPENAI] response.create error", e); }
       }
 
       if (msg.type === "response.done") {
         hasActiveResponse = false;
-        
         if (lastInjectedItemId) {
-          try { 
-            openAiWs.send(JSON.stringify({ 
-              type: "conversation.item.delete", 
-              item_id: lastInjectedItemId 
-            })); 
-          } catch (e) { 
-            console.error("DELETE ERROR:", e); 
-          }
+          try { openAiWs.send(JSON.stringify({ type: "conversation.item.delete", item_id: lastInjectedItemId })); console.log("[RAG] injected item deleted"); }
+          catch (e) { console.error("[RAG] injected item delete error", e); }
           lastInjectedItemId = null;
         }
-        
         const outputs = msg.response?.output || [];
         for (const out of outputs) {
           if (out?.role === "assistant") {
             const part = Array.isArray(out.content) ? out.content.find((c) => typeof c?.transcript === "string" && c.transcript.trim()) : null;
             const a = (part?.transcript || "").trim();
             if (a) {
-              console.log("GPT ANSWER:", a);
-              if (pendingUserQ) { 
-                qaPairs.push({ q: pendingUserQ, a }); 
-                pendingUserQ = null; 
-              } else { 
-                qaPairs.push({ q: null, a }); 
-              }
+              if (pendingUserQ) { qaPairs.push({ q: pendingUserQ, a }); pendingUserQ = null; }
+              else { qaPairs.push({ q: null, a }); }
+              console.log("[ASSISTANT]", a);
             }
           }
         }
@@ -317,11 +287,15 @@ Answer using ONLY the above information. If not covered, say "That isn't in our 
 
     connection.on("message", async (message) => {
       let data;
-      try { data = JSON.parse(message); } catch (e) { console.error("WS PARSE ERROR:", e); return; }
+      try { data = JSON.parse(message); } catch (e) { console.error("[WS] parse error", e, String(message).slice(0, 160)); return; }
       switch (data.event) {
+        case "connected":
+          console.log("[TWILIO] connected");
+          break;
         case "start":
           streamSid = data.start.streamSid;
           callSid = data.start.callSid || null;
+          console.log("[TWILIO] start streamSid=", streamSid, "callSid=", callSid);
           if (!callSid || started.has(callSid)) return;
           started.add(callSid);
           const base = process.env.PUBLIC_BASE_URL;
@@ -329,26 +303,22 @@ Answer using ONLY the above information. If not covered, say "That isn't in our 
           const authToken = process.env.TWILIO_AUTH_TOKEN;
           const client = twilio(accountSid, authToken);
           try {
-            await client.calls(callSid).recordings.create({
+            const rec = await client.calls(callSid).recordings.create({
               recordingStatusCallback: `${base}/recording-status`,
               recordingStatusCallbackEvent: ["in-progress", "completed", "absent"],
               recordingChannels: "dual",
               recordingTrack: "both",
             });
-          } catch (e) { console.error("RECORDING ERROR:", e?.message); }
+            console.log("▶️ recording started:", rec.sid);
+          } catch (e) { console.error("[TWILIO] start recording failed:", e?.message || e); }
           responseStartTimestampTwilio = null;
           latestMediaTimestamp = 0;
           break;
         case "media":
           latestMediaTimestamp = Number(data.media.timestamp) || latestMediaTimestamp;
-          if (openAiWs.readyState === WebSocket.OPEN && openAiConnected) {
-            try { 
-              openAiWs.send(JSON.stringify({ 
-                type: "input_audio_buffer.append", 
-                audio: data.media.payload 
-              })); 
-            }
-            catch (e) { console.error("AUDIO APPEND ERROR:", e); }
+          if (openAiWs.readyState === WebSocket.OPEN) {
+            try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload })); }
+            catch (e) { console.error("[OPENAI] append error", e); }
           }
           break;
         case "mark":
@@ -356,10 +326,13 @@ Answer using ONLY the above information. If not covered, say "That isn't in our 
           break;
         case "stop":
           if (openAiWs.readyState === WebSocket.OPEN) {
-            try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch (e) { console.error("COMMIT ERROR:", e); }
-            try { openAiWs.close(); } catch (e) { console.error("CLOSE ERROR:", e); }
+            try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch (e) { console.error("[OPENAI] commit error", e); }
+            try { openAiWs.close(); } catch (e) { console.error("[OPENAI] close error", e); }
           }
           emitFinalOnce();
+          break;
+        default:
+          console.log("[TWILIO] event", data.event);
           break;
       }
     });
@@ -374,18 +347,20 @@ Answer using ONLY the above information. If not covered, say "That isn't in our 
       const summary = raw?.issue?.user_description ?? null;
       const isIssueResolved = !!raw?.satisfaction?.is_satisfied;
       const issue = classifyIssue([raw?.resolution?.escalation_reason, summary].filter(Boolean).join(" "));
+      console.log("[FINAL]", { name, email, issue, isIssueResolved, qaCount: pairs.length });
       printed = true;
     }
 
     connection.on("close", async () => {
+      console.log("[WS] connection closed");
       if (openAiWs.readyState === WebSocket.OPEN) {
-        try { openAiWs.close(); } catch (e) { console.error("WS CLOSE ERROR:", e); }
+        try { openAiWs.close(); } catch (e) { console.error("[OPENAI] close error", e); }
       }
       try {
         const allData = await summarizer(qaPairs, callSid);
-        console.log("CALL SUMMARY:", JSON.stringify({ allData }));
+        console.log("[SUMMARY]", JSON.stringify({ allData }));
       } catch (e) {
-        console.error("SUMMARY ERROR:", e);
+        console.error("[SUMMARY] error", e);
       }
     });
   });
