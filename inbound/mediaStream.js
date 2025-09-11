@@ -68,7 +68,7 @@ function buildSessionUpdate() {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.7,
+        threshold: 0.5,
         prefix_padding_ms: 300,
         silence_duration_ms: 800,
       },
@@ -77,8 +77,8 @@ function buildSessionUpdate() {
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.2,
-      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+      temperature: 0.8,
+      input_audio_transcription: { model: "whisper-1" },
     },
   };
 }
