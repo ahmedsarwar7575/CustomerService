@@ -420,7 +420,7 @@ Keep the response to 1-2 sentences and stay professional.`
       const isIssueResolved = !!raw?.satisfaction?.is_satisfied;
       const issue = classifyIssue([raw?.resolution?.escalation_reason, summary].filter(Boolean).join(" "));
       console.log("[FINAL]", { name, email, issue, isIssueResolved, qaCount: pairs.length });
-      printed = true;
+      printed = true
     }
 
     connection.on("close", async () => {
