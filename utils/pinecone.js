@@ -12,7 +12,6 @@ const REGION = process.env.PINECONE_REGION      || "us-east-1";
 const CLOUD  = process.env.PINECONE_CLOUD       || "aws";
 const DIMENV = Number(process.env.PINECONE_DIM  || 2048);
 const EMBED_MODEL = process.env.OPENAI_EMBED_MODEL || "text-embedding-3-small";
-const MIN_SCORE   = Number(process.env.RAG_MIN_SCORE || 0.35);
 const TOPK        = Number(process.env.TOPK || 6);
 
 export let index;
@@ -21,6 +20,8 @@ export let indexDim = DIMENV;
 const jerr = (where, e) => {
   console.error(JSON.stringify({ ts: Date.now(), event: "error", where, message: e?.message || String(e) }));
 };
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 export const connectIndex = async () => {
   try {
@@ -33,7 +34,7 @@ export const connectIndex = async () => {
         metric: "cosine",
         spec: { serverless: { cloud: CLOUD, region: REGION } }
       });
-      await new Promise(r => setTimeout(r, 30000));
+      await sleep(30000);
     }
     const base = HOST ? pc.index(NAME, HOST) : pc.index(NAME);
     index = base.namespace(NS);
@@ -45,16 +46,17 @@ export const connectIndex = async () => {
       indexDim = DIMENV;
     }
 
-    try {
-      const stats = await index.describeIndexStats?.() || {};
-      const nsStats = stats.namespaces?.[NS] || stats.namespaces?.[""] || {};
-      const count = Number(nsStats?.vectorCount || nsStats?.vector_count || 0);
-      if (!count) {
-        console.error(JSON.stringify({ ts: Date.now(), event: "error", where: "pinecone.namespace", message: `no_vectors_in_namespace name=${NAME} ns=${NS}` }));
-      }
-    } catch (e) {
-      jerr("pinecone.describeIndexStats", e);
+    let ok = false;
+    for (let i = 0; i < 3; i++) {
+      try {
+        const stats = await index.describeIndexStats?.() || {};
+        const nsStats = stats.namespaces?.[NS] ?? stats.namespaces?.[""] ?? {};
+        const count = Number(nsStats?.vectorCount ?? nsStats?.vector_count ?? 0);
+        if (count > 0) { ok = true; break; }
+      } catch {}
+      await sleep(1000 * (i + 1));
     }
+    if (!ok) jerr("pinecone.namespace", new Error(`no_vectors_in_namespace name=${NAME} ns=${NS}`));
   } catch (e) {
     jerr("pinecone.connectIndex", e);
     throw e;
@@ -72,7 +74,7 @@ const fitDim = (v, dim) => {
 
 const queryPinecone = async (vector, topK) => {
   const res = await index.query({ topK, vector, includeMetadata: true });
-  const matches = (res?.matches || []).map(m => ({
+  return (res?.matches || []).map(m => ({
     id: m.id,
     score: m.score,
     text: String(
@@ -82,7 +84,6 @@ const queryPinecone = async (vector, topK) => {
       m.metadata?.body || ""
     )
   }));
-  return matches;
 };
 
 export const embed = async (text) => {
@@ -90,24 +91,12 @@ export const embed = async (text) => {
   return emb.data[0].embedding;
 };
 
-export const semanticSearch = async (query, { topK = TOPK, minScore = MIN_SCORE } = {}) => {
-  try {
-    const vec = fitDim(await embed(query), indexDim);
-    const matches = await queryPinecone(vec, topK);
-    const filtered = matches.filter(m => (m.score ?? 0) >= minScore);
-    return filtered;
-  } catch (e) {
-    jerr("pinecone.semanticSearch", e);
-    return [];
-  }
-};
-
-export const semanticSearchAny = async (query, { topK = TOPK } = {}) => {
+export const semanticSearchTopK = async (query, { topK = TOPK } = {}) => {
   try {
     const vec = fitDim(await embed(query), indexDim);
     return await queryPinecone(vec, topK);
   } catch (e) {
-    jerr("pinecone.semanticSearchAny", e);
+    jerr("pinecone.semanticSearchTopK", e);
     return [];
   }
 };

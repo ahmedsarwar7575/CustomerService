@@ -1,8 +1,6 @@
 import WebSocket, { WebSocketServer } from "ws";
-import { summarizer } from "./summery.js";
-import twilio from "twilio";
 import dotenv from "dotenv";
-import { connectIndex, semanticSearch, semanticSearchAny, buildSnippetsBlock } from "../utils/pinecone.js";
+import { connectIndex, semanticSearchTopK, buildSnippetsBlock } from "../utils/pinecone.js";
 
 dotenv.config();
 
@@ -19,18 +17,7 @@ English only. Replies are short (1–2 sentences). One clear question at a time.
 STRICT RAG
 Only answer with facts from SNIPPETS.
 If no relevant snippet exists for this turn, reply EXACTLY: "That isn’t in our knowledge base yet."
-Do not add anything else before or after that sentence. Then continue the workflow on the next turn (clarify or next step). Do not invent facts.
-
-WORKFLOW
-1) Listen → acknowledge briefly → ask one focused question until clear.
-2) Propose a concise plan (1–3 short sentences). Offer options if useful.
-3) Always collect and confirm full name and email before ending. Never ask for phone. If offered, politely decline.
-4) Classify ticket: support / sales / billing (ask once if unclear). Confirm.
-5) End: “Are you satisfied with this solution, or would you like more support?” If more, propose next step.
-
-FIRST TURN
-“Hello, this is John Smith with GETPIE Customer Support. Thanks for reaching out today. I’m here to listen to your issue and get you a clear solution or next step.”
-Then ask: “How can I help you today?”
+Do not invent facts.
 `;
 
 const jlog = (event, payload = {}) => {
@@ -40,7 +27,6 @@ const jerr = (where, e) => {
   console.error(JSON.stringify({ ts: Date.now(), event: "error", where, message: e?.message || String(e) }));
 };
 
-function safeParse(s) { try { return JSON.parse((s || "").trim()); } catch { return null; } }
 function b64(x) { if (!x) return ""; if (typeof x === "string") return x; if (Buffer.isBuffer(x)) return x.toString("base64"); try { return Buffer.from(x).toString("base64"); } catch { return ""; } }
 
 await connectIndex().catch(e => { jerr("pinecone.connectIndex", e); process.exit(1); });
@@ -73,17 +59,16 @@ export function attachMediaStreamServer(server) {
 
   wss.on("connection", (connection) => {
     let streamSid = null;
-    let callSid = null;
     let latestMediaTimestamp = 0;
     let markQueue = [];
     let responseStartTimestampTwilio = null;
-    let textBuffer = "";
-    let finalJsonString = null;
-    let qaPairs = [];
+
     let pendingUserQ = null;
     let hasActiveResponse = false;
+
     let lastInjectedItemId = null;
     let awaitingInjectedAck = false;
+    let pendingResponseAfterInject = false;
 
     const openAiWs = createOpenAIWebSocket();
 
@@ -114,23 +99,19 @@ export function attachMediaStreamServer(server) {
     openAiWs.on("close", () => {});
     openAiWs.on("error", (e) => { jerr("openai.ws", e); });
 
-    const waitForInjectedAck = (timeoutMs = 250) => new Promise((resolve) => {
-      if (!awaitingInjectedAck) return resolve(false);
-      const start = Date.now();
-      const i = setInterval(() => {
-        if (!awaitingInjectedAck || lastInjectedItemId) { clearInterval(i); return resolve(true); }
-        if (Date.now() - start > timeoutMs) { clearInterval(i); return resolve(false); }
-      }, 5);
-    });
-
     openAiWs.on("message", async (data) => {
       let msg;
       try { msg = JSON.parse(data); } catch (e) { jerr("openai.parse", e); return; }
 
       if (msg.type === "response.created") { hasActiveResponse = true; }
+
       if (msg.type === "conversation.item.created" && awaitingInjectedAck && msg.item?.metadata?.rag_injected) {
         lastInjectedItemId = msg.item.id;
         awaitingInjectedAck = false;
+        if (pendingResponseAfterInject) {
+          pendingResponseAfterInject = false;
+          try { openAiWs.send(JSON.stringify({ type: "response.create" })); } catch (e) { jerr("openai.response.create.afterAck", e); }
+        }
       }
 
       if ((msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") && msg.delta) {
@@ -144,9 +125,6 @@ export function attachMediaStreamServer(server) {
         } catch (e) { jerr("twilio.media.send", e); }
       }
 
-      if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") textBuffer += msg.delta;
-      if (msg.type === "response.output_text.done") textBuffer = "";
-
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const q =
           (typeof msg.transcript === "string" && msg.transcript.trim()) ||
@@ -159,29 +137,25 @@ export function attachMediaStreamServer(server) {
       if (msg.type === "input_audio_buffer.speech_stopped" && !hasActiveResponse) {
         try {
           const q = (pendingUserQ || "").trim();
-          let injected = false;
-
           if (q) {
             jlog("question", { text: q });
 
+            let results = [];
             try {
-              const minScore = Number(process.env.RAG_MIN_SCORE || 0.35);
               const topK = Number(process.env.TOPK || 6);
-
-              const results = await semanticSearch(q, { topK, minScore });
-              let raw = [];
-              if (!results.length) raw = await semanticSearchAny(q, { topK });
-
+              results = await semanticSearchTopK(q, { topK });
               jlog("retrieval", {
                 query: q,
                 count: results.length,
-                items: results.map(r => ({ id: r.id, score: Number((r.score ?? 0).toFixed?.(3) ?? r.score), preview: r.text.slice(0, 500) })),
-                rawTopK: raw.slice(0, 6).map(r => ({ id: r.id, score: Number((r.score ?? 0).toFixed?.(3) ?? r.score) }))
+                items: results.map(r => ({ id: r.id, score: Number((r.score ?? 0).toFixed?.(3) ?? r.score), preview: r.text.slice(0, 500) }))
               });
+            } catch (e) { jerr("rag.retrieval", e); }
 
-              if (results.length) {
-                const block = buildSnippetsBlock(q, results);
-                awaitingInjectedAck = true; injected = true;
+            if (results.length) {
+              const block = buildSnippetsBlock(q, results);
+              awaitingInjectedAck = true;
+              pendingResponseAfterInject = true;
+              try {
                 openAiWs.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
@@ -191,8 +165,11 @@ export function attachMediaStreamServer(server) {
                     metadata: { rag_injected: true }
                   }
                 }));
-              } else {
-                awaitingInjectedAck = true; injected = true;
+              } catch (e) { jerr("openai.item.create.snippets", e); pendingResponseAfterInject = false; }
+            } else {
+              awaitingInjectedAck = true;
+              pendingResponseAfterInject = true;
+              try {
                 openAiWs.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
@@ -201,17 +178,14 @@ export function attachMediaStreamServer(server) {
                     content: [{ type: "input_text", text:
 `### NO_SNIPPETS_GUARD
 No relevant knowledge base snippets were found for this turn.
-You must reply EXACTLY: "That isn’t in our knowledge base yet." Do not add extra words.` }],
+You must reply EXACTLY: "That isn’t in our knowledge base yet."` }],
                     metadata: { rag_injected: true }
                   }
                 }));
-              }
-            } catch (e) { jerr("rag.retrieval", e); }
+              } catch (e) { jerr("openai.item.create.guard", e); pendingResponseAfterInject = false; }
+            }
           }
-
-          await waitForInjectedAck(250);
-          openAiWs.send(JSON.stringify({ type: "response.create" }));
-        } catch (e) { jerr("openai.response.create", e); }
+        } catch (e) { jerr("turn.stop", e); }
       }
 
       if (msg.type === "response.done") {
@@ -234,33 +208,16 @@ You must reply EXACTLY: "That isn’t in our knowledge base yet." Do not add ext
       }
     });
 
-    const started = new Set();
-
     connection.on("message", async (message) => {
       let data;
       try { data = JSON.parse(message); } catch (e) { jerr("ws.parse", e); return; }
       switch (data.event) {
-        case "connected":
-          break;
+        case "connected": break;
         case "start":
           streamSid = data.start.streamSid;
-          callSid = data.start.callSid || null;
-          if (!callSid || started.has(callSid)) return;
-          started.add(callSid);
-          const base = process.env.PUBLIC_BASE_URL;
-          const accountSid = process.env.TWILIO_ACCOUNT_SID;
-          const authToken = process.env.TWILIO_AUTH_TOKEN;
-          const client = twilio(accountSid, authToken);
-          try {
-            await client.calls(callSid).recordings.create({
-              recordingStatusCallback: `${base}/recording-status`,
-              recordingStatusCallbackEvent: ["in-progress", "completed", "absent"],
-              recordingChannels: "dual",
-              recordingTrack: "both",
-            });
-          } catch (e) { jerr("twilio.recording.start", e); }
           responseStartTimestampTwilio = null;
           latestMediaTimestamp = 0;
+          setTimeout(initializeSession, 0);
           break;
         case "media":
           latestMediaTimestamp = Number(data.media.timestamp) || latestMediaTimestamp;
@@ -278,8 +235,7 @@ You must reply EXACTLY: "That isn’t in our knowledge base yet." Do not add ext
             try { openAiWs.close(); } catch (e) { jerr("openai.ws.close", e); }
           }
           break;
-        default:
-          break;
+        default: break;
       }
     });
 
@@ -287,10 +243,6 @@ You must reply EXACTLY: "That isn’t in our knowledge base yet." Do not add ext
       if (openAiWs.readyState === WebSocket.OPEN) {
         try { openAiWs.close(); } catch (e) { jerr("openai.ws.close.onClientClose", e); }
       }
-      try {
-        const allData = await summarizer(qaPairs, callSid);
-        if (!allData) jerr("summary.generate", new Error("no_summary"));
-      } catch (e) { jerr("summary.generate", e); }
     });
   });
 }
