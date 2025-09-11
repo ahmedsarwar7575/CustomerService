@@ -72,17 +72,17 @@ function buildSessionUpdate() {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.9,              // MUCH higher threshold to ignore noise
-        prefix_padding_ms: 150,      // Shorter padding to reduce noise pickup
-        silence_duration_ms: 1200,   // Longer silence before considering speech done
+        threshold: 0.5,              // Better threshold for speech detection
+        prefix_padding_ms: 300,
+        silence_duration_ms: 800,
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.8,
-      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+      temperature: 0.8,              // Fixed temperature (>= 0.6)
+      input_audio_transcription: { model: "whisper-1" },
     },
   };
 }
@@ -115,15 +115,18 @@ export function attachMediaStreamServer(server) {
     let hasActiveResponse = false;
     let lastInjectedItemId = null;
     let awaitingInjectedAck = false;
+    let openAiConnected = false;  // Track connection state
 
     const openAiWs = createOpenAIWebSocket();
 
     const initializeSession = () => {
       try {
-        openAiWs.send(JSON.stringify(buildSessionUpdate()));
+        const sessionConfig = buildSessionUpdate();
+        console.log("[OPENAI] Sending session config with temperature:", sessionConfig.session.temperature);
+        openAiWs.send(JSON.stringify(sessionConfig));
         console.log("[OPENAI] session.update sent");
 
-        // Kick off the mandatory greeting immediately (don't wait for user speech)
+        // Wait longer for session to be ready
         setTimeout(() => {
           try {
             openAiWs.send(JSON.stringify({ type: "response.create" }));
@@ -131,7 +134,7 @@ export function attachMediaStreamServer(server) {
           } catch (e) {
             console.error("[OPENAI] response.create greeting error", e);
           }
-        }, 150);
+        }, 300);
       } catch (e) {
         console.error("[OPENAI] session.update error", e);
       }
@@ -156,7 +159,10 @@ export function attachMediaStreamServer(server) {
       } catch (e) { console.error("[TWILIO] mark error", e); }
     };
 
-    openAiWs.on("open", () => { console.log("[OPENAI] WS open"); setTimeout(initializeSession, 100); });
+    openAiWs.on("open", () => { 
+      console.log("[OPENAI] WS open"); 
+      setTimeout(initializeSession, 100); 
+    });
     openAiWs.on("close", (c, r) => { console.log("[OPENAI] WS closed", c, r?.toString()); });
     openAiWs.on("error", (e) => { console.error("[OPENAI] WS error", e); });
 
@@ -167,9 +173,14 @@ export function attachMediaStreamServer(server) {
         return;
       }
 
+      console.log(`[OPENAI] Received message type: ${msg.type}`);
+
       if (msg.type === "session.created") console.log("[OPENAI] session.created");
-      if (msg.type === "session.updated") console.log("[OPENAI] session.updated");
-      if (msg.type === "error") console.error("[OPENAI] error", msg);
+      if (msg.type === "session.updated") {
+        console.log("[OPENAI] session.updated - Ready for audio!");
+        openAiConnected = true;
+      }
+      if (msg.type === "error") console.error("[OPENAI] ERROR:", msg);
 
       if (msg.type === "response.created") {
         hasActiveResponse = true;
@@ -182,10 +193,12 @@ export function attachMediaStreamServer(server) {
         console.log("[RAG] injected item ack", lastInjectedItemId);
       }
 
+      // Handle audio output
       if ((msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") && msg.delta) {
         try {
           const payload = b64(msg.delta);
           if (payload) {
+            console.log(`[AUDIO] Sending audio chunk, size: ${payload.length}`);
             connection.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
             if (!responseStartTimestampTwilio) responseStartTimestampTwilio = latestMediaTimestamp;
             sendMark();
@@ -209,7 +222,7 @@ export function attachMediaStreamServer(server) {
           (msg.item?.content?.find?.((c) => typeof c?.transcript === "string")?.transcript || "").trim();
         if (q) { 
           pendingUserQ = q; 
-          console.log(`[ASR] user: "${q}"`); 
+          console.log(`[ASR] USER SAID: "${q}"`); 
         }
       }
 
@@ -220,23 +233,34 @@ export function attachMediaStreamServer(server) {
 
       if (msg.type === "input_audio_buffer.speech_stopped" && !hasActiveResponse) {
         const q = (pendingUserQ || "").trim();
-        console.log("[TURN] speech_stopped; pendingUserQ=", q || "(none)");
+        console.log(`[TURN] speech_stopped; User question: "${q}"`);
         
-        // ALWAYS perform semantic search when user speaks
+        // ALWAYS search Pinecone when user speaks
         try {
           if (q) {
-            console.log(`[RAG] Starting search for: "${q}"`);
+            console.log(`🔍 [PINECONE] STARTING SEARCH for: "${q}"`);
             const minScore = Number(process.env.RAG_MIN_SCORE || 0.6);
             const topK = Number(process.env.TOPK || 6);
             
+            console.log(`🔍 [PINECONE] Search parameters - minScore: ${minScore}, topK: ${topK}`);
+            
             // Perform semantic search
             const searchResults = await semanticSearch(q, { topK: topK, minScore: minScore });
-            console.log(`[RAG] Search completed. Found ${searchResults.length} results`);
+            
+            console.log(`📊 [PINECONE] SEARCH RESULTS:`, {
+              query: q,
+              resultsCount: searchResults.length,
+              results: searchResults.map(r => ({
+                id: r.id,
+                score: r.score?.toFixed(3),
+                textPreview: r.text?.slice(0, 100) + "..."
+              }))
+            });
             
             if (searchResults.length > 0) {
               // Build knowledge base context
               const snippetsBlock = buildSnippetsBlock(q, searchResults);
-              console.log(`[RAG] Built snippets block with ${searchResults.length} snippets`);
+              console.log(`✅ [PINECONE] Built snippets block (${snippetsBlock.length} chars)`);
               
               // Inject knowledge base context
               awaitingInjectedAck = true;
@@ -265,7 +289,7 @@ ${snippetsBlock}
               };
               
               openAiWs.send(JSON.stringify(contextMessage));
-              console.log(`[RAG] Injected ${searchResults.length} knowledge base snippets`);
+              console.log(`✅ [RAG] Injected ${searchResults.length} knowledge base snippets to OpenAI`);
             } else {
               // No results found - inject guard
               awaitingInjectedAck = true;
@@ -292,19 +316,20 @@ Keep the response to 1-2 sentences and stay professional.`
               };
               
               openAiWs.send(JSON.stringify(guardMessage));
-              console.log("[RAG] No results found - injected no-knowledge guard");
+              console.log("❌ [PINECONE] No results found - injected no-knowledge guard");
             }
           } else {
             // No question transcribed - let GPT respond normally
-            console.log("[RAG] No user question transcribed, allowing normal response");
+            console.log("⚠️ [RAG] No user question transcribed, allowing normal response");
           }
           
           // Trigger response generation
           openAiWs.send(JSON.stringify({ type: "response.create" }));
-          console.log("[OPENAI] response.create sent after RAG processing");
+          console.log("🚀 [OPENAI] response.create sent after RAG processing");
           
         } catch (error) {
-          console.error("[RAG] Error during semantic search:", error);
+          console.error("❌ [PINECONE] ERROR during semantic search:", error);
+          console.error("Error details:", error.message, error.stack);
           // Still trigger response even if search fails
           openAiWs.send(JSON.stringify({ type: "response.create" }));
         }
@@ -381,7 +406,7 @@ Keep the response to 1-2 sentences and stay professional.`
           break;
         case "media":
           latestMediaTimestamp = Number(data.media.timestamp) || latestMediaTimestamp;
-          if (openAiWs.readyState === WebSocket.OPEN) {
+          if (openAiWs.readyState === WebSocket.OPEN && openAiConnected) {
             try { 
               openAiWs.send(JSON.stringify({ 
                 type: "input_audio_buffer.append", 
@@ -389,8 +414,9 @@ Keep the response to 1-2 sentences and stay professional.`
               })); 
             }
             catch (e) { console.error("[OPENAI] append error", e); }
-          } else {
-            console.warn("[OPENAI] WebSocket not open, cannot send audio");
+          } else if (!openAiConnected) {
+            // Only log occasionally to avoid spam
+            if (Math.random() < 0.01) console.warn("[OPENAI] Session not ready yet...");
           }
           break;
         case "mark":
@@ -418,9 +444,9 @@ Keep the response to 1-2 sentences and stay professional.`
       const email = raw?.customer?.email?.normalized ?? null;
       const summary = raw?.issue?.user_description ?? null;
       const isIssueResolved = !!raw?.satisfaction?.is_satisfied;
-      const issue = classifyIssue([raw?.resolution?.escalation_reason, summary].filter(Boolean).join(" "));
+      const issue = classifyIssue([raw?.resolution?.escalation_reason, summary].filter(Boolean).join( " "));
       console.log("[FINAL]", { name, email, issue, isIssueResolved, qaCount: pairs.length });
-      printed = true
+      printed = true;
     }
 
     connection.on("close", async () => {
