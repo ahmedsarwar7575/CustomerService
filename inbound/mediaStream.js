@@ -94,12 +94,9 @@ function buildSessionUpdate() {
   return {
     type: "session.update",
     session: {
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.9, // MUCH higher threshold to ignore noise
-        prefix_padding_ms: 150, // Shorter padding to reduce noise pickup
-        silence_duration_ms: 1200, // Longer silence before considering speech done
-      },
+      type: "realtime",
+      model: "gpt-realtime",
+      output_modalities: ["audio"],
       audio: {
         input: {
           format: { type: "audio/pcmu" },
@@ -107,11 +104,7 @@ function buildSessionUpdate() {
         },
         output: { format: { type: "audio/pcmu" }, voice: "alloy" },
       },
-      voice: "alloy",
       instructions: SYSTEM_MESSAGE,
-      modalities: ["text", "audio"],
-      temperature: 0.7,
-      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
 }
