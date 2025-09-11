@@ -382,8 +382,15 @@ Keep the response to 1-2 sentences and stay professional.`
         case "media":
           latestMediaTimestamp = Number(data.media.timestamp) || latestMediaTimestamp;
           if (openAiWs.readyState === WebSocket.OPEN) {
-            try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload })); }
+            try { 
+              openAiWs.send(JSON.stringify({ 
+                type: "input_audio_buffer.append", 
+                audio: data.media.payload 
+              })); 
+            }
             catch (e) { console.error("[OPENAI] append error", e); }
+          } else {
+            console.warn("[OPENAI] WebSocket not open, cannot send audio");
           }
           break;
         case "mark":
