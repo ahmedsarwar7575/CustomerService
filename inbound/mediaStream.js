@@ -20,14 +20,15 @@ If no relevant snippet exists for this turn, reply EXACTLY: "That isn’t in our
 Do not invent facts.
 `;
 
-const jlog = (event, payload = {}) => {
-  try { console.log(JSON.stringify({ ts: Date.now(), event, payload })); } catch {}
-};
-const jerr = (where, e) => {
-  console.error(JSON.stringify({ ts: Date.now(), event: "error", where, message: e?.message || String(e) }));
-};
+const jlog = (event, payload = {}) => { try { console.log(JSON.stringify({ ts: Date.now(), event, payload })); } catch {} };
+const jerr = (where, e) => { console.error(JSON.stringify({ ts: Date.now(), event: "error", where, message: e?.message || String(e) })); };
 
-function b64(x) { if (!x) return ""; if (typeof x === "string") return x; if (Buffer.isBuffer(x)) return x.toString("base64"); try { return Buffer.from(x).toString("base64"); } catch { return ""; } }
+const b64 = (x) => {
+  if (!x) return "";
+  if (typeof x === "string") return x;
+  if (Buffer.isBuffer(x)) return x.toString("base64");
+  try { return Buffer.from(x).toString("base64"); } catch { return ""; }
+};
 
 await connectIndex().catch(e => { jerr("pinecone.connectIndex", e); process.exit(1); });
 
@@ -48,7 +49,7 @@ function buildSessionUpdate() {
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.8,
+      temperature: 0,
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
@@ -63,11 +64,11 @@ export function attachMediaStreamServer(server) {
     let markQueue = [];
     let responseStartTimestampTwilio = null;
 
-    let pendingUserQ = null;
     let hasActiveResponse = false;
+    let pendingUserQ = null;
 
-    let lastInjectedItemId = null;
     let awaitingInjectedAck = false;
+    let lastInjectedItemId = null;
     let pendingResponseAfterInject = false;
 
     const openAiWs = createOpenAIWebSocket();
@@ -103,7 +104,7 @@ export function attachMediaStreamServer(server) {
       let msg;
       try { msg = JSON.parse(data); } catch (e) { jerr("openai.parse", e); return; }
 
-      if (msg.type === "response.created") { hasActiveResponse = true; }
+      if (msg.type === "response.created") hasActiveResponse = true;
 
       if (msg.type === "conversation.item.created" && awaitingInjectedAck && msg.item?.metadata?.rag_injected) {
         lastInjectedItemId = msg.item.id;

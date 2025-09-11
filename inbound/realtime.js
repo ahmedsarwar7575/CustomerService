@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { connectIndex, semanticSearch, buildSnippetsBlock } from "../utils/pinecone.js";
+import { connectIndex, semanticSearchTopK, buildSnippetsBlock } from "../utils/pinecone.js";
 
 const router = Router();
 

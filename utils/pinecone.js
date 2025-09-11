@@ -6,20 +6,23 @@ const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const NAME   = process.env.PINECONE_INDEX       || "ai-chatbot";
-const NS     = process.env.PINECONE_NAMESPACE   || "default";
+const RAW_NS = process.env.PINECONE_NAMESPACE;
+const NS     = (RAW_NS === "__blank__" || RAW_NS === undefined) ? "" : RAW_NS; // default to blank
 const HOST   = process.env.PINECONE_INDEX_HOST  || null;
 const REGION = process.env.PINECONE_REGION      || "us-east-1";
 const CLOUD  = process.env.PINECONE_CLOUD       || "aws";
 const DIMENV = Number(process.env.PINECONE_DIM  || 2048);
-const EMBED_MODEL = process.env.OPENAI_EMBED_MODEL || "text-embedding-3-small";
+
+// IMPORTANT: match your stored vectors (ada-002)
+const EMBED_MODEL = process.env.OPENAI_EMBED_MODEL || "text-embedding-ada-002";
+
 const TOPK        = Number(process.env.TOPK || 6);
 
 export let index;
 export let indexDim = DIMENV;
 
-const jerr = (where, e) => {
+const jerr = (where, e) =>
   console.error(JSON.stringify({ ts: Date.now(), event: "error", where, message: e?.message || String(e) }));
-};
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -37,39 +40,28 @@ export const connectIndex = async () => {
       await sleep(30000);
     }
     const base = HOST ? pc.index(NAME, HOST) : pc.index(NAME);
-    index = base.namespace(NS);
+    index = NS === "" ? base : base.namespace(NS);
 
     try {
       const info = await pc.describeIndex(NAME);
       indexDim = Number(info?.dimension || DIMENV);
-    } catch {
-      indexDim = DIMENV;
-    }
+    } catch { indexDim = DIMENV; }
 
-    let ok = false;
-    for (let i = 0; i < 3; i++) {
-      try {
-        const stats = await index.describeIndexStats?.() || {};
-        const nsStats = stats.namespaces?.[NS] ?? stats.namespaces?.[""] ?? {};
-        const count = Number(nsStats?.vectorCount ?? nsStats?.vector_count ?? 0);
-        if (count > 0) { ok = true; break; }
-      } catch {}
-      await sleep(1000 * (i + 1));
-    }
-    if (!ok) jerr("pinecone.namespace", new Error(`no_vectors_in_namespace name=${NAME} ns=${NS}`));
-  } catch (e) {
-    jerr("pinecone.connectIndex", e);
-    throw e;
-  }
+    try {
+      const stats = await index.describeIndexStats?.() || {};
+      const nsStats = (stats.namespaces && NS in stats.namespaces)
+        ? stats.namespaces[NS] : {};
+      const count = Number(nsStats?.vectorCount ?? nsStats?.vector_count ?? 0);
+      console.log(JSON.stringify({ ts: Date.now(), event: "pinecone.ready", index: NAME, ns: (NS || "(blank)"), dim: indexDim, count }));
+    } catch (e) { jerr("pinecone.describeIndexStats", e); }
+  } catch (e) { jerr("pinecone.connectIndex", e); throw e; }
 };
 
 const fitDim = (v, dim) => {
   if (!Array.isArray(v)) return [];
   if (v.length === dim) return v;
   if (v.length > dim) return v.slice(0, dim);
-  const out = v.slice();
-  while (out.length < dim) out.push(0);
-  return out;
+  return v.concat(Array(dim - v.length).fill(0));
 };
 
 const queryPinecone = async (vector, topK) => {
@@ -87,18 +79,15 @@ const queryPinecone = async (vector, topK) => {
 };
 
 export const embed = async (text) => {
-  const emb = await openai.embeddings.create({ model: EMBED_MODEL, input: text });
-  return emb.data[0].embedding;
+  const r = await openai.embeddings.create({ model: EMBED_MODEL, input: text });
+  return r.data[0].embedding;
 };
 
 export const semanticSearchTopK = async (query, { topK = TOPK } = {}) => {
   try {
     const vec = fitDim(await embed(query), indexDim);
     return await queryPinecone(vec, topK);
-  } catch (e) {
-    jerr("pinecone.semanticSearchTopK", e);
-    return [];
-  }
+  } catch (e) { jerr("pinecone.semanticSearchTopK", e); return []; }
 };
 
 export const buildSnippetsBlock = (query, items) =>
