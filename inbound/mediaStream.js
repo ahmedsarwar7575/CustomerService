@@ -105,7 +105,7 @@ function buildSessionUpdate() {
           format: { type: "audio/pcmu" },
           turn_detection: { type: "server_vad" },
         },
-        output: { format: { type: "audio/pcmu" }, voice: VOICE },
+        output: { format: { type: "audio/pcmu" }, voice: "alloy" },
       },
       voice: "alloy",
       instructions: SYSTEM_MESSAGE,
