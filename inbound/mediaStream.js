@@ -81,7 +81,7 @@ function buildSessionUpdate() {
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.2,
+      temperature: 0.8,
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
