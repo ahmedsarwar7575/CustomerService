@@ -72,9 +72,9 @@ function buildSessionUpdate() {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.7,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 800,
+        threshold: 0.9,              // MUCH higher threshold to ignore noise
+        prefix_padding_ms: 150,      // Shorter padding to reduce noise pickup
+        silence_duration_ms: 1200,   // Longer silence before considering speech done
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
