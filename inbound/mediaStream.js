@@ -2,7 +2,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { summarizer } from "./summery.js";
 import twilio from "twilio";
 import dotenv from "dotenv";
-import { connectIndex, semanticSearch, buildSnippetsBlock } from "../utils/pinecone.js";
+import { connectIndex, semanticSearch, semanticSearchAny, buildSnippetsBlock } from "../utils/pinecone.js";
 
 dotenv.config();
 
@@ -17,7 +17,9 @@ STYLE
 English only. Replies are short (1–2 sentences). One clear question at a time. Warm, calm, confident.
 
 STRICT RAG
-Only answer with facts from SNIPPETS. If no relevant snippet exists for this turn, say: “That isn’t in our knowledge base yet.” Then continue the workflow (clarify or next step). Do not invent facts.
+Only answer with facts from SNIPPETS.
+If no relevant snippet exists for this turn, reply EXACTLY: "That isn’t in our knowledge base yet."
+Do not add anything else before or after that sentence. Then continue the workflow on the next turn (clarify or next step). Do not invent facts.
 
 WORKFLOW
 1) Listen → acknowledge briefly → ask one focused question until clear.
@@ -39,33 +41,14 @@ const jerr = (where, e) => {
 };
 
 function safeParse(s) { try { return JSON.parse((s || "").trim()); } catch { return null; } }
+function b64(x) { if (!x) return ""; if (typeof x === "string") return x; if (Buffer.isBuffer(x)) return x.toString("base64"); try { return Buffer.from(x).toString("base64"); } catch { return ""; } }
 
-function classifyIssue(t = "") {
-  t = t.toLowerCase();
-  if (/(bill|payment|invoice|refund|charge|card)/.test(t)) return "billing";
-  if (/(login|password|verify|otp|lock|unlock|2fa|account)/.test(t)) return "account";
-  if (/(bug|error|crash|fail|broken|not working|issue)/.test(t)) return "technical";
-  if (/(buy|pricing|quote|plan|subscription|upgrade|downgrade)/.test(t)) return "sales";
-  if (/(support|help|question|how to)/.test(t)) return "support";
-  return "other";
-}
-
-function toQAPairs(tr = []) {
-  const out = []; let q = null;
-  for (const m of tr) {
-    if (m.role === "user") { if (q) out.push({ q, a: "" }); q = m.text || ""; }
-    else if (m.role === "assistant") { if (q !== null) { out.push({ q, a: m.text || "" }); q = null; } }
-  }
-  if (q) out.push({ q, a: "" });
-  return out;
-}
+await connectIndex().catch(e => { jerr("pinecone.connectIndex", e); process.exit(1); });
 
 function createOpenAIWebSocket() {
   try {
     const url = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
-    return new WebSocket(url, {
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" },
-    });
+    return new WebSocket(url, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" } });
   } catch (e) { jerr("openai.ws.create", e); throw e; }
 }
 
@@ -73,31 +56,17 @@ function buildSessionUpdate() {
   return {
     type: "session.update",
     session: {
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 800,
-      },
+      turn_detection: { type: "server_vad", threshold: 0.7, prefix_padding_ms: 300, silence_duration_ms: 800 },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
       temperature: 0.8,
-      input_audio_transcription: { model: "whisper-1" },
+      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
 }
-
-function b64(x) {
-  if (!x) return "";
-  if (typeof x === "string") return x;
-  if (Buffer.isBuffer(x)) return x.toString("base64");
-  try { return Buffer.from(x).toString("base64"); } catch { return ""; }
-}
-
-await connectIndex().catch(e => { jerr("pinecone.connectIndex", e); process.exit(1); });
 
 export function attachMediaStreamServer(server) {
   const wss = new WebSocketServer({ server, path: "/media-stream" });
@@ -110,7 +79,6 @@ export function attachMediaStreamServer(server) {
     let responseStartTimestampTwilio = null;
     let textBuffer = "";
     let finalJsonString = null;
-    let printed = false;
     let qaPairs = [];
     let pendingUserQ = null;
     let hasActiveResponse = false;
@@ -123,8 +91,7 @@ export function attachMediaStreamServer(server) {
       try {
         openAiWs.send(JSON.stringify(buildSessionUpdate()));
         setTimeout(() => {
-          try { openAiWs.send(JSON.stringify({ type: "response.create" })); }
-          catch (e) { jerr("openai.response.create.greeting", e); }
+          try { openAiWs.send(JSON.stringify({ type: "response.create" })); } catch (e) { jerr("openai.response.create.greeting", e); }
         }, 150);
       } catch (e) { jerr("openai.session.update", e); }
     };
@@ -137,25 +104,30 @@ export function attachMediaStreamServer(server) {
         responseStartTimestampTwilio = null;
       }
     };
-
     const sendMark = () => {
       if (!streamSid) return;
-      try {
-        connection.send(JSON.stringify({ event: "mark", streamSid, mark: { name: "responsePart" } }));
-        markQueue.push("responsePart");
-      } catch (e) { jerr("twilio.mark", e); }
+      try { connection.send(JSON.stringify({ event: "mark", streamSid, mark: { name: "responsePart" } })); markQueue.push("responsePart"); }
+      catch (e) { jerr("twilio.mark", e); }
     };
 
     openAiWs.on("open", () => { setTimeout(initializeSession, 100); });
     openAiWs.on("close", () => {});
     openAiWs.on("error", (e) => { jerr("openai.ws", e); });
 
+    const waitForInjectedAck = (timeoutMs = 250) => new Promise((resolve) => {
+      if (!awaitingInjectedAck) return resolve(false);
+      const start = Date.now();
+      const i = setInterval(() => {
+        if (!awaitingInjectedAck || lastInjectedItemId) { clearInterval(i); return resolve(true); }
+        if (Date.now() - start > timeoutMs) { clearInterval(i); return resolve(false); }
+      }, 5);
+    });
+
     openAiWs.on("message", async (data) => {
       let msg;
       try { msg = JSON.parse(data); } catch (e) { jerr("openai.parse", e); return; }
 
       if (msg.type === "response.created") { hasActiveResponse = true; }
-
       if (msg.type === "conversation.item.created" && awaitingInjectedAck && msg.item?.metadata?.rag_injected) {
         lastInjectedItemId = msg.item.id;
         awaitingInjectedAck = false;
@@ -172,15 +144,8 @@ export function attachMediaStreamServer(server) {
         } catch (e) { jerr("twilio.media.send", e); }
       }
 
-      if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
-        textBuffer += msg.delta;
-      }
-
-      if (msg.type === "response.output_text.done" && !finalJsonString) {
-        const maybe = safeParse(textBuffer);
-        if (maybe && maybe.session && maybe.customer) finalJsonString = JSON.stringify(maybe);
-        textBuffer = "";
-      }
+      if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") textBuffer += msg.delta;
+      if (msg.type === "response.output_text.done") textBuffer = "";
 
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const q =
@@ -189,9 +154,7 @@ export function attachMediaStreamServer(server) {
         if (q) pendingUserQ = q;
       }
 
-      if (msg.type === "input_audio_buffer.speech_started") {
-        handleSpeechStartedEvent();
-      }
+      if (msg.type === "input_audio_buffer.speech_started") handleSpeechStartedEvent();
 
       if (msg.type === "input_audio_buffer.speech_stopped" && !hasActiveResponse) {
         try {
@@ -200,19 +163,20 @@ export function attachMediaStreamServer(server) {
 
           if (q) {
             jlog("question", { text: q });
+
             try {
-              const minScore = Number(process.env.RAG_MIN_SCORE || 0.6);
+              const minScore = Number(process.env.RAG_MIN_SCORE || 0.35);
               const topK = Number(process.env.TOPK || 6);
+
               const results = await semanticSearch(q, { topK, minScore });
+              let raw = [];
+              if (!results.length) raw = await semanticSearchAny(q, { topK });
 
               jlog("retrieval", {
                 query: q,
                 count: results.length,
-                items: results.map(r => ({
-                  id: r.id,
-                  score: Number(r.score?.toFixed ? r.score.toFixed(3) : r.score),
-                  preview: r.text.slice(0, 500)
-                }))
+                items: results.map(r => ({ id: r.id, score: Number((r.score ?? 0).toFixed?.(3) ?? r.score), preview: r.text.slice(0, 500) })),
+                rawTopK: raw.slice(0, 6).map(r => ({ id: r.id, score: Number((r.score ?? 0).toFixed?.(3) ?? r.score) }))
               });
 
               if (results.length) {
@@ -237,10 +201,7 @@ export function attachMediaStreamServer(server) {
                     content: [{ type: "input_text", text:
 `### NO_SNIPPETS_GUARD
 No relevant knowledge base snippets were found for this turn.
-You must respond: "That isn’t in our knowledge base yet." Then continue the workflow:
-• Ask one concise clarifying question or
-• Offer the next step (create ticket, escalate, or share our support email).
-Never invent facts. Keep replies 1–2 sentences.` }],
+You must reply EXACTLY: "That isn’t in our knowledge base yet." Do not add extra words.` }],
                     metadata: { rag_injected: true }
                   }
                 }));
@@ -248,6 +209,7 @@ Never invent facts. Keep replies 1–2 sentences.` }],
             } catch (e) { jerr("rag.retrieval", e); }
           }
 
+          await waitForInjectedAck(250);
           openAiWs.send(JSON.stringify({ type: "response.create" }));
         } catch (e) { jerr("openai.response.create", e); }
       }
@@ -262,11 +224,11 @@ Never invent facts. Keep replies 1–2 sentences.` }],
         const outputs = msg.response?.output || [];
         for (const out of outputs) {
           if (out?.role === "assistant") {
-            const part = Array.isArray(out.content) ? out.content.find((c) => typeof c?.transcript === "string" && c.transcript.trim()) : null;
+            const part = Array.isArray(out.content)
+              ? out.content.find((c) => typeof c?.transcript === "string" && c.transcript.trim())
+              : null;
             const a = (part?.transcript || "").trim();
-            if (a) {
-              jlog("answer", { text: a });
-            }
+            if (a) jlog("answer", { text: a });
           }
         }
       }
@@ -315,26 +277,11 @@ Never invent facts. Keep replies 1–2 sentences.` }],
             try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch (e) { jerr("openai.buffer.commit", e); }
             try { openAiWs.close(); } catch (e) { jerr("openai.ws.close", e); }
           }
-          emitFinalOnce();
           break;
         default:
           break;
       }
     });
-
-    function emitFinalOnce() {
-      if (printed) return;
-      const raw = safeParse(finalJsonString) || safeParse(textBuffer) || {};
-      const fallbackPairs = Array.isArray(raw?.transcript) ? toQAPairs(raw.transcript) : [];
-      const pairs = qaPairs.length ? qaPairs : fallbackPairs;
-      const name = raw?.customer?.name ?? null;
-      const email = raw?.customer?.email?.normalized ?? null;
-      const summary = raw?.issue?.user_description ?? null;
-      const isIssueResolved = !!raw?.satisfaction?.is_satisfied;
-      const issue = classifyIssue([raw?.resolution?.escalation_reason, summary].filter(Boolean).join(" "));
-      jlog("final", { name, email, issue, isIssueResolved, qaCount: pairs.length });
-      printed = true;
-    }
 
     connection.on("close", async () => {
       if (openAiWs.readyState === WebSocket.OPEN) {
@@ -342,7 +289,7 @@ Never invent facts. Keep replies 1–2 sentences.` }],
       }
       try {
         const allData = await summarizer(qaPairs, callSid);
-        jlog("summary", { ok: true, meta: !!allData });
+        if (!allData) jerr("summary.generate", new Error("no_summary"));
       } catch (e) { jerr("summary.generate", e); }
     });
   });
