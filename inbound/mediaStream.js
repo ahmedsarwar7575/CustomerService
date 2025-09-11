@@ -17,18 +17,22 @@ STYLE
 English only. Replies are short (1–2 sentences). One clear question at a time. Warm, calm, confident.
 
 STRICT RAG
-Only answer with facts from SNIPPETS. If no relevant snippet exists for this turn, say: “That isn’t in our knowledge base yet.” Then continue the workflow (clarify or next step). Do not invent facts.
+CRITICAL: You MUST ONLY answer based on the knowledge base snippets provided in the SNIPPETS section. 
+- If relevant snippets are provided, use ONLY that information to answer
+- If no snippets are provided or snippets don't contain the answer, say: "That isn't in our knowledge base yet."
+- NEVER make up information or answer from general knowledge
+- Always reference the knowledge base when answering
 
 WORKFLOW
 1) Listen → acknowledge briefly → ask one focused question until clear.
 2) Propose a concise plan (1–3 short sentences). Offer options if useful.
 3) Always collect and confirm full name and email before ending. Never ask for phone. If offered, politely decline.
 4) Classify ticket: support / sales / billing (ask once if unclear). Confirm.
-5) End: “Are you satisfied with this solution, or would you like more support?” If more, propose next step.
+5) End: "Are you satisfied with this solution, or would you like more support?" If more, propose next step.
 
 FIRST TURN
-“Hello, this is John Smith with GETPIE Customer Support. Thanks for reaching out today. I’m here to listen to your issue and get you a clear solution or next step.”
-Then ask: “How can I help you today?”
+"Hello, this is John Smith with GETPIE Customer Support. Thanks for reaching out today. I'm here to listen to your issue and get you a clear solution or next step."
+Then ask: "How can I help you today?"
 `;
 
 function safeParse(s) { try { return JSON.parse((s || "").trim()); } catch { return null; } }
@@ -68,16 +72,16 @@ function buildSessionUpdate() {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.7,              // tighter → fewer false starts (less hiss)
+        threshold: 0.7,
         prefix_padding_ms: 300,
-        silence_duration_ms: 800,    // wait a bit longer before treating as “stopped”
+        silence_duration_ms: 800,
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.2,              // less creativity; stick to KB
+      temperature: 0.2,
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
@@ -85,7 +89,7 @@ function buildSessionUpdate() {
 
 function b64(x) {
   if (!x) return "";
-  if (typeof x === "string") return x;           // already base64
+  if (typeof x === "string") return x;
   if (Buffer.isBuffer(x)) return x.toString("base64");
   try { return Buffer.from(x).toString("base64"); } catch { return ""; }
 }
@@ -119,7 +123,7 @@ export function attachMediaStreamServer(server) {
         openAiWs.send(JSON.stringify(buildSessionUpdate()));
         console.log("[OPENAI] session.update sent");
 
-        // Kick off the mandatory greeting immediately (don’t wait for user speech)
+        // Kick off the mandatory greeting immediately (don't wait for user speech)
         setTimeout(() => {
           try {
             openAiWs.send(JSON.stringify({ type: "response.create" }));
@@ -203,7 +207,10 @@ export function attachMediaStreamServer(server) {
         const q =
           (typeof msg.transcript === "string" && msg.transcript.trim()) ||
           (msg.item?.content?.find?.((c) => typeof c?.transcript === "string")?.transcript || "").trim();
-        if (q) { pendingUserQ = q; console.log(`[ASR] user: "${q}"`); }
+        if (q) { 
+          pendingUserQ = q; 
+          console.log(`[ASR] user: "${q}"`); 
+        }
       }
 
       if (msg.type === "input_audio_buffer.speech_started") {
@@ -212,63 +219,129 @@ export function attachMediaStreamServer(server) {
       }
 
       if (msg.type === "input_audio_buffer.speech_stopped" && !hasActiveResponse) {
+        const q = (pendingUserQ || "").trim();
+        console.log("[TURN] speech_stopped; pendingUserQ=", q || "(none)");
+        
+        // ALWAYS perform semantic search when user speaks
         try {
-          const q = (pendingUserQ || "").trim();
-          console.log("[TURN] speech_stopped; pendingUserQ=", q || "(none)");
-          let injected = false;
-
           if (q) {
-            try {
-              const minScore = Number(process.env.RAG_MIN_SCORE || 0.6);
-              const topK = Number(process.env.TOPK || 6);
-              const { filtered } = await semanticSearch(q, { topK, minScore });
+            console.log(`[RAG] Starting search for: "${q}"`);
+            const minScore = Number(process.env.RAG_MIN_SCORE || 0.6);
+            const topK = Number(process.env.TOPK || 6);
+            
+            // Perform semantic search
+            const searchResults = await semanticSearch(q, { topK: topK, minScore: minScore });
+            console.log(`[RAG] Search completed. Found ${searchResults.length} results`);
+            
+            if (searchResults.length > 0) {
+              // Build knowledge base context
+              const snippetsBlock = buildSnippetsBlock(q, searchResults);
+              console.log(`[RAG] Built snippets block with ${searchResults.length} snippets`);
+              
+              // Inject knowledge base context
+              awaitingInjectedAck = true;
+              const contextMessage = {
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "text",
+                    text: `### KNOWLEDGE BASE SNIPPETS
+The following information is from our knowledge base. Use ONLY this information to answer the user's question.
 
-              if (filtered.length) {
-                const block = buildSnippetsBlock(q, filtered);
-                awaitingInjectedAck = true; injected = true;
-                openAiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: { type: "message", role: "system", content: [{ type: "input_text", text: `### SNIPPETS\n${block}\n\n### USER QUESTION\n${q}` }] }
-                }));
-                console.log(`[RAG] injected ${filtered.length} snippets`);
-              } else {
-                awaitingInjectedAck = true; injected = true;
-                openAiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: { type: "message", role: "system", content: [{ type: "input_text", text:
-                    `### NO_SNIPPETS_GUARD
-No relevant knowledge base snippets were found for this turn.
-You must respond: "That isn’t in our knowledge base yet." Then continue the workflow:
-• Ask one concise clarifying question or
-• Offer the next step (create ticket, escalate, or share our support email).
-Never invent facts. Keep replies 1–2 sentences.` }] }
-                }));
-                console.log("[RAG] injected NO_SNIPPETS_GUARD");
-              }
-            } catch (e) { console.error("[RAG] retrieval failed", e); }
+${snippetsBlock}
+
+### INSTRUCTIONS
+- Answer based ONLY on the above snippets
+- If the snippets don't contain the answer, say "That isn't in our knowledge base yet"
+- Keep response short (1-2 sentences)
+- Be helpful and professional
+
+### USER QUESTION
+"${q}"`
+                  }]
+                }
+              };
+              
+              openAiWs.send(JSON.stringify(contextMessage));
+              console.log(`[RAG] Injected ${searchResults.length} knowledge base snippets`);
+            } else {
+              // No results found - inject guard
+              awaitingInjectedAck = true;
+              const guardMessage = {
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "text",
+                    text: `### NO KNOWLEDGE BASE RESULTS
+No relevant information was found in our knowledge base for the user's question: "${q}"
+
+You must respond: "That isn't in our knowledge base yet. Let me help you in another way."
+
+Then continue with the workflow:
+- Ask a clarifying question to better understand their need, or
+- Offer to create a support ticket, or  
+- Provide our general support contact information
+
+Keep the response to 1-2 sentences and stay professional.`
+                  }]
+                }
+              };
+              
+              openAiWs.send(JSON.stringify(guardMessage));
+              console.log("[RAG] No results found - injected no-knowledge guard");
+            }
+          } else {
+            // No question transcribed - let GPT respond normally
+            console.log("[RAG] No user question transcribed, allowing normal response");
           }
-
+          
+          // Trigger response generation
           openAiWs.send(JSON.stringify({ type: "response.create" }));
-          console.log("[OPENAI] response.create sent (injected=", injected, ")");
-        } catch (e) { console.error("[OPENAI] response.create error", e); }
+          console.log("[OPENAI] response.create sent after RAG processing");
+          
+        } catch (error) {
+          console.error("[RAG] Error during semantic search:", error);
+          // Still trigger response even if search fails
+          openAiWs.send(JSON.stringify({ type: "response.create" }));
+        }
       }
 
       if (msg.type === "response.done") {
         hasActiveResponse = false;
+        
+        // Clean up injected context
         if (lastInjectedItemId) {
-          try { openAiWs.send(JSON.stringify({ type: "conversation.item.delete", item_id: lastInjectedItemId })); console.log("[RAG] injected item deleted"); }
-          catch (e) { console.error("[RAG] injected item delete error", e); }
+          try { 
+            openAiWs.send(JSON.stringify({ 
+              type: "conversation.item.delete", 
+              item_id: lastInjectedItemId 
+            })); 
+            console.log("[RAG] Deleted injected context item"); 
+          } catch (e) { 
+            console.error("[RAG] Error deleting injected item:", e); 
+          }
           lastInjectedItemId = null;
         }
+        
+        // Process response outputs
         const outputs = msg.response?.output || [];
         for (const out of outputs) {
           if (out?.role === "assistant") {
             const part = Array.isArray(out.content) ? out.content.find((c) => typeof c?.transcript === "string" && c.transcript.trim()) : null;
             const a = (part?.transcript || "").trim();
             if (a) {
-              if (pendingUserQ) { qaPairs.push({ q: pendingUserQ, a }); pendingUserQ = null; }
-              else { qaPairs.push({ q: null, a }); }
-              console.log("[ASSISTANT]", a);
+              if (pendingUserQ) { 
+                qaPairs.push({ q: pendingUserQ, a }); 
+                console.log(`[QA] Q: "${pendingUserQ}" A: "${a}"`);
+                pendingUserQ = null; 
+              } else { 
+                qaPairs.push({ q: null, a }); 
+                console.log(`[ASSISTANT] ${a}`);
+              }
             }
           }
         }

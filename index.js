@@ -6,6 +6,7 @@ import http from "http";
 import { attachMediaStreamServer } from "./inbound/mediaStream.js";
 dotenv.config();
 import { connectIndex } from "./utils/pinecone.js";
+
 const PORT = process.env.PORT || 8000;
 const server = http.createServer(app);
 attachMediaStreamServer(server);

@@ -1,80 +1,144 @@
-const qaPairs = [];           
-  let pendingUserQ = null;      
-  const logEl = document.getElementById("log");
+const logEl = document.getElementById("log");
+const connectingEl = document.getElementById("connecting");
+const startBtn = document.getElementById("startBtn");
+const hangupBtn = document.getElementById("hangupBtn");
+const remoteAudio = document.getElementById("remoteAudio");
 
-  const log = (...args) => {
-    const str = args.join(" ");
-    const match = str.match(/^event:\s*(\{.*\})$/);
-    if (!match) return;
+let pc, dc, micStream;
+let lastUserTranscript = "";
+let lastRagItemId = null;
+let awaitingResponse = false;
 
-    try {
-      const obj = JSON.parse(match[1]);
+const log = (o) => {
+  const s = typeof o === "string" ? o : JSON.stringify(o);
+  logEl.textContent += s + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+};
 
-      if (obj.type === "conversation.item.input_audio_transcription.completed") {
-        const q = (obj?.transcript || "").trim();
-        if (!q) return;
-        logEl.textContent += `Q: ${q}\n`;
-        pendingUserQ = q; 
+async function getEphemeral() {
+  const r = await fetch("/realtime-session");
+  const txt = await r.text();
+  if (!r.ok) { log(["[session error]", txt]); throw new Error(txt); }
+  const { client_secret } = JSON.parse(txt);
+  if (!client_secret) throw new Error("No client_secret");
+  return client_secret;
+}
+
+async function rag(query) {
+  const r = await fetch("/rag", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query })
+  });
+  const txt = await r.text();
+  if (!r.ok) { log(["[rag error]", txt]); return { count: 0, block: "" }; }
+  return JSON.parse(txt);
+}
+
+async function startCall() {
+  try {
+    connectingEl.style.display = "block";
+    startBtn.disabled = true; hangupBtn.disabled = false;
+
+    const client_secret = await getEphemeral();
+    connectingEl.style.display = "none";
+
+    pc = new RTCPeerConnection();
+    dc = pc.createDataChannel("oai-events");
+
+    pc.ontrack = (e) => { remoteAudio.srcObject = e.streams[0]; };
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
+
+    dc.onopen = () => log("[dc] open");
+    dc.onclose = () => log("[dc] close");
+    dc.onerror = (e) => log(["[dc] error", String(e)]);
+
+    dc.onmessage = async (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { log(["event:", ev.data]); return; }
+      // Show all events
+      log(["event:", m]);
+
+      if (m.type === "conversation.item.input_audio_transcription.completed") {
+        lastUserTranscript =
+          m.transcript ||
+          m.item?.content?.find?.(c => typeof c?.transcript === "string")?.transcript ||
+          "";
+        lastUserTranscript = (lastUserTranscript || "").trim();
+        if (lastUserTranscript) log(`Q: ${lastUserTranscript}`);
       }
 
-      if (obj.type === "response.done") {
-        const outputs = obj.response?.output || [];
-        for (const out of outputs) {
-          if (out.role === "assistant") {
-            const part = out.content?.find((c) => c.transcript);
-            if (part) {
-              const a = (part.transcript || "").trim();
-              logEl.textContent += `A: ${a}\n`;
-              if (pendingUserQ) {
-                qaPairs.push({ q: pendingUserQ, a });
-                pendingUserQ = null;
-              } else {
-                qaPairs.push({ q: null, a });
+      if (m.type === "input_audio_buffer.speech_stopped" && !awaitingResponse) {
+        try {
+          awaitingResponse = true;
+
+          // Cancel any auto-started response (defensive)
+          dc.send(JSON.stringify({ type: "response.cancel" }));
+
+          const q = (lastUserTranscript || "").trim();
+          const { count, block } = q ? await rag(q) : { count: 0, block: "" };
+
+          if (count > 0) {
+            dc.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "system",
+                content: [{ type: "input_text", text: `### SNIPPETS\n${block}\n\n### USER QUESTION\n${q}` }]
               }
-            }
+            }));
+            lastRagItemId = "__PENDING__";
+          } else {
+            dc.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "system",
+                content: [{ type: "input_text", text: `No matching snippets for: "${q}". Say: "That isn’t in our knowledge base yet." Then clarify next step.` }]
+              }
+            }));
+            lastRagItemId = "__PENDING__";
           }
+
+          // wait until item is created, then trigger response
+        } catch (e) {
+          log(["[rag pipeline error]", String(e)]);
+          dc.send(JSON.stringify({ type: "response.create" })); // fallback
         }
       }
 
-      logEl.scrollTop = logEl.scrollHeight;
-    } catch (e) {
-      // ignore
-    }
-  };
+      if (m.type === "conversation.item.created" && lastRagItemId === "__PENDING__") {
+        lastRagItemId = m.item?.id || null;
+        dc.send(JSON.stringify({ type: "response.create" }));
+      }
 
-  let pc, dc, localStream;
+      if (m.type === "response.created") {
+        // ok
+      }
 
-  async function startCall() {
-    document.getElementById("connecting").style.display= "block";
-    document.getElementById("startBtn").disabled = true;
-    document.getElementById("hangupBtn").disabled = false;
+      if (m.type === "response.output_text.delta") {
+        // (optional) live text
+      }
 
-    const tokenRes = await fetch("/realtime-session");
-    const { client_secret } = await tokenRes.json();
-    if (!client_secret) {
-      log("event:", JSON.stringify({ error: "No client_secret" }));
-      return;
-    }
-    document.getElementById("connecting").style.display= "none";
-    pc = new RTCPeerConnection();
-    pc.onconnectionstatechange = () => log("event:", JSON.stringify({ pc_state: pc.connectionState }));
-    pc.oniceconnectionstatechange = () => log("event:", JSON.stringify({ ice_state: pc.iceConnectionState }));
-
-    dc = pc.createDataChannel("oai-events");
-    dc.onmessage = (ev) => {
-      // Some events are plain strings, others are JSON; forward to log()
-      try {
-        JSON.parse(ev.data);
-        log("event:", ev.data);
-      } catch {
-        log("event:", JSON.stringify({ note: ev.data }));
+      if (m.type === "response.done") {
+        const outputs = m.response?.output || [];
+        for (const out of outputs) {
+          if (out.role === "assistant") {
+            const part = Array.isArray(out.content)
+              ? out.content.find(c => typeof c?.transcript === "string" && c.transcript.trim())
+              : null;
+            const a = (part?.transcript || "").trim();
+            if (a) log(`A: ${a}`);
+          }
+        }
+        // clean up injected system item so it doesn't snowball context
+        if (lastRagItemId) {
+          dc.send(JSON.stringify({ type: "conversation.item.delete", item_id: lastRagItemId }));
+          lastRagItemId = null;
+        }
+        awaitingResponse = false;
       }
     };
-
-    pc.ontrack = (e) => (document.getElementById("remoteAudio").srcObject = e.streams[0]);
-
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    localStream.getAudioTracks().forEach((t) => pc.addTrack(t, localStream));
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -94,57 +158,21 @@ const qaPairs = [];
 
     const answer = { type: "answer", sdp: await resp.text() };
     await pc.setRemoteDescription(answer);
-    log("event:", JSON.stringify({ status: "Connected. Speak!" }));
+    log("[webrtc] connected");
+  } catch (e) {
+    log(["[startCall error]", String(e)]);
+    startBtn.disabled = false; hangupBtn.disabled = true;
+    connectingEl.style.display = "none";
   }
+}
 
-  async function postSummary() {
-    try {
-      // If the last user spoke but no assistant answer yet, still include their Q
-      if (pendingUserQ) {
-        qaPairs.push({ q: pendingUserQ, a: null });
-        pendingUserQ = null;
-      }
-      document.getElementById("Summary").style.display= "block";
-      const r = await fetch("/summary", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pairs: qaPairs,
-          meta: { source: "webrtc-demo" }
-        }),
-      });
-      const data = await r.json();
-      document.getElementById("Summary").style.display= "none";
-    //   const releventdata = {
-    //     summary: data?.summary,
-    //     home_resort: data?.input?.home_resort,
-    //     mortgage_owed: data?.input?.mortgage_owed,
-    //     unpaid_fees_or_assessments: data?.input?.unpaid_fees_or_assessments,
-    //     mortgage_balance_estimate: data?.input?.mortgage_balance_estimate,
-    //     network_or_destination: data?.input?.network_or_destination,
-    //     points_or_weeks: data?.input?.points_or_weeks,
-    //     previous_attempts_to_cancel: data?.input?.previous_attempts_to_cancel,
-    //     preferred_outcome: data?.input?.preferred_outcome,
-    //   }
-      logEl.textContent += `\n--- SUMMARY JSON ---\n${JSON.stringify(data, null, 2)}\n`;
-      logEl.scrollTop = logEl.scrollHeight;
-    } catch (e) {
-      logEl.textContent += `\n[summary error] ${e}\n`;
-    }
-  }
+async function hangup() {
+  try { dc && dc.close(); } catch {}
+  try { pc && pc.close(); } catch {}
+  try { micStream && micStream.getTracks().forEach(t => t.stop()); } catch {}
+  startBtn.disabled = false; hangupBtn.disabled = true;
+  log("[webrtc] call ended");
+}
 
-  async function hangup() {
-    // 1) Send Q/A to summarizer BEFORE tearing down
-    await postSummary();
-
-    // 2) Tidy up the call
-    document.getElementById("hangupBtn").disabled = true;
-    try { dc && dc.close(); } catch {}
-    try { pc && pc.close(); } catch {}
-    try { localStream && localStream.getTracks().forEach((t) => t.stop()); } catch {}
-    document.getElementById("startBtn").disabled = false;
-    log("event:", JSON.stringify({ status: "Call ended." }));
-  }
-
-  document.getElementById("startBtn").onclick = startCall;
-  document.getElementById("hangupBtn").onclick = hangup;
+startBtn.onclick = startCall;
+hangupBtn.onclick = hangup;
