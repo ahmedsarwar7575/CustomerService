@@ -18,7 +18,7 @@ const {
   RAG_MIN_SCORE = "0.6",
   VAD_THRESHOLD = "0.7",
   VAD_SILENCE_MS = "800",
-  DEBUG_LEVEL = "error"
+  DEBUG_LEVEL = "info"
 } = process.env;
 
 const LEVELS = { trace: 10, debug: 20, info: 30, warn: 40, error: 50 };
@@ -39,15 +39,13 @@ Use only tool-provided snippets. If none, say: "That isn’t in our knowledge ba
 WORKFLOW
 Acknowledge → ask one focused question → propose a concise plan → collect name+email → classify (support/sales/billing) → close.
 QUERY REWRITE BEFORE RAG
-Rewrite transcript into a high-recall query (fix ASR, normalize product names, expand abbreviations, remove fillers, translate to English if needed, add synonyms). Then call tool search_kb with { query, queries, topK, minScore }. Answer ONLY from returned snippets. Be brief.
+Rewrite transcript into a high-recall query (fix ASR, normalize names, expand abbreviations, remove fillers, translate to English if needed, add synonyms). Then call tool search_kb with { query, queries, topK, minScore }. Answer ONLY from returned snippets. Be brief.
 FIRST TURN
 “Hello, this is John Smith with GETPIE Customer Support. How can I help you today?”
 `;
 
 const b64 = (x) => (typeof x === "string" ? x : Buffer.isBuffer(x) ? x.toString("base64") : Buffer.from(x || "").toString("base64"));
-const peek = (buf, n = 180) => {
-  try { return (Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf)).slice(0, n); } catch { return ""; }
-};
+const peek = (buf, n = 180) => { try { return (Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf)).slice(0, n); } catch { return ""; } };
 function parseMsg(data, isBinary, srcTag) {
   try {
     const s = typeof data === "string" ? data : Buffer.isBuffer(data) ? data.toString("utf8") : String(data || "");
@@ -91,12 +89,13 @@ function buildSessionUpdate() {
     type: "session.update",
     session: {
       turn_detection: { type: "server_vad", threshold: Number(VAD_THRESHOLD), prefix_padding_ms: 300, silence_duration_ms: Number(VAD_SILENCE_MS) },
-      input_audio_format:  { type: "g711_ulaw", sample_rate_hz: 8000 },
-      output_audio_format: { type: "g711_ulaw", sample_rate_hz: 8000 },
+      // IMPORTANT: use string enums (the API error shows object form is invalid for your model)
+      input_audio_format:  "g711_ulaw",
+      output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.8,
+      temperature: 0.2,
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
       tools: [{
         type: "function",
@@ -127,33 +126,62 @@ export async function attachMediaStreamServer(server) {
     let streamSid = null, callSid = null;
     let sessionReady = false, streamReady = false, greeted = false, hasActiveResponse = false;
     let rawTranscript = null, qaPairs = [];
-    let toolArgBuffer = {}, queuedAudio = [];
-    let sentAudioChunks = 0, firstAudioAt = 0, lastAudioAt = 0, lastTextAt = 0;
+    let toolArgBuffer = {}, queuedOutAudio = [];
+    let sentAudioChunks = 0, firstAudioAt = 0;
+    // NEW: buffer Twilio → OpenAI until Realtime is ready
+    const inBuf = []; const INBUF_MAX = 220; // ~4–5s of 20ms frames
 
     const openAiWs = createOpenAIWebSocket();
-    const sendAudio = (payload) => {
+
+    const openAiReady = () => openAiWs.readyState === WebSocket.OPEN && sessionReady;
+
+    const sendToTwilio = (payload) => {
       if (!payload) return;
-      if (!streamSid) { queuedAudio.push(payload); return; }
+      if (!streamSid) { queuedOutAudio.push(payload); return; }
       connection.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
-      sentAudioChunks++; lastAudioAt = Date.now();
+      sentAudioChunks++;
       connection.send(JSON.stringify({ event: "mark", streamSid, mark: { name: `r_${sentAudioChunks}` } }));
     };
-    const flushQueued = () => { if (!streamSid || !queuedAudio.length) return; for (const p of queuedAudio) sendAudio(p); queuedAudio = []; };
+    const flushOutAudio = () => {
+      if (!streamSid || !queuedOutAudio.length) return;
+      for (const p of queuedOutAudio) sendToTwilio(p);
+      log("debug","AUDIO_FLUSHED_TO_TWILIO",{count: queuedOutAudio.length});
+      queuedOutAudio.length = 0;
+    };
+
+    const flushInBufToOpenAI = () => {
+      if (!openAiReady() || !inBuf.length) return;
+      const n = inBuf.length;
+      for (const payload of inBuf) {
+        try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: payload })); }
+        catch (e) { log("error","OPENAI_APPEND_FAIL_FLUSH",{err:String(e?.message||e)}); break; }
+      }
+      log("debug","INBUF_FLUSHED",{count: n});
+      inBuf.length = 0;
+    };
+
     const tryGreet = () => {
-      if (greeted || !sessionReady || !streamReady) return;
+      if (greeted || !streamReady || !openAiReady()) return;
       greeted = true;
-      openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } }));
-      setTimeout(() => {
-        if (sentAudioChunks === 0) {
-          log("warn","NO_AUDIO_AFTER_GREETING_RETRY");
-          openAiWs.send(JSON.stringify(buildSessionUpdate()));
-          setTimeout(() => openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } })), 700);
-        }
-      }, 3500);
+      try {
+        openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } }));
+        log("debug","GREETING_SENT");
+        setTimeout(() => {
+          if (sentAudioChunks === 0) {
+            log("warn","NO_AUDIO_AFTER_GREETING_RETRY");
+            openAiWs.send(JSON.stringify(buildSessionUpdate()));
+            setTimeout(() => openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } })), 700);
+          }
+        }, 3500);
+      } catch (e) { log("error","GREETING_ERR",{err:String(e?.message||e)}); }
     };
 
     const hb = setInterval(() => { try { openAiWs.ping(); } catch {} }, 15000);
-    openAiWs.on("open", () => { openAiWs.send(JSON.stringify(buildSessionUpdate())); });
+
+    openAiWs.on("open", () => {
+      log("debug","OPENAI_WS_OPEN");
+      openAiWs.send(JSON.stringify(buildSessionUpdate()));
+    });
     openAiWs.on("close", (c, r) => { clearInterval(hb); log("warn","OPENAI_WS_CLOSE",{code:c,reason:String(r)}); });
     openAiWs.on("error", (e) => log("error","OPENAI_WS_ERROR",{err:String(e?.message||e)}));
 
@@ -161,19 +189,32 @@ export async function attachMediaStreamServer(server) {
       const msg = parseMsg(data, isBinary, "OPENAI");
       if (!msg) return;
 
-      if (msg.type === "session.created" || msg.type === "session.updated") { sessionReady = true; tryGreet(); }
-      else if (msg.type === "response.created") { hasActiveResponse = true; }
-      else if (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") {
-        const payload = b64(msg.delta); if (payload && !firstAudioAt) firstAudioAt = Date.now(); sendAudio(payload);
+      if (msg.type === "session.created" || msg.type === "session.updated") {
+        sessionReady = true;
+        log("debug","SESSION_READY");
+        flushInBufToOpenAI();
+        tryGreet();
       }
-      else if (msg.type === "response.output_text.delta") { lastTextAt = Date.now(); }
+      else if (msg.type === "response.created") {
+        hasActiveResponse = true;
+      }
+      else if (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") {
+        const payload = b64(msg.delta);
+        if (payload && !firstAudioAt) firstAudioAt = Date.now();
+        sendToTwilio(payload);
+      }
       else if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const t = (msg.transcript || msg.item?.content?.find?.(c => c?.transcript)?.transcript || "").trim();
         if (t) { rawTranscript = t; log("info","TRANSCRIPT_RAW",{t}); }
       }
-      else if (msg.type === "input_audio_buffer.speech_started") { if (streamSid) connection.send(JSON.stringify({ event: "clear", streamSid })); }
+      else if (msg.type === "input_audio_buffer.speech_started") {
+        if (streamSid) connection.send(JSON.stringify({ event: "clear", streamSid }));
+      }
       else if (msg.type === "input_audio_buffer.speech_stopped") {
-        if (!hasActiveResponse) openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } }));
+        if (!hasActiveResponse) {
+          try { openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } })); }
+          catch (e) { log("error","RESP_CREATE_ERR",{err:String(e?.message||e)}); }
+        }
       }
       else if (msg.type === "response.function_call_arguments.delta") {
         const fn = msg.name; toolArgBuffer[fn] = (toolArgBuffer[fn] || "") + (msg.delta || "");
@@ -222,7 +263,9 @@ export async function attachMediaStreamServer(server) {
         }
         sentAudioChunks = 0;
       }
-      else if (msg.type === "error") { log("error","OPENAI_ERROR_EVT",{msg}); }
+      else if (msg.type === "error") {
+        log("error","OPENAI_ERROR_EVT",{msg});
+      }
     });
 
     connection.on("message", async (message, isBinary) => {
@@ -239,8 +282,10 @@ export async function attachMediaStreamServer(server) {
           callSid = data.start.callSid || null;
           streamReady = true;
           log("info","TWILIO_START",{streamSid,callSid});
-          flushQueued();
+          flushOutAudio();
+          // try greeting only when both sides are ready
           tryGreet();
+
           if (callSid && TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && PUBLIC_BASE_URL) {
             const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
             try {
@@ -252,17 +297,23 @@ export async function attachMediaStreamServer(server) {
               log("debug","TWILIO_RECORDING_STARTED",{sid: rec.sid});
             } catch (e) { log("warn","TWILIO_RECORDING_FAIL",{err:String(e?.message||e)}); }
           }
-          setTimeout(() => {
-            if (sentAudioChunks === 0 && !firstAudioAt) log("warn","NO_MEDIA_OR_AUDIO_YET_5S");
-          }, 5000);
           break;
         }
 
-        case "media":
-          try {
-            openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload }));
-          } catch (e) { log("error","OPENAI_APPEND_FAIL",{err:String(e?.message||e)}); }
+        case "media": {
+          const payload = data.media?.payload;
+          if (!payload) return;
+          if (!openAiReady()) {
+            if (inBuf.length >= INBUF_MAX) { inBuf.shift(); log("debug","INBUF_DROP_OVERFLOW",{size: inBuf.length}); }
+            inBuf.push(payload);
+            log("debug","INBUF_QUEUED",{size: inBuf.length});
+          } else {
+            try {
+              openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: payload }));
+            } catch (e) { log("error","OPENAI_APPEND_FAIL",{err:String(e?.message||e)}); }
+          }
           break;
+        }
 
         case "mark":
           log("debug","TWILIO_MARK_ACK",{name: data.mark?.name});
