@@ -18,7 +18,7 @@ const {
   RAG_MIN_SCORE = "0.6",
   VAD_THRESHOLD = "0.7",
   VAD_SILENCE_MS = "800",
-  DEBUG_LEVEL = "info"
+  DEBUG_LEVEL = "error"
 } = process.env;
 
 const LEVELS = { trace: 10, debug: 20, info: 30, warn: 40, error: 50 };
@@ -89,13 +89,12 @@ function buildSessionUpdate() {
     type: "session.update",
     session: {
       turn_detection: { type: "server_vad", threshold: Number(VAD_THRESHOLD), prefix_padding_ms: 300, silence_duration_ms: Number(VAD_SILENCE_MS) },
-      // IMPORTANT: use string enums (the API error shows object form is invalid for your model)
       input_audio_format:  "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.2,
+      temperature: 0.7, // >= 0.6 per your error
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
       tools: [{
         type: "function",
@@ -124,16 +123,40 @@ export async function attachMediaStreamServer(server) {
 
   wss.on("connection", (connection) => {
     let streamSid = null, callSid = null;
-    let sessionReady = false, streamReady = false, greeted = false, hasActiveResponse = false;
+    let sessionReady = false, streamReady = false, greeted = false;
     let rawTranscript = null, qaPairs = [];
     let toolArgBuffer = {}, queuedOutAudio = [];
     let sentAudioChunks = 0, firstAudioAt = 0;
-    // NEW: buffer Twilio → OpenAI until Realtime is ready
-    const inBuf = []; const INBUF_MAX = 220; // ~4–5s of 20ms frames
+
+    // inbound audio buffer (Twilio -> OpenAI) until OpenAI is ready
+    const inBuf = []; const INBUF_MAX = 220;
+
+    // response gating: never send response.create while one is active
+    let activeResponse = false;
+    let pendingResponse = false;
+    let pendingReason = "";
 
     const openAiWs = createOpenAIWebSocket();
-
     const openAiReady = () => openAiWs.readyState === WebSocket.OPEN && sessionReady;
+
+    const requestResponse = (reason = "") => {
+      if (!openAiReady()) return; // ignore until session ready
+      if (activeResponse) { pendingResponse = true; pendingReason = reason || pendingReason; log("debug","RESP_QUEUED",{reason}); return; }
+      try {
+        activeResponse = true;
+        openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } }));
+        log("debug","RESP_CREATE",{reason});
+      } catch (e) { log("error","RESP_CREATE_ERR",{err:String(e?.message||e)}); activeResponse = false; }
+    };
+
+    const onResponseDone = () => {
+      activeResponse = false;
+      if (pendingResponse) {
+        const why = pendingReason;
+        pendingResponse = false; pendingReason = "";
+        requestResponse(`after_${why}`);
+      }
+    };
 
     const sendToTwilio = (payload) => {
       if (!payload) return;
@@ -163,17 +186,14 @@ export async function attachMediaStreamServer(server) {
     const tryGreet = () => {
       if (greeted || !streamReady || !openAiReady()) return;
       greeted = true;
-      try {
-        openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } }));
-        log("debug","GREETING_SENT");
-        setTimeout(() => {
-          if (sentAudioChunks === 0) {
-            log("warn","NO_AUDIO_AFTER_GREETING_RETRY");
-            openAiWs.send(JSON.stringify(buildSessionUpdate()));
-            setTimeout(() => openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } })), 700);
-          }
-        }, 3500);
-      } catch (e) { log("error","GREETING_ERR",{err:String(e?.message||e)}); }
+      requestResponse("greet");
+      setTimeout(() => {
+        if (sentAudioChunks === 0) {
+          log("warn","NO_AUDIO_AFTER_GREETING_RETRY");
+          try { openAiWs.send(JSON.stringify(buildSessionUpdate())); } catch {}
+          requestResponse("greet_retry");
+        }
+      }, 3500);
     };
 
     const hb = setInterval(() => { try { openAiWs.ping(); } catch {} }, 15000);
@@ -194,32 +214,42 @@ export async function attachMediaStreamServer(server) {
         log("debug","SESSION_READY");
         flushInBufToOpenAI();
         tryGreet();
+        return;
       }
-      else if (msg.type === "response.created") {
-        hasActiveResponse = true;
-      }
-      else if (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") {
+      if (msg.type === "response.created") { activeResponse = true; return; }
+
+      if (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") {
         const payload = b64(msg.delta);
         if (payload && !firstAudioAt) firstAudioAt = Date.now();
         sendToTwilio(payload);
+        return;
       }
-      else if (msg.type === "conversation.item.input_audio_transcription.completed") {
+
+      if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const t = (msg.transcript || msg.item?.content?.find?.(c => c?.transcript)?.transcript || "").trim();
         if (t) { rawTranscript = t; log("info","TRANSCRIPT_RAW",{t}); }
+        return;
       }
-      else if (msg.type === "input_audio_buffer.speech_started") {
+
+      if (msg.type === "input_audio_buffer.speech_started") {
+        // Cancel any current response audio, but don't immediately create a new one
+        try { openAiWs.send(JSON.stringify({ type: "response.cancel" })); } catch {}
         if (streamSid) connection.send(JSON.stringify({ event: "clear", streamSid }));
+        return;
       }
-      else if (msg.type === "input_audio_buffer.speech_stopped") {
-        if (!hasActiveResponse) {
-          try { openAiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } })); }
-          catch (e) { log("error","RESP_CREATE_ERR",{err:String(e?.message||e)}); }
-        }
+
+      if (msg.type === "input_audio_buffer.speech_stopped") {
+        // Schedule a response after the current one (if any) finishes
+        requestResponse("speech_stopped");
+        return;
       }
-      else if (msg.type === "response.function_call_arguments.delta") {
+
+      if (msg.type === "response.function_call_arguments.delta") {
         const fn = msg.name; toolArgBuffer[fn] = (toolArgBuffer[fn] || "") + (msg.delta || "");
+        return;
       }
-      else if (msg.type === "response.function_call_arguments.done") {
+
+      if (msg.type === "response.function_call_arguments.done") {
         const fn = msg.name;
         const args = parseMsg(toolArgBuffer[fn] || "{}", false, "OPENAI_TOOL_ARGS") || {};
         delete toolArgBuffer[fn];
@@ -229,6 +259,7 @@ export async function attachMediaStreamServer(server) {
           const qAlts = Array.isArray(args.queries) ? args.queries.filter(Boolean).map(String) : [];
           const topK = Number(args.topK || TOPK);
           const minScore = Number(args.minScore || RAG_MIN_SCORE);
+
           if (rawTranscript) log("info","BEFORE_REWRITE",{t: rawTranscript});
           if (qMain) log("info","REWRITE",{best: qMain, alts: qAlts});
 
@@ -247,9 +278,11 @@ export async function attachMediaStreamServer(server) {
 
           await openAiWs.send(JSON.stringify({ type: "tool.output", tool_call_id: msg.call_id, output: JSON.stringify({ snippets }) }));
         }
+        return;
       }
-      else if (msg.type === "response.done") {
-        hasActiveResponse = false;
+
+      if (msg.type === "response.done") {
+        // capture assistant text for your summary
         const outs = msg.response?.output || [];
         for (const out of outs) {
           if (out?.role === "assistant") {
@@ -258,13 +291,26 @@ export async function attachMediaStreamServer(server) {
                  out.content.find(c => typeof c?.text === "string")?.text)
               : null;
             const a = (part || "").trim();
-            if (a) { const q = rawTranscript || null; qaPairs.push({ q, a }); log("info","ASSISTANT_MSG",{a, audioChunks: sentAudioChunks}); rawTranscript = null; }
+            if (a) { const q = rawTranscript || "not specified"; qaPairs.push({ q, a }); log("info","ASSISTANT_MSG",{a, audioChunks: sentAudioChunks}); rawTranscript = null; }
           }
         }
         sentAudioChunks = 0;
+        onResponseDone();
+        return;
       }
-      else if (msg.type === "error") {
+
+      if (msg.type === "error") {
+        // If it's "conversation_already_has_active_response", queue another one
+        const code = msg.error?.code || "";
+        if (code === "conversation_already_has_active_response") {
+          pendingResponse = true; pendingReason = "auto_from_error";
+          log("warn","ACTIVE_RESPONSE_BUSY_QUEUE");
+        } else if (code === "decimal_below_min_value") {
+          // self-heal: resend session with temperature 0.6
+          try { openAiWs.send(JSON.stringify(buildSessionUpdate())); log("warn","TEMP_SELF_HEAL"); } catch {}
+        }
         log("error","OPENAI_ERROR_EVT",{msg});
+        return;
       }
     });
 
@@ -280,12 +326,10 @@ export async function attachMediaStreamServer(server) {
         case "start": {
           streamSid = data.start.streamSid;
           callSid = data.start.callSid || null;
-          streamReady = true;
           log("info","TWILIO_START",{streamSid,callSid});
+          streamReady = true;
           flushOutAudio();
-          // try greeting only when both sides are ready
           tryGreet();
-
           if (callSid && TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && PUBLIC_BASE_URL) {
             const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
             try {
@@ -301,16 +345,14 @@ export async function attachMediaStreamServer(server) {
         }
 
         case "media": {
-          const payload = data.media?.payload;
-          if (!payload) return;
+          const payload = data.media?.payload; if (!payload) return;
           if (!openAiReady()) {
             if (inBuf.length >= INBUF_MAX) { inBuf.shift(); log("debug","INBUF_DROP_OVERFLOW",{size: inBuf.length}); }
             inBuf.push(payload);
             log("debug","INBUF_QUEUED",{size: inBuf.length});
           } else {
-            try {
-              openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: payload }));
-            } catch (e) { log("error","OPENAI_APPEND_FAIL",{err:String(e?.message||e)}); }
+            try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: payload })); }
+            catch (e) { log("error","OPENAI_APPEND_FAIL",{err:String(e?.message||e)}); }
           }
           break;
         }
