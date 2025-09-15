@@ -18,7 +18,7 @@ const {
   RAG_MIN_SCORE = "0.6",
   VAD_THRESHOLD = "0.7",
   VAD_SILENCE_MS = "800",
-  DEBUG_LEVEL = "error"
+  DEBUG_LEVEL = "info"
 } = process.env;
 
 const LEVELS = { trace: 10, debug: 20, info: 30, warn: 40, error: 50 };
