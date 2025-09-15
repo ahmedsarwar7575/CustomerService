@@ -18,7 +18,7 @@ const {
   RAG_MIN_SCORE = "0.6",
   VAD_THRESHOLD = "0.7",
   VAD_SILENCE_MS = "800",
-  DEBUG_LEVEL = "info"
+  DEBUG_LEVEL = "error"
 } = process.env;
 
 const LEVELS = { trace: 10, debug: 20, info: 30, warn: 40, error: 50 };
@@ -96,7 +96,7 @@ function buildSessionUpdate() {
       voice: REALTIME_VOICE,
       instructions: SYSTEM_MESSAGE,
       modalities: ["text", "audio"],
-      temperature: 0.2,
+      temperature: 0.8,
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
       tools: [{
         type: "function",
