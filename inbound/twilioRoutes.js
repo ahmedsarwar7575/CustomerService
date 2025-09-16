@@ -8,7 +8,7 @@ router.all("/incoming-call", async (req, res) => {
   // TwiML: just greet + connect the bidirectional stream
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Please wait while we connect your call to the AI assistant.</Say>
+  <Say>Hello, Welcome to GET PIE Customer Support. How can I help you today?</Say>
   <Connect>
     <Stream url="${wsUrl}" />
   </Connect>

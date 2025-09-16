@@ -7,19 +7,19 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const NAME = process.env.PINECONE_INDEX || "ai-chatbot";
 const RAW_NS = process.env.PINECONE_NAMESPACE;
-const NS = RAW_NS === "__blank__" || RAW_NS === undefined ? "" : RAW_NS; // default to blank
+const NS = RAW_NS === "__blank__" || RAW_NS === undefined ? "" : RAW_NS;
 const HOST = process.env.PINECONE_INDEX_HOST || null;
 const REGION = process.env.PINECONE_REGION || "us-east-1";
 const CLOUD = process.env.PINECONE_CLOUD || "aws";
-const DIMENV = Number(process.env.PINECONE_DIM || 2048);
 
-// IMPORTANT: match your stored vectors (ada-002)
-const EMBED_MODEL = process.env.OPENAI_EMBED_MODEL || "text-embedding-ada-002";
+// Match your model and index dim
+const EMBED_MODEL = process.env.OPENAI_EMBED_MODEL || "text-embedding-3-small";
+const MODEL_DIM = EMBED_MODEL.includes("large") ? 3072 : 1536;
 
-const TOPK = Number(process.env.TOPK || 6);
+const TOPK = Number(process.env.TOPK || 8);
 
 export let index;
-export let indexDim = DIMENV;
+export let indexDim = Number(process.env.PINECONE_DIM || MODEL_DIM);
 
 const jerr = (where, e) =>
   console.error(
@@ -40,7 +40,7 @@ export const connectIndex = async () => {
     if (!exists) {
       await pc.createIndex({
         name: NAME,
-        dimension: DIMENV,
+        dimension: indexDim || MODEL_DIM,
         metric: "cosine",
         spec: { serverless: { cloud: CLOUD, region: REGION } },
       });
@@ -51,9 +51,9 @@ export const connectIndex = async () => {
 
     try {
       const info = await pc.describeIndex(NAME);
-      indexDim = Number(info?.dimension || DIMENV);
+      indexDim = Number(info?.dimension || indexDim || MODEL_DIM);
     } catch {
-      indexDim = DIMENV;
+      // keep env/model default
     }
 
     try {
@@ -80,18 +80,12 @@ export const connectIndex = async () => {
   }
 };
 
-const fitDim = (v, dim) => {
-  if (!Array.isArray(v)) return [];
-  if (v.length === dim) return v;
-  if (v.length > dim) return v.slice(0, dim);
-  return v.concat(Array(dim - v.length).fill(0));
-};
-
 const queryPinecone = async (vector, topK) => {
   const res = await index.query({ topK, vector, includeMetadata: true });
   return (res?.matches || []).map((m) => ({
     id: m.id,
     score: m.score,
+    metadata: m.metadata || {},
     text: String(
       m.metadata?.text ||
         m.metadata?.chunk_text ||
@@ -104,13 +98,26 @@ const queryPinecone = async (vector, topK) => {
 
 export const embed = async (text) => {
   const r = await openai.embeddings.create({ model: EMBED_MODEL, input: text });
-  return r.data[0].embedding;
+  const v = r.data[0].embedding;
+  if (v.length !== indexDim) {
+    // hard fail is safer than silent pad/truncate
+    throw new Error(
+      `Embedding dim ${v.length} != index dim ${indexDim}. Fix EMBED_MODEL or index.`
+    );
+  }
+  return v;
 };
 
-export const semanticSearch = async (query, { topK = TOPK } = {}) => {
+export const semanticSearch = async (
+  query,
+  { topK = TOPK, minScore = 0.0 } = {}
+) => {
   try {
-    const vec = fitDim(await embed(query), indexDim);
-    return await queryPinecone(vec, topK);
+    const vec = await embed(query);
+    const matches = await queryPinecone(vec, topK);
+    return minScore > 0
+      ? matches.filter((m) => (m.score ?? 0) >= minScore)
+      : matches;
   } catch (e) {
     jerr("pinecone.semanticSearchTopK", e);
     return [];
@@ -121,8 +128,8 @@ export const buildSnippetsBlock = (query, items) =>
   items
     .map(
       (m, i) =>
-        `● (${i + 1}) id=${m.id} score=${(m.score ?? 0).toFixed(
-          3
-        )}\n${m.text.slice(0, 800)}`
+        `● (${i + 1}) id=${m.id} score=${(m.score ?? 0).toFixed(3)}\n${String(
+          m.text
+        ).slice(0, 800)}`
     )
     .join("\n\n");
