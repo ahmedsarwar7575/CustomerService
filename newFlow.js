@@ -135,7 +135,7 @@ async function answerGrounded(systemText, transcript, snippets) {
   };
   const r = await openai.chat.completions.create({
     model: process.env.GPT_MODEL || "gpt-4o-mini",
-    temperature: 0.2,
+    temperature: 0.6,
     messages: [
       { role: "system", content: systemText },
       { role: "user", content: JSON.stringify(payload) },
