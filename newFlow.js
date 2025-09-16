@@ -157,12 +157,12 @@ async function ttsToPCM16(text) {
 
 // ---- WS Bridge ----
 export async function attachNewFlow(server) {
-  const wss = new WebSocketServer({ server, path: "/whisper-media" });
+  const wss = new WebSocketServer({ server, path: "/media-stream" });
   console.log(
     JSON.stringify({
       ts: Date.now(),
       event: "ws.ready",
-      path: "/whisper-media",
+      path: "/media-stream",
     })
   );
 
