@@ -4,90 +4,106 @@ import os from "os";
 import path from "path";
 import OpenAI from "openai";
 import { v4 as uuidv4 } from "uuid";
-import { embedAndSearch } from "./utils/pinecone.js";
+import { embedAndSearch } from "./Pinecone.js";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// --------- μ-law / PCM / WAV / VAD ----------
-const MULAW_MAX = 0x1fff,
-  BIAS = 0x84;
-function ulawDecodeByte(u8) {
+// ---- logs ----
+const log = (trace_id, event, data = {}) =>
+  console.log(JSON.stringify({ ts: Date.now(), trace_id, event, ...data }));
+
+// ---- μ-law / PCM / WAV / VAD ----
+const BIAS = 0x84;
+const CLIP = 32635;
+
+function muLawEncodeSample(s) {
+  let sign = (s >> 8) & 0x80;
+  if (sign) s = -s;
+  if (s > CLIP) s = CLIP;
+  s = s + BIAS;
+  let exp = 7;
+  for (let mask = 0x4000; (s & mask) === 0 && exp > 0; exp--, mask >>= 1) {}
+  const mant = (s >> (exp + 3)) & 0x0f;
+  return ~(sign | (exp << 4) | mant) & 0xff;
+}
+
+function muLawDecodeByte(u8) {
   u8 = ~u8 & 0xff;
-  const s = u8 & 0x80;
-  let e = (u8 >> 4) & 7,
-    m = u8 & 0xf,
-    x = ((m << 4) + 8) << (e + 3);
-  x -= BIAS;
-  if (s) x = -x;
-  return Math.max(-32768, Math.min(32767, x));
+  const sign = u8 & 0x80;
+  const exp = (u8 >> 4) & 0x07;
+  const mant = u8 & 0x0f;
+  let s = ((mant << 3) + BIAS) << exp;
+  s -= BIAS;
+  return sign ? -s : s;
 }
-function ulawEncodeSample(p) {
-  let s = (p >> 8) & 0x80;
-  if (s) p = -p;
-  if (p > MULAW_MAX) p = MULAW_MAX;
-  p += BIAS;
-  let e = 7;
-  for (let m = 0x4000; (p & m) === 0 && e > 0; e--, m >>= 1) {}
-  const M = (p >> (e + 3)) & 0x0f;
-  return ~(s | (e << 4) | M) & 0xff;
-}
+
 function decodeMuLawToPCM16(mu) {
-  const o = new Int16Array(mu.length);
-  for (let i = 0; i < mu.length; i++) o[i] = ulawDecodeByte(mu[i]);
-  return o;
+  const out = new Int16Array(mu.length);
+  for (let i = 0; i < mu.length; i++) out[i] = muLawDecodeByte(mu[i]);
+  return out;
 }
+
 function encodePCM16ToMuLaw(pcm) {
-  const o = Buffer.allocUnsafe(pcm.length);
-  for (let i = 0; i < pcm.length; i++) o[i] = ulawEncodeSample(pcm[i]);
-  return o;
+  const out = Buffer.allocUnsafe(pcm.length);
+  for (let i = 0; i < pcm.length; i++) out[i] = muLawEncodeSample(pcm[i]);
+  return out;
 }
-function resamplePCM16_16k_to_8k(p) {
-  const o = new Int16Array(Math.floor(p.length / 2));
-  for (let i = 0, j = 0; j < o.length; i += 2, j++)
-    o[j] = (p[i] + p[i + 1]) / 2;
-  return o;
+
+function resamplePCM16_16k_to_8k(pcm16k) {
+  const N = Math.floor(pcm16k.length / 2);
+  const out = new Int16Array(N);
+  let prev = 0;
+  for (let j = 0, i = 0; j < N; j++, i += 2) {
+    const s0 = pcm16k[i];
+    const s1 = pcm16k[i + 1] ?? s0;
+    out[j] = (prev + (s0 << 1) + s1) >> 2;
+    prev = s0;
+  }
+  return out;
 }
-function buildWavFromPCM16(pcm, sr) {
-  const br = sr * 2,
-    ba = 2,
-    sz = pcm.length * 2,
-    b = Buffer.alloc(44 + sz);
-  b.write("RIFF", 0);
-  b.writeUInt32LE(36 + sz, 4);
-  b.write("WAVE", 8);
-  b.write("fmt ", 12);
-  b.writeUInt32LE(16, 16);
-  b.writeUInt16LE(1, 20);
-  b.writeUInt16LE(1, 22);
-  b.writeUInt32LE(sr, 24);
-  b.writeUInt32LE(br, 28);
-  b.writeUInt16LE(ba, 32);
-  b.writeUInt16LE(16, 34);
-  b.write("data", 36);
-  b.writeUInt32LE(sz, 40);
-  for (let i = 0; i < pcm.length; i++) b.writeInt16LE(pcm[i], 44 + i * 2);
-  return b;
+
+function buildWavFromPCM16(pcm, sampleRate) {
+  const byteRate = sampleRate * 2;
+  const blockAlign = 2;
+  const dataSize = pcm.length * 2;
+  const buf = Buffer.alloc(44 + dataSize);
+  buf.write("RIFF", 0);
+  buf.writeUInt32LE(36 + dataSize, 4);
+  buf.write("WAVE", 8);
+  buf.write("fmt ", 12);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(byteRate, 28);
+  buf.writeUInt16LE(blockAlign, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write("data", 36);
+  buf.writeUInt32LE(dataSize, 40);
+  for (let i = 0; i < pcm.length; i++) buf.writeInt16LE(pcm[i], 44 + i * 2);
+  return buf;
 }
+
 function vadSegmenter({ windowMs = 200, silenceMs = 900, energy = 900 }) {
-  const srate = 8000,
-    wins = Math.max(1, Math.floor(silenceMs / windowMs));
+  const srate = 8000;
+  const wins = Math.max(1, Math.floor(silenceMs / windowMs));
   let voiced = false,
-    sil = 0;
+    silence = 0;
   return {
-    feed(f) {
+    feed(framePCM) {
       let sum = 0;
-      for (let i = 0; i < f.length; i++) sum += Math.abs(f[i]);
-      const avg = sum / f.length;
+      for (let i = 0; i < framePCM.length; i++) sum += Math.abs(framePCM[i]);
+      const avg = sum / framePCM.length;
       if (avg > energy) {
         voiced = true;
-        sil = 0;
+        silence = 0;
         return "speech";
       }
       if (voiced) {
-        sil++;
-        if (sil >= wins) {
+        silence++;
+        if (silence >= wins) {
           voiced = false;
-          sil = 0;
+          silence = 0;
           return "utterance_end";
         }
       }
@@ -95,12 +111,12 @@ function vadSegmenter({ windowMs = 200, silenceMs = 900, energy = 900 }) {
     },
     reset() {
       voiced = false;
-      sil = 0;
+      silence = 0;
     },
   };
 }
 
-// --------- OpenAI steps ----------
+// ---- OpenAI steps ----
 async function transcribeWhisper(wavPath, prompt = "") {
   const r = await openai.audio.transcriptions.create({
     model: "whisper-1",
@@ -109,6 +125,7 @@ async function transcribeWhisper(wavPath, prompt = "") {
   });
   return r.text?.trim() || "";
 }
+
 async function answerGrounded(systemText, transcript, snippets) {
   const payload = {
     transcript_text: transcript,
@@ -126,6 +143,7 @@ async function answerGrounded(systemText, transcript, snippets) {
   });
   return r.choices[0]?.message?.content?.trim() || "";
 }
+
 async function ttsToPCM16(text) {
   const r = await openai.audio.speech.create({
     model: process.env.TTS_MODEL || "gpt-4o-mini-tts",
@@ -134,17 +152,17 @@ async function ttsToPCM16(text) {
     format: "pcm",
   });
   const buf = Buffer.from(await r.arrayBuffer());
-  return new Int16Array(buf.buffer, buf.byteOffset, buf.byteLength / 2);
+  return new Int16Array(buf.buffer, buf.byteOffset, buf.byteLength / 2); // 16k mono
 }
 
-// --------- WS Bridge (Twilio <-> Pipeline) ----------
+// ---- WS Bridge ----
 export async function attachNewFlow(server) {
-  const wss = new WebSocketServer({ server, path: "/media-stream" });
+  const wss = new WebSocketServer({ server, path: "/whisper-media" });
   console.log(
     JSON.stringify({
       ts: Date.now(),
       event: "ws.ready",
-      path: "/media-stream",
+      path: "/whisper-media",
     })
   );
 
@@ -160,9 +178,6 @@ export async function attachNewFlow(server) {
       energy: Number(process.env.VAD_ENERGY || 900),
     });
 
-    const log = (event, data = {}) =>
-      console.log(JSON.stringify({ ts: Date.now(), trace_id, event, ...data }));
-
     const flushUtterance = async () => {
       if (muChunks.length === 0) return;
       try {
@@ -172,35 +187,43 @@ export async function attachNewFlow(server) {
         const tmp = path.join(os.tmpdir(), `utt_${Date.now()}.wav`);
         fs.writeFileSync(tmp, wav);
 
-        log("stt.start", { ms: Math.round((pcm8k.length / 8000) * 1000) });
+        log(trace_id, "stt.start", {
+          ms: Math.round((pcm8k.length / 8000) * 1000),
+        });
         const transcript = await transcribeWhisper(
           tmp,
           process.env.WHISPER_HINT || ""
         );
         fs.unlink(tmp, () => {});
-        log("stt.done", { text: transcript });
+        log(trace_id, "stt.done", { text: transcript });
 
-        log("retrieval.start");
-        const snippets = await embedAndSearch(transcript);
-        log("retrieval.done", {
+        log(trace_id, "retrieval.start");
+        let snippets = [];
+        try {
+          snippets = await embedAndSearch(transcript);
+        } catch (e) {
+          log(trace_id, "retrieval.error", { err: String(e?.message || e) });
+        }
+        log(trace_id, "retrieval.done", {
           hits: snippets.length,
           top: snippets[0]?.score ?? null,
         });
 
         const system =
           "Short answers. Use ONLY provided snippets; if none, say it isn’t in our knowledge base and ask one clarifier.";
-        log("llm.start");
+        log(trace_id, "llm.start");
         const answer = await answerGrounded(system, transcript, snippets);
-        log("llm.done", { len: answer.length });
+        log(trace_id, "llm.done", { len: answer.length });
 
-        log("tts.start");
+        log(trace_id, "tts.start");
         const pcm16k = await ttsToPCM16(answer);
         const pcm8kTTS = resamplePCM16_16k_to_8k(pcm16k);
         const muTTS = encodePCM16ToMuLaw(pcm8kTTS);
-        log("tts.done", { samples: pcm8kTTS.length });
+        log(trace_id, "tts.done", { samples: pcm8kTTS.length });
 
-        // stream back 20ms frames (160 samples @8k)
-        const frame = 160;
+        if (streamSid) conn.send(JSON.stringify({ event: "clear", streamSid })); // clear jitter buffer
+
+        const frame = 160; // 20ms @8k
         playing = true;
         for (let i = 0; i < muTTS.length; i += frame) {
           if (!streamSid) break;
@@ -224,7 +247,7 @@ export async function attachNewFlow(server) {
         playing = false;
       } catch (e) {
         playing = false;
-        log("error", { err: String(e?.message || e) });
+        log(trace_id, "error", { err: String(e?.message || e) });
       }
       muChunks = [];
       vad.reset();
@@ -240,11 +263,11 @@ export async function attachNewFlow(server) {
 
       switch (data.event) {
         case "connected":
-          log("twilio.connected");
+          log(trace_id, "twilio.connected");
           break;
         case "start":
           streamSid = data.start.streamSid;
-          log("twilio.start", {
+          log(trace_id, "twilio.start", {
             streamSid,
             callSid: data.start.callSid || null,
           });
@@ -258,13 +281,13 @@ export async function attachNewFlow(server) {
           const pcm = decodeMuLawToPCM16(mu);
           const decision = vad.feed(pcm);
           if (decision === "utterance_end") {
-            log("vad.utterance.end");
+            log(trace_id, "vad.utterance.end");
             await flushUtterance();
           }
           break;
         }
         case "stop":
-          log("twilio.stop");
+          log(trace_id, "twilio.stop");
           await flushUtterance();
           break;
         default:
@@ -272,6 +295,6 @@ export async function attachNewFlow(server) {
       }
     });
 
-    conn.on("close", () => log("ws.closed", { streamSid }));
+    conn.on("close", () => log(trace_id, "ws.closed", { streamSid }));
   });
 }
