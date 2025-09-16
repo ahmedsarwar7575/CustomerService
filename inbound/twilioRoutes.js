@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 const router = Router();
-router.all("/incoming-call", async (req, res) => {
+router.all("/incoming-calls", async (req, res) => {
   const WS_HOST = process.env.WS_HOST || "customerservice-kabe.onrender.com";
   const wsUrl = `wss://${WS_HOST}/media-stream`;
 
