@@ -4,7 +4,7 @@ import os from "os";
 import path from "path";
 import OpenAI from "openai";
 import { v4 as uuidv4 } from "uuid";
-import { embedAndSearch } from "./Pinecone.js";
+import { embedAndSearch } from "./utils/pinecone.js";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
