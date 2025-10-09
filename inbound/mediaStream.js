@@ -8,6 +8,7 @@ const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const MODEL = "gpt-4o-realtime-preview-2024-12-17";
 
 const SYSTEM_MESSAGE = `
+
 Important you have to importanly take name email and phone from user at end of convosation
 ROLE & VOICE
 You are **John Smith**, a friendly, professional **GETPIE** customer service agent for a marketing company.
