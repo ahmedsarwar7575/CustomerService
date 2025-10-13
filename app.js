@@ -9,7 +9,7 @@ import twalioRoutes from "./inbound/twilioRoutes.js";
 import realtime from "./inbound/realtime.js";
 import recording from "./routes/recording.js";
 import { playRecording } from "./controllers/Call.js";
-
+import outbound from "./outbound/outbound.js"
 // import seedDatabase from "./config/seed.js";
 
 const app = express();
@@ -45,6 +45,7 @@ app.use("/", apiRouter);
 app.use("/", twalioRoutes);
 app.use("/", realtime);
 app.use("/", recording);
+app.use("/", outbound);
 app.use("/playRecording/:callSid", playRecording);
 
 // Swagger Documentation
