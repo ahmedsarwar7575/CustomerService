@@ -37,15 +37,19 @@ const client = twilio(
 const WS_HOST = process.env.WS_HOST || "customerservice-kabe.onrender.com";
 const BASE = process.env.PUBLIC_BASE_URL; // https://your-ngrok-or-domain
 const FROM = process.env.TWILIO_NUMBER;
-const AGENT = +15677722608 ;
+const AGENT = +15677722608;
 
 const confName = () =>
-  "room-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(-6);
+  "room-" +
+  Date.now().toString(36) +
+  "-" +
+  Math.random().toString(36).slice(-6);
 
 // POST { "to": "+1..." }
 router.post("/api/calls/start", async (req, res) => {
   try {
-    if (!BASE || !FROM || !AGENT) throw new Error("Missing env BASE/FROM/AGENT");
+    if (!BASE || !FROM || !AGENT)
+      throw new Error("Missing env BASE/FROM/AGENT");
     const to = (req.body?.to || "").trim();
     if (!to) return res.status(400).json({ error: "`to` required" });
 
@@ -61,18 +65,25 @@ router.post("/api/calls/start", async (req, res) => {
     const customerCall = await client.calls.create({
       ...common,
       to,
-      url: `${BASE}/twiml/leg?role=customer&conf=${encodeURIComponent(conference)}`,
+      url: `${BASE}/twiml/leg?role=customer&conf=${encodeURIComponent(
+        conference
+      )}`,
     });
     log("CUSTOMER_CALL_CREATED", customerCall);
 
     const agentCall = await client.calls.create({
       ...common,
       to: AGENT,
-      url: `${BASE}/twiml/leg?role=agent&conf=${encodeURIComponent(conference)}`,
+      url: `${BASE}/twiml/leg?role=agent&conf=${encodeURIComponent(
+        conference
+      )}`,
     });
     log("AGENT_CALL_CREATED", agentCall);
 
     res.json({
+      agentCall,
+      customerCall,
+
       ok: true,
       conference,
       customerCallSid: customerCall.sid,

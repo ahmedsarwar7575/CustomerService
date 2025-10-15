@@ -4,6 +4,7 @@ import seedDatabase from "./config/seed.js";
 // import { debug } from "./inbound/recording.js";
 import http from "http";
 import { attachMediaStreamServer } from "./inbound/mediaStream.js";
+import {attachUpsellStreamServer } from "./outbound/automaticOutbound.js";
 dotenv.config();
 
 const PORT = process.env.PORT || 3000;
