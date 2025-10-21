@@ -1,12 +1,8 @@
 // inbound/twilioRoutes.js
 import { Router } from "express";
-import twilio from "twilio";
 
 const router = Router();
-const client = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+
 
 router.all("/incoming-call", async (req, res) => {
   const WS_HOST =
@@ -22,20 +18,7 @@ router.all("/incoming-call", async (req, res) => {
 </Response>`;
   res.type("text/xml").send(twiml);
 
-  const callSid = req.body?.CallSid || req.query?.CallSid;
-  if (!callSid) return;
 
-  const base = process.env.PUBLIC_BASE_URL || `https://${req.get("host")}`;
-  try {
-    await client.calls(callSid).recordings.create({
-      recordingStatusCallback: `${base}/recording-status`,
-      recordingStatusCallbackEvent: ["in-progress", "completed", "absent"],
-      recordingChannels: "dual",
-      recordingTrack: "both",
-    });
-  } catch (e) {
-    console.error("recording start failed:", e);
-  }
 });
 
 export default router;

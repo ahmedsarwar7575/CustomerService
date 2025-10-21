@@ -148,10 +148,7 @@ function buildSessionUpdate() {
 
 export function attachMediaStreamServer(server) {
   try {
-    const wss = new WebSocketServer({
-      noServer: true, 
-      perMessageDeflate: false,
-    });
+    const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
     wss.on("connection", (connection) => {
       let streamSid = null;
       let callSid = null;
@@ -458,6 +455,7 @@ export function attachMediaStreamServer(server) {
         emitFinalOnce();
       });
     });
+    return wss;
   } catch (error) {
     console.error("attachMediaStreamServer error", error);
   }
