@@ -149,8 +149,6 @@ function buildSessionUpdate() {
 export function attachMediaStreamServer(server) {
   try {
     const wss = new WebSocketServer({
-      server,
-      path: "/media-stream",
       noServer: true, 
       perMessageDeflate: false,
     });

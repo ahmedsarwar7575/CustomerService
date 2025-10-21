@@ -49,7 +49,7 @@ function kickoff(openAiWs, instructions) {
 }
 
 export function createUpsellWSS() {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true,  perMessageDeflate: false });
 
   wss.on("connection", (connection, req) => {
     console.log(`[WS] Twilio connected ${req?.url || ""}`);

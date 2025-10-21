@@ -1,40 +1,31 @@
-import app from "./app.js";
 import dotenv from "dotenv";
 import http from "http";
-import { createUpsellWSS } from "./outbound/automaticOutbound.js";
+import app from "./app.js";
 import { attachMediaStreamServer } from "./inbound/mediaStream.js";
-import { startUpsellCron /*, runUpsellJobOnce */ } from "./outbound/cronJob.js";
-dotenv.config();
-
+import { createUpsellWSS } from "./outbound/automaticOutbound.js";
 const PORT = process.env.PORT || 3000;
+dotenv.config();
 const server = http.createServer(app);
 
-const upsellWSS = createUpsellWSS();
-const mediaStreamWSS = attachMediaStreamServer();
+const inboundWSS = attachMediaStreamServer(); // /media-stream
+const outboundWSS = createUpsellWSS(); // /upsell-stream
 
 server.on("upgrade", (req, socket, head) => {
-  const url = new URL(req.url || "/", "http://localhost");
-  const path = url.pathname;
-  console.log(`[HTTP] upgrade ${path} ua=${req.headers["user-agent"] || ""}`);
-
-  if (path === "/upsell-stream") {
-    upsellWSS.handleUpgrade(req, socket, head, (ws) =>
-      upsellWSS.emit("connection", ws, req)
-    );
-    return;
-  }
-
+  const path = new URL(req.url || "/", "http://x").pathname;
   if (path === "/media-stream") {
-    mediaStreamWSS.handleUpgrade(req, socket, head, (ws) =>
-      mediaStreamWSS.emit("connection", ws, req)
+    inboundWSS.handleUpgrade(req, socket, head, (ws) =>
+      inboundWSS.emit("connection", ws, req)
     );
     return;
   }
-
+  if (path === "/upsell-stream") {
+    outboundWSS.handleUpgrade(req, socket, head, (ws) =>
+      outboundWSS.emit("connection", ws, req)
+    );
+    return;
+  }
   socket.destroy();
 });
-startUpsellCron();
-
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`API Documentation: http://localhost:${PORT}/local-test.html`);
