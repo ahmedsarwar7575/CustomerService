@@ -1,4 +1,3 @@
-// twalio_upsell.js
 import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -7,11 +6,8 @@ dotenv.config();
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const RT_MODEL = "gpt-4o-realtime-preview-2024-12-17";
 
-function makeSystemMessage({ agentName="xyz", company="mno", product="abc" } = {}) {
-  return `You are ${agentName} from ${company}. Purpose: upsell "${product}".
-Disclose recording. Confirm time is okay, give a 1–2 sentence value pitch, ask one qualifying question,
-handle objections briefly, label user interest (hot/warm/cold), collect consent to send details, and end with clear next steps.
-Keep responses under 2 sentences unless asked.`;
+function makeSystemMessage() {
+  return `You are an upsell agent. Disclose recording, confirm timing, 1–2 sentence pitch, one qualifier, brief objection handling, label interest (hot/warm/cold), collect consent, end with next steps. Keep replies ≤2 sentences unless asked.`;
 }
 
 function createOpenAIWs() {
@@ -30,64 +26,57 @@ function buildSessionUpdate(instructions) {
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
       instructions,
-      modalities: ["text","audio"],
+      modalities: ["text", "audio"],
       temperature: 0.7,
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
     },
   };
 }
 
-async function summarizeUpsell({ qaPairs, params }) {
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You extract call insights. Return ONLY JSON with keys: leadId, product, company, agentName, interest(one of: hot|warm|cold), objections(array), next_steps, consent(boolean), best_time(string|null), contact_info(object with email/phone if mentioned or null), qa_pairs(array of {q,a}). No prose.",
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            meta: {
-              agentName: params.agentName || "xyz",
-              company: params.company || "mno",
-              product: params.product || "abc",
-              leadId: params.leadId || null,
-            },
-            qa_pairs: qaPairs,
-          }),
-        },
-      ],
-    }),
-  });
-  const data = await r.json();
-  const txt = data?.choices?.[0]?.message?.content?.trim() || "{}";
-  let out;
-  try { out = JSON.parse(txt); } catch { out = { raw: txt }; }
-  console.log(JSON.stringify(out)); // ← prints the JSON
-  return out;
+function kickoff(openAiWs, instructions) {
+  openAiWs.send(JSON.stringify(buildSessionUpdate(instructions)));
+  openAiWs.send(
+    JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio"],
+        instructions:
+          "Greet, confirm if now is a good time in one sentence, then a brief value pitch.",
+      },
+    })
+  );
+  console.log("[OPENAI] kickoff sent");
 }
 
-export function attachUpsellStreamServer(server) {
-  const wss = new WebSocketServer({ server, path: "/upsell-stream" });
+export function createUpsellWSS() {
+  const wss = new WebSocketServer({ noServer: true });
 
-  wss.on("connection", (connection) => {
-    console.log("upsellStream connected");
+  wss.on("connection", (connection, req) => {
+    console.log(`[WS] Twilio connected ${req?.url || ""}`);
+
     let streamSid = null;
     let callSid = null;
-    let latestMediaTimestamp = 0;
     let markQueue = [];
     let hasActiveResponse = false;
     let pendingUserQ = null;
-    const qaPairs = [];
+    let openaiReady = false;
+    let framesIn = 0,
+      framesOut = 0,
+      bytesIn = 0,
+      bytesOut = 0;
+    let metricsTimer = null;
 
+    const qaPairs = [];
     const openAiWs = createOpenAIWs();
+
+    const startMetrics = () => {
+      if (metricsTimer) return;
+      metricsTimer = setInterval(() => {
+        console.log(
+          `[METRICS] in=${framesIn}/${bytesIn}B out=${framesOut}/${bytesOut}B active=${hasActiveResponse} openai=${openaiReady} marks=${markQueue.length}`
+        );
+      }, 3000);
+    };
 
     const sendMark = () => {
       if (!streamSid) return;
@@ -97,9 +86,12 @@ export function attachUpsellStreamServer(server) {
       } catch {}
     };
 
-    openAiWs.on("open", () => { 
-      console.log("openAiWs opened");
-     });
+    openAiWs.on("open", () => {
+      openaiReady = true;
+      console.log("[OPENAI] socket opened");
+    });
+    openAiWs.on("error", (e) => console.error("[OPENAI] error", e?.message || e));
+    openAiWs.on("close", () => console.log("[OPENAI] socket closed"));
 
     openAiWs.on("message", (buf) => {
       try {
@@ -108,6 +100,8 @@ export function attachUpsellStreamServer(server) {
 
         if ((msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") && msg.delta) {
           const payload = typeof msg.delta === "string" ? msg.delta : Buffer.from(msg.delta).toString("base64");
+          bytesOut += Buffer.byteLength(payload);
+          framesOut++;
           connection.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
           sendMark();
         }
@@ -121,8 +115,12 @@ export function attachUpsellStreamServer(server) {
 
         if (msg.type === "input_audio_buffer.speech_started") {
           if (markQueue.length) {
-            try { openAiWs.send(JSON.stringify({ type: "response.cancel" })); } catch {}
-            try { connection.send(JSON.stringify({ event: "clear", streamSid })); } catch {}
+            try {
+              openAiWs.send(JSON.stringify({ type: "response.cancel" }));
+            } catch {}
+            try {
+              connection.send(JSON.stringify({ event: "clear", streamSid }));
+            } catch {}
             markQueue = [];
           }
         }
@@ -137,75 +135,118 @@ export function attachUpsellStreamServer(server) {
                 : null;
               const a = (part?.transcript || "").trim();
               if (a) {
-                if (pendingUserQ) { qaPairs.push({ q: pendingUserQ, a }); pendingUserQ = null; }
-                else { qaPairs.push({ q: null, a }); }
+                if (pendingUserQ) {
+                  qaPairs.push({ q: pendingUserQ, a });
+                  pendingUserQ = null;
+                } else {
+                  qaPairs.push({ q: null, a });
+                }
+                console.log("[Q/A]", qaPairs[qaPairs.length - 1]);
               }
             }
           }
         }
 
         if (msg.type === "input_audio_buffer.speech_stopped" && !hasActiveResponse) {
-          try { openAiWs.send(JSON.stringify({ type: "response.create" })); } catch {}
+          try {
+            openAiWs.send(JSON.stringify({ type: "response.create" }));
+          } catch {}
         }
-      } catch {}
+      } catch (e) {
+        console.error("[OPENAI] parse error", e);
+      }
     });
 
     connection.on("message", async (raw) => {
       try {
-        console.log("message", raw);
         const data = JSON.parse(raw);
+        if (!metricsTimer) startMetrics();
+
         switch (data.event) {
           case "start": {
             streamSid = data.start.streamSid;
             callSid = data.start.callSid || null;
-            const p = data.start?.customParameters || {};
-            const instr = makeSystemMessage({ agentName: p.agentName, company: p.company, product: p.product });
-            try { 
-              openAiWs.send(JSON.stringify(buildSessionUpdate(instr)));
-              console.log("session.update sent");
-            } catch {}
+            console.log(`[TWILIO] start streamSid=${streamSid} callSid=${callSid}`);
 
-            const accountSid = process.env.TWILIO_ACCOUNT_SID;
-            const authToken = process.env.TWILIO_AUTH_TOKEN;
-            const client = twilio(accountSid, authToken);
+            const instr = makeSystemMessage();
+            if (openaiReady) kickoff(openAiWs, instr);
+            else {
+              const t = setInterval(() => {
+                if (openaiReady) {
+                  kickoff(openAiWs, instr);
+                  clearInterval(t);
+                }
+              }, 50);
+              setTimeout(() => clearInterval(t), 5000);
+            }
+
             try {
-              const base = process.env.PUBLIC_BASE_URL;
+              const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+              const base = process.env.PUBLIC_BASE_URL || "https://example.com";
               await client.calls(callSid).recordings.create({
                 recordingStatusCallback: `${base}/recording-status`,
-                recordingStatusCallbackEvent: ["in-progress","completed","absent"],
+                recordingStatusCallbackEvent: ["in-progress", "completed", "absent"],
                 recordingChannels: "dual",
                 recordingTrack: "both",
               });
-            } catch {}
-            latestMediaTimestamp = 0;
+              console.log("[TWILIO] recording started");
+            } catch (e) {
+              console.error("[TWILIO] recording error", e?.message || e);
+            }
             break;
           }
+
           case "media": {
-            latestMediaTimestamp = Number(data.media.timestamp) || latestMediaTimestamp;
+            const payload = data.media?.payload || "";
+            framesIn++;
+            bytesIn += Buffer.byteLength(payload);
             if (openAiWs.readyState === WebSocket.OPEN) {
-              try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload })); } catch {}
+              try {
+                openAiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: payload }));
+              } catch {}
             }
             break;
           }
-          case "mark": if (markQueue.length) markQueue.shift(); break;
+
+          case "mark": {
+            if (markQueue.length) markQueue.shift();
+            break;
+          }
+
           case "stop": {
+            console.log("[TWILIO] stop");
             if (openAiWs.readyState === WebSocket.OPEN) {
-              try { openAiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch {}
-              try { openAiWs.close(); } catch {}
+              try {
+                openAiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+              } catch {}
+              try {
+                openAiWs.close();
+              } catch {}
             }
             break;
           }
-          default: break;
+
+          default:
+            console.log("[TWILIO] event", data.event);
+            break;
         }
-      } catch {}
+      } catch (e) {
+        console.error("[WS] parse error", e);
+      }
     });
 
     connection.on("close", async () => {
-      console.log("connection closed");
-      if (openAiWs.readyState === WebSocket.OPEN) { try { openAiWs.close(); } catch {} }
-      const params = { flow: "upsell", agentName: null, company: null, product: null, leadId: null };
-      try { Object.assign(params, (connection?.start?.customParameters)||{}); } catch {}
-      await summarizeUpsell({ qaPairs, params });
+      console.log("[WS] Twilio disconnected");
+      if (metricsTimer) clearInterval(metricsTimer);
+      try {
+        if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+      } catch {}
+      console.log("[SUMMARY] qaPairs", qaPairs.length);
     });
+
+    connection.on("error", (e) => console.error("[WS] error", e?.message || e));
   });
+
+  console.log("[WS] upsell WSS ready (noServer)");
+  return wss;
 }
