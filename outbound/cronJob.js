@@ -7,9 +7,9 @@ import { fromZonedTime } from "date-fns-tz";
 import dotenv from "dotenv";
 dotenv.config();
 const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, PUBLIC_BASE_URL } = process.env;
-if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER || !PUBLIC_BASE_URL) {
-  throw new Error("Missing env");
-}
+// if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER || !PUBLIC_BASE_URL) {
+//   throw new Error("Missing env");
+// }
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 function getTwentyOneDaysAgoUtcWindow() {
