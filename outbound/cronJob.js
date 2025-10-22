@@ -46,9 +46,8 @@ async function fetchUsers(daysAgo, kind) {
   return User.findAll({ where, order: [["createdAt", "ASC"]] });
 }
 
-function makeUrl(kind, userId) {
-  const path = kind === "satisfaction" ? "outbound-satisfaction" : "outbound-upsell";
-  return `${PUBLIC_BASE_URL}/${path}?userId=${encodeURIComponent(userId)}`;
+function makeUrl( userId) {
+  return `${PUBLIC_BASE_URL}/outbound-upsell?userId=${encodeURIComponent(userId)}`;
 }
 
 async function waitForCompletion(callSid) {
