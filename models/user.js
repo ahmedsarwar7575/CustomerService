@@ -30,6 +30,18 @@ const User = sequelize.define('User', {
   status: {
     type: DataTypes.ENUM('active', 'inactive', 'pending'),
     defaultValue: 'active'
+  },
+  isUpSellCall: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  isSatisfactionCall: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  isBothCall: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
   }
 }, {
   tableName: 'users',

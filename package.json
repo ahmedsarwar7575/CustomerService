@@ -34,5 +34,8 @@
     "swagger-ui-express": "^5.0.1",
     "twilio": "^5.8.0",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "sequelize-cli": "^6.6.3"
   }
 }
