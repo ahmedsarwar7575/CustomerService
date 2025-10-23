@@ -2,14 +2,10 @@ import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
 dotenv.config();
-
+import {makeSystemMessage} from "./prompt.js";
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const RT_MODEL = "gpt-4o-realtime-preview-2024-12-17";
-
-function makeSystemMessage() {
-  return `You are an upsell agent. Disclose recording, confirm timing, 1–2 sentence pitch, one qualifier, brief objection handling, label interest (hot/warm/cold), collect consent, end with next steps. Keep replies ≤2 sentences unless asked.`;
-}
-
+import {summarizeUpsellLite} from "./summerize.js";
 function createOpenAIWs() {
   const url = `wss://api.openai.com/v1/realtime?model=${RT_MODEL}`;
   return new WebSocket(url, {
@@ -295,6 +291,7 @@ export function createUpsellWSS() {
         if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
       } catch {}
       console.log("[SUMMARY] qaPairs", qaPairs.length);
+      summarizeUpsellLite(qaPairs);
     });
 
     connection.on("error", (e) => console.error("[WS] error", e?.message || e));
