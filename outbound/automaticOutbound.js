@@ -60,11 +60,20 @@ export function createUpsellWSS() {
     console.log(`[WS] Twilio connected ${req?.url || ""}`);
     let userId = null;
     try {
-      const base = `wss://${req.headers.host || "local"}`;
-      console.log("[WS] base", base);
-      const u = new URL(req?.url || "", base);
-      userId = u.searchParams.get("userId") || null;
+      const path = (req?.url || "").split("?")[0];
+      const parts = path.split("/").filter(Boolean);
+      if (parts[0] === "upsell-stream" && parts[1]) {
+        userId = parts[1];
+      }
     } catch {}
+    if (!userId) {
+      try {
+        const raw = req?.url || "";
+        const qs = raw.includes("?") ? raw.split("?")[1] : "";
+        const sp = new URLSearchParams(qs);
+        userId = sp.get("userId") || null;
+      } catch {}
+    }
     const user = User.findOne({ where: { id: userId } });
     console.log("[WS] user", user);
     console.log("[WS] userID", userId);
@@ -213,7 +222,7 @@ export function createUpsellWSS() {
             console.log(
               `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
             );
-              const userDetails = JSON.stringify({user})
+            const userDetails = JSON.stringify({ user });
             const instr = makeSystemMessage(userDetails);
             if (openaiReady) kickoff(openAiWs, instr);
             else {

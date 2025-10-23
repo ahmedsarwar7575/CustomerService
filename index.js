@@ -16,7 +16,9 @@ if (!inboundWSS) throw new Error("inboundWSS not created");
 if (!outboundWSS) throw new Error("outboundWSS not created");
 
 server.on("upgrade", (req, socket, head) => {
-  const path = new URL(req.url || "/", "http://x").pathname;
+  // const path = new URL(req.url || "/", "http://x").pathname;
+    const url = new URL(req.url || "/", "http://x");
+    const path = url.pathname;
 
   if (path === "/media-stream") {
     inboundWSS.handleUpgrade(req, socket, head, (ws) => {
@@ -25,7 +27,7 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
-  if (path === "/upsell-stream") {
+  if (path.startsWith("/upsell-stream")) {
     outboundWSS.handleUpgrade(req, socket, head, (ws) => {
       outboundWSS.emit("connection", ws, req);
     });
