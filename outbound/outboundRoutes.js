@@ -2,7 +2,7 @@
 import { Router } from "express";
 const router = Router();
 
-router.all("/outbound-upsell", async (req, res) => {
+router.all("/outbound-upsell/:userId", async (req, res) => {
   const { userId } = req.query;
 
   // In prod, use a stable public domain instead of ngrok if possible
@@ -10,7 +10,7 @@ router.all("/outbound-upsell", async (req, res) => {
   const wsUrl = `wss://${WS_HOST}/upsell-stream?userId=${encodeURIComponent(
     userId ?? ""
   )}`;
-
+  console.log("USER ID RECIEVED ON TWALIO ROUTE1", userId);
   console.log(
     `[HTTP] /outbound-upsell from ${req.ip} ua=${req.headers["user-agent"]} userId=${userId}`
   );
