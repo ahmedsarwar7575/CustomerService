@@ -2,10 +2,11 @@ import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
 dotenv.config();
-import {makeSystemMessage} from "./prompt.js";
+import User from "../models/user.js";
+import { makeSystemMessage } from "./prompt.js";
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const RT_MODEL = "gpt-4o-realtime-preview-2024-12-17";
-import {summarizeUpsellLite} from "./summerize.js";
+import { summarizeUpsellLite } from "./summerize.js";
 function createOpenAIWs() {
   const url = `wss://api.openai.com/v1/realtime?model=${RT_MODEL}`;
   return new WebSocket(url, {
@@ -57,6 +58,16 @@ export function createUpsellWSS() {
 
   wss.on("connection", (connection, req) => {
     console.log(`[WS] Twilio connected ${req?.url || ""}`);
+    let userId = null;
+    try {
+      const base = `wss://${req.headers.host || "local"}`;
+      console.log("[WS] base", base);
+      const u = new URL(req?.url || "", base);
+      userId = u.searchParams.get("userId") || null;
+    } catch {}
+    const user = User.findOne({ where: { id: userId } });
+    console.log("[WS] user", user);
+    console.log("[WS] userID", userId);
 
     let streamSid = null;
     let callSid = null;
@@ -202,8 +213,8 @@ export function createUpsellWSS() {
             console.log(
               `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
             );
-
-            const instr = makeSystemMessage();
+              const userDetails = JSON.stringify({user})
+            const instr = makeSystemMessage(userDetails);
             if (openaiReady) kickoff(openAiWs, instr);
             else {
               const t = setInterval(() => {
@@ -291,7 +302,7 @@ export function createUpsellWSS() {
         if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
       } catch {}
       console.log("[SUMMARY] qaPairs", qaPairs.length);
-      summarizeUpsellLite(qaPairs);
+      summarizeUpsellLite(qaPairs, userId);
     });
 
     connection.on("error", (e) => console.error("[WS] error", e?.message || e));

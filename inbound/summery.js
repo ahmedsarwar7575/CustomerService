@@ -182,7 +182,8 @@ export const summarizer = async (pairs, callSid) => {
           isResolvedByAi: safe.ticket.isSatisfied,
           languages: safe.non_english_detected,
           summary: safe.summary,
-          callSid: callSid
+          callSid: callSid,
+          type: "inbound",
         },
         { transaction: t }
       );

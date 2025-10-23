@@ -1,22 +1,15 @@
-// summarizeUpsellLite.js
 import dotenv from "dotenv";
 dotenv.config();
 
-/**
- * Produces a compact summary from qaPairs.
- * - No DB writes
- * - Console.logs key outcomes
- * - 20s timeout, robust JSON extraction
- */
-export async function summarizeUpsellLite(qaPairs) {
+export async function summarizeUpsellLite(qaPairs, id) {
   try {
     if (!Array.isArray(qaPairs) || qaPairs.length === 0) {
       return { error: "no_pairs" };
     }
-
-    // Keep only a tiny QA sample (first + last exchange)
-    const qaFirst = qaPairs.find(p => (p?.q || p?.a));
-    const qaLast = [...qaPairs].reverse().find(p => (p?.q || p?.a));
+    console.log("qaPairs", qaPairs);
+    console.log("USERID SUMMERIZE", id);
+    const qaFirst = qaPairs.find((p) => p?.q || p?.a);
+    const qaLast = [...qaPairs].reverse().find((p) => p?.q || p?.a);
     const qa_sample = [qaFirst, qaLast].filter(Boolean).slice(0, 2);
 
     const nowIso = new Date().toISOString();
@@ -27,7 +20,7 @@ export async function summarizeUpsellLite(qaPairs) {
       "If a field is unknown/unclear, use the string 'not specified'.",
       "Do not invent facts.",
       "Keep 'summary' ≤ 80 words.",
-      "If multiple goals are present, set recommended_option='multiple'."
+      "If multiple goals are present, set recommended_option='multiple'.",
     ].join(" ");
 
     const user = `
@@ -97,7 +90,8 @@ ${JSON.stringify(qaPairs, null, 2)}
       const data = JSON.parse(rawText);
       outText =
         data.output_text ??
-        data.output?.find?.((o) => o.type === "output_text")?.content?.[0]?.text ??
+        data.output?.find?.((o) => o.type === "output_text")?.content?.[0]
+          ?.text ??
         data.output?.[0]?.content?.[0]?.text ??
         null;
     } catch {
@@ -127,11 +121,18 @@ ${JSON.stringify(qaPairs, null, 2)}
         online_presence: boolOrNull(parsed?.goals?.online_presence),
         cash_flow_or_capital: boolOrNull(parsed?.goals?.cash_flow_or_capital),
       },
-      recommended_option: ["website", "loan", "advertising", "multiple"].includes(
-        parsed?.recommended_option
-      ) ? parsed.recommended_option : null,
+      recommended_option: [
+        "website",
+        "loan",
+        "advertising",
+        "multiple",
+      ].includes(parsed?.recommended_option)
+        ? parsed.recommended_option
+        : null,
       rationale: ns(parsed?.rationale),
-      next_step: ["demo", "email_summary", "follow_up_call"].includes(parsed?.next_step)
+      next_step: ["demo", "email_summary", "follow_up_call"].includes(
+        parsed?.next_step
+      )
         ? parsed.next_step
         : null,
       consent_to_contact: {
@@ -141,9 +142,15 @@ ${JSON.stringify(qaPairs, null, 2)}
       },
       summary: parsed?.summary || "",
       flags: {
-        off_topic_attempts: Array.isArray(parsed?.off_topic_attempts) ? parsed.off_topic_attempts : [],
-        safety_flags: Array.isArray(parsed?.safety_flags) ? parsed.safety_flags : [],
-        non_english_detected: Array.isArray(parsed?.non_english_detected) ? parsed.non_english_detected : [],
+        off_topic_attempts: Array.isArray(parsed?.off_topic_attempts)
+          ? parsed.off_topic_attempts
+          : [],
+        safety_flags: Array.isArray(parsed?.safety_flags)
+          ? parsed.safety_flags
+          : [],
+        non_english_detected: Array.isArray(parsed?.non_english_detected)
+          ? parsed.non_english_detected
+          : [],
       },
       meta: {
         current_datetime_iso: parsed?.current_datetime_iso || nowIso,

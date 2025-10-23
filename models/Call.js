@@ -7,6 +7,10 @@ const Call = sequelize.define('Call', {
     primaryKey: true,
     autoIncrement: true
   },
+  type: {
+    type: DataTypes.ENUM("inbound", "outbound"),
+    allowNull: true
+  },
   userId: {                         // ✅ so you can store the FK you pass in
     type: DataTypes.INTEGER,
     allowNull: true,
@@ -37,6 +41,10 @@ const Call = sequelize.define('Call', {
   },
   callSid:{
     type: DataTypes.STRING,
+    allowNull: true
+  },
+  outboundDetails: {
+    type: DataTypes.JSON,
     allowNull: true
   }
 }, {
