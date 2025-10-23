@@ -3,13 +3,11 @@ import { Router } from "express";
 const router = Router();
 
 router.all("/outbound-upsell/:userId", async (req, res) => {
-  const { userId } = req.query;
+  const { userId } = req.params;
 
   // In prod, use a stable public domain instead of ngrok if possible
   const WS_HOST = process.env.WS_HOST || "customerservice-kabe.onrender.com";
-  const wsUrl = `wss://${WS_HOST}/upsell-stream?userId=${encodeURIComponent(
-    userId ?? ""
-  )}`;
+  const wsUrl = `wss://${WS_HOST}/upsell-stream/userId`;
   console.log("USER ID RECIEVED ON TWALIO ROUTE1", userId);
   console.log(
     `[HTTP] /outbound-upsell from ${req.ip} ua=${req.headers["user-agent"]} userId=${userId}`
