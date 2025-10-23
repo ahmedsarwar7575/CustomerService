@@ -47,7 +47,7 @@ async function fetchUsers(daysAgo, kind) {
 }
 
 function makeUrl( userId) {
-  return `${PUBLIC_BASE_URL}/outbound-upsell/userId`;
+  return `${PUBLIC_BASE_URL}/outbound-upsell/${userId}`;
 }
 
 async function waitForCompletion(callSid) {
