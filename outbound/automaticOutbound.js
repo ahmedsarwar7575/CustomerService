@@ -53,10 +53,10 @@ function kickoff(openAiWs, instructions) {
   console.log("[OPENAI] kickoff sent");
 }
 
-export function createUpsellWSS() {
+export  function createUpsellWSS() {
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
-  wss.on("connection", (connection, req) => {
+  wss.on("connection", async(connection, req) => {
     console.log(`[WS] Twilio connected ${req?.url || ""}`);
     let userId = null;
     try {
@@ -74,7 +74,7 @@ export function createUpsellWSS() {
         userId = sp.get("userId") || null;
       } catch {}
     }
-    const user = User.findOne({ where: { id: userId } });
+    const user = await User.findOne({ where: { id: userId } });
     console.log("[WS] user", user);
     console.log("[WS] userID", userId);
 
@@ -224,6 +224,7 @@ export function createUpsellWSS() {
             );
             const userDetails = JSON.stringify({ user });
             const instr = makeSystemMessage(userDetails);
+            console.log("[OPENAI] instr", instr);
             if (openaiReady) kickoff(openAiWs, instr);
             else {
               const t = setInterval(() => {
