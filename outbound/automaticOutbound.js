@@ -3,7 +3,7 @@ import twilio from "twilio";
 import dotenv from "dotenv";
 dotenv.config();
 import User from "../models/user.js";
-import { makeSystemMessage } from "./prompt.js";
+// import { makeSystemMessage } from "./prompt.js";
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const RT_MODEL = "gpt-4o-realtime-preview-2024-12-17";
 import { summarizeUpsellLite } from "./summerize.js";
@@ -76,8 +76,8 @@ export  function createUpsellWSS() {
     }
     const user = await User.findOne({ where: { id: userId } });
     console.log("[WS] user", user);
-    console.log("[WS] userID", userId);
-
+    console.log("[WS] userid", userId);
+    
     let streamSid = null;
     let callSid = null;
     let markQueue = [];
