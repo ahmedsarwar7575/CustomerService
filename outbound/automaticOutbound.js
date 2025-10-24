@@ -6,7 +6,7 @@ import User from "../models/user.js";
 import { makeSystemMessage } from "./prompt.js";
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const RT_MODEL = "gpt-4o-realtime-preview-2024-12-17";
-import { summarizeUpsellLite } from "./summerize.js";
+import { summarizeUpsellLite } from "./summerize.cjs";
 function createOpenAIWs() {
   const url = `wss://api.openai.com/v1/realtime?model=${RT_MODEL}`;
   return new WebSocket(url, {
