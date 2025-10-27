@@ -87,3 +87,15 @@ export const getUsersByTicketType = async (req, res) => {
   }
 };
 
+export const deleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if(!id) return res.status(400).json({ error: 'User id is required' });
+    const user = await User.findByPk(id);
+    if(!user) return res.status(404).json({ error: 'User not found' });
+    await user.destroy();
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};

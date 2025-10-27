@@ -109,7 +109,7 @@ export const updatePiority = async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
-}
+};
 // Get tickets by status
 export const getTicketsByStatus = async (req, res) => {
   try {
@@ -138,7 +138,7 @@ export const getAllTickets = async (req, res) => {
       ],
       order: [["updatedAt", "DESC"]],
     });
-    if(!tickets){
+    if (!tickets) {
       return res.status(404).json({ error: "Tickets not found" });
     }
     res.json(tickets);
@@ -213,17 +213,35 @@ export const getticketById = async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
-      return res.status(400).json({ error: 'Invalid id parameter.' });
+      return res.status(400).json({ error: "Invalid id parameter." });
     }
 
-    const ticket = await Ticket.findByPk(id);
+    const ticket = await Ticket.findOne({
+      where: { id },
+      include: [
+        { model: Agent, attributes: ["id", "firstName", "lastName"] },
+        { model: User, attributes: ["id", "name", "email"] },
+      ],
+    });
     if (!ticket) {
-      return res.status(404).json({ error: 'ticket not found.' });
+      return res.status(404).json({ error: "ticket not found." });
     }
 
     res.json({ data: ticket });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to fetch the ticket.' });
+    res.status(500).json({ error: "Failed to fetch the ticket." });
+  }
+};
+export const deleteTicket = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "Ticket id is required" });
+    const ticket = await Ticket.findByPk(id);
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+    await ticket.destroy();
+    res.json({ message: "Ticket deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 };

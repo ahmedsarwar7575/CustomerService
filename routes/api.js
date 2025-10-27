@@ -18,14 +18,16 @@ import {
   escalateTicket,
   getAllTickets,
   updatePiority,
-  getticketById
+  getticketById,
+  deleteTicket
 } from '../controllers/ticketController.js';
 import {
   createUser,
   getUserWithTickets,
   updateUserStatus,
   getUsersByTicketType,
-  getAllUsers
+  getAllUsers,
+  deleteUser
 } from '../controllers/userController.js';
 import {
   createRating,
@@ -54,7 +56,8 @@ router.patch('/api/tickets/:id/piority', /* #swagger.tags = ['Tickets'] */  upda
 router.get('/api/tickets/status/:status', /* #swagger.tags = ['Tickets'] */  getTicketsByStatus); 
 router.get('/api/tickets', /* #swagger.tags = ['Tickets'] */  getAllTickets); 
 router.patch('/api/tickets/:id/escalate', /* #swagger.tags = ['Tickets'] */  escalateTicket);
-router.get('/api/tickets/:id', /* #swagger.tags = ['Tickets'] */  getticketById);
+router.get('/api/ticket/:id', /* #swagger.tags = ['Tickets'] */  getticketById);
+router.delete('/api/ticket/:id', /* #swagger.tags = ['Tickets'] */  deleteTicket);
 
 // User Routes
 router.post('/api/users', /* #swagger.tags = ['Users'] */ createUser);
@@ -62,6 +65,7 @@ router.get('/api/users/:id', /* #swagger.tags = ['Users'] */  getUserWithTickets
 router.patch('/api/users/:id/status', /* #swagger.tags = ['Users'] */  updateUserStatus);
 router.get('/api/users/type/:ticketType', /* #swagger.tags = ['Users'] */  getUsersByTicketType);
 router.get('/api/users', /* #swagger.tags = ['Users'] */  getAllUsers);
+router.delete('/api/user/:id', /* #swagger.tags = ['Users'] */  deleteUser);
 
 // Rating Routes
 router.post('/api/tickets/:ticketId/ratings', /* #swagger.tags = ['Ratings'] */ createRating);
