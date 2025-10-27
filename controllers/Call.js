@@ -4,7 +4,8 @@ import express from "express";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import Call  from "../models/Call.js";
-
+import { Op } from 'sequelize';
+const PER_PAGE = 10;
 async function findRecordingByCallSid(callSid) {
   const call = await Call.findOne({ where: { callSid } });
   if (!call) return null;
@@ -44,3 +45,65 @@ export const playRecording = async (req, res) => {
   }
 };
 
+export const getAllCalls = async (req, res) => {
+  try {
+    // page is 1-based in the API
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+
+    // Optional lightweight filters (use or remove as you like)
+    const { type, userId, ticketId, search } = req.query;
+    const where = {};
+
+    if (type) where.type = type; // "inbound" | "outbound"
+    if (userId) where.userId = Number(userId);
+    if (ticketId) where.ticketId = Number(ticketId);
+
+    // If you want a simple text search over summary:
+    if (search) where.summary = { [Op.iLike || Op.substring]: `%${search}%` };
+
+    const offset = (page - 1) * PER_PAGE;
+
+    const { rows, count } = await Call.findAndCountAll({
+      where,
+      order: [['createdAt', 'DESC']],
+      limit: PER_PAGE,
+      offset,
+    });
+
+    const totalPages = Math.max(Math.ceil(count / PER_PAGE), 1);
+
+    res.json({
+      data: rows,
+      meta: {
+        page,
+        perPage: PER_PAGE,
+        total: count,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch calls.' });
+  }
+};
+
+export const getCallById = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid id parameter.' });
+    }
+
+    const call = await Call.findByPk(id);
+    if (!call) {
+      return res.status(404).json({ error: 'Call not found.' });
+    }
+
+    res.json({ data: call });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch the call.' });
+  }
+};

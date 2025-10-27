@@ -209,3 +209,21 @@ function generateTicketId() {
 
   return ticketId;
 }
+export const getticketById = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid id parameter.' });
+    }
+
+    const ticket = await Ticket.findByPk(id);
+    if (!ticket) {
+      return res.status(404).json({ error: 'ticket not found.' });
+    }
+
+    res.json({ data: ticket });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch the ticket.' });
+  }
+};

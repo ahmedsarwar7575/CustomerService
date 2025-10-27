@@ -17,7 +17,8 @@ import {
   getTicketsByStatus,
   escalateTicket,
   getAllTickets,
-  updatePiority
+  updatePiority,
+  getticketById
 } from '../controllers/ticketController.js';
 import {
   createUser,
@@ -31,7 +32,7 @@ import {
   getAgentRatings,
   getAllRatings
 } from '../controllers/ratingController.js';
-
+import {getAllCalls, getCallById} from '../controllers/Call.js';
 const router = express.Router();
 
 // Agent Routes
@@ -53,6 +54,7 @@ router.patch('/api/tickets/:id/piority', /* #swagger.tags = ['Tickets'] */  upda
 router.get('/api/tickets/status/:status', /* #swagger.tags = ['Tickets'] */  getTicketsByStatus); 
 router.get('/api/tickets', /* #swagger.tags = ['Tickets'] */  getAllTickets); 
 router.patch('/api/tickets/:id/escalate', /* #swagger.tags = ['Tickets'] */  escalateTicket);
+router.get('/api/tickets/:id', /* #swagger.tags = ['Tickets'] */  getticketById);
 
 // User Routes
 router.post('/api/users', /* #swagger.tags = ['Users'] */ createUser);
@@ -65,5 +67,10 @@ router.get('/api/users', /* #swagger.tags = ['Users'] */  getAllUsers);
 router.post('/api/tickets/:ticketId/ratings', /* #swagger.tags = ['Ratings'] */ createRating);
 router.get('/api/agents/:agentId/ratings', /* #swagger.tags = ['Ratings'] */  getAgentRatings);
 router.get('/api/ratings', /* #swagger.tags = ['Ratings'] */  getAllRatings);
+
+
+
+router.get('/api/calls', /* #swagger.tags = ['Calls'] */  getAllCalls);
+router.get('/api/call/:id', /* #swagger.tags = ['Calls'] */  getCallById);
 
 export default router;
