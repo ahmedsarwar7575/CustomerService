@@ -138,7 +138,6 @@ export const getAgentPerformance = async (req, res) => {
   }
 };
 
-// Additional CRUD operations
 export const getAllAgents = async (req, res) => {
   try {
     const agents = await Agent.findAll({
@@ -153,12 +152,45 @@ export const getAllAgents = async (req, res) => {
       ],
       order: [["rating", "DESC"]],
     });
-    res.json(agents);
+
+    const result = await Promise.all(
+      agents.map(async (agent) => {
+        // Get all tickets for this agent
+        const tickets = await Ticket.findAll({
+          where: { agentId: agent.id },
+          attributes: ["id", "priority", "ticketType", "status", "summary", "userId"],
+        });
+
+        // Attach user to each ticket
+        const ticketsWithUsers = await Promise.all(
+          tickets.map(async (ticket) => {
+            let userId = ticket.userId;
+            if (ticket.userId) {
+              const user = await User.findOne({
+                where: { id: ticket.userId },
+                attributes: ["id", "name", "email", "phone"],
+              });
+              userId = user;
+            }
+            return {
+              ...ticket.toJSON(),
+              userId,
+            };
+          })
+        );
+
+        return {
+          ...agent.toJSON(),
+          tickets: ticketsWithUsers,
+        };
+      })
+    );
+
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
-
 export const getAgentById = async (req, res) => {
   try {
     const agent = await Agent.findByPk(req.params.id, {
@@ -177,12 +209,38 @@ export const getAgentById = async (req, res) => {
       return res.status(404).json({ error: "Agent not found" });
     }
 
-    res.json(agent);
+    // Get all tickets for this agent
+    const tickets = await Ticket.findAll({
+      where: { agentId: agent.id },
+      attributes: ["id", "priority", "ticketType", "status", "summary", "userId"],
+    });
+
+    // Attach user to each ticket
+    const ticketsWithUsers = await Promise.all(
+      tickets.map(async (ticket) => {
+        let userId = ticket.userId;
+        if (ticket.userId) {
+          const user = await User.findOne({
+            where: { id: ticket.userId },
+            attributes: ["id", "name", "email", "phone"],
+          });
+          userId = user;
+        }
+        return {
+          ...ticket.toJSON(),
+          userId,
+        };
+      })
+    );
+
+    res.json({
+      ...agent.toJSON(),
+      tickets: ticketsWithUsers,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
-
 
 export const updateAgent = async (req, res) => {
   try {

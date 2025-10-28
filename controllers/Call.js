@@ -5,6 +5,7 @@ import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import Call  from "../models/Call.js";
 import { Op } from 'sequelize';
+import User from "../models/user.js";
 const PER_PAGE = 10;
 async function findRecordingByCallSid(callSid) {
   const call = await Call.findOne({ where: { callSid } });
@@ -47,18 +48,13 @@ export const playRecording = async (req, res) => {
 
 export const getAllCalls = async (req, res) => {
   try {
-    // page is 1-based in the API
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-
-    // Optional lightweight filters (use or remove as you like)
     const { type, userId, ticketId, search } = req.query;
     const where = {};
 
-    if (type) where.type = type; // "inbound" | "outbound"
+    if (type) where.type = type;
     if (userId) where.userId = Number(userId);
     if (ticketId) where.ticketId = Number(ticketId);
-
-    // If you want a simple text search over summary:
     if (search) where.summary = { [Op.iLike || Op.substring]: `%${search}%` };
 
     const offset = (page - 1) * PER_PAGE;
@@ -70,10 +66,27 @@ export const getAllCalls = async (req, res) => {
       offset,
     });
 
+    const callsWithUsers = await Promise.all(
+      rows.map(async (call) => {
+        let userIdField = call.userId;
+        if (call.userId) {
+          const user = await User.findOne({
+            where: { id: call.userId },
+            attributes: ["id", "name", "email", "phone"],
+          });
+          userIdField = user;
+        }
+        return {
+          ...call.toJSON(),
+          userId: userIdField,
+        };
+      })
+    );
+
     const totalPages = Math.max(Math.ceil(count / PER_PAGE), 1);
 
     res.json({
-      data: rows,
+      data: callsWithUsers,
       meta: {
         page,
         perPage: PER_PAGE,
@@ -101,7 +114,21 @@ export const getCallById = async (req, res) => {
       return res.status(404).json({ error: 'Call not found.' });
     }
 
-    res.json({ data: call });
+    let userIdField = call.userId;
+    if (call.userId) {
+      const user = await User.findOne({
+        where: { id: call.userId },
+        attributes: ["id", "name", "email", "phone"],
+      });
+      userIdField = user;
+    }
+
+    res.json({
+      data: {
+        ...call.toJSON(),
+        userId: userIdField,
+      }
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch the call.' });
