@@ -2,7 +2,7 @@
 import cron from "node-cron";
 import { Op } from "sequelize";
 import twilio from "twilio";
-import User from "../models/user.js";
+import User from "../models/usser.js";
 import { subDays, startOfDay, endOfDay } from "date-fns";
 import { fromZonedTime } from "date-fns-tz";
 import dotenv from "dotenv";
@@ -49,7 +49,6 @@ async function fetchUsers(daysAgo, kind) {
 function makeUrl(userId, kind) {
   const base =
     process.env.PUBLIC_BASE_URL || "https://customerservice-kabe.onrender.com";
-
   const u = new URL(base);
   const basePath = u.pathname.replace(/\/+$/, "");
   u.pathname = `${basePath}/outbound-upsell/${encodeURIComponent(userId)}`;
@@ -77,8 +76,8 @@ async function waitForCompletion(callSid) {
 async function dialSequential(users, kind) {
   for (const u of users) {
     try {
-      const url = makeUrl(u.id, kind);
       console.log("[CRON] placing call", { kind, userId: u.id, url });
+      const url = makeUrl(u.id, kind);
       const call = await client.calls.create({
         to: u.phone,
         from: TWILIO_FROM_NUMBER,

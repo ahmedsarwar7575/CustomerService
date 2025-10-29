@@ -8,7 +8,13 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
-
+app.use((req, _res, next) => {
+  // Keep query intact, collapse multiple slashes in the path
+  const [path, qs] = req.url.split("?", 2);
+  const normalized = path.replace(/\/{2,}/g, "/") || "/";
+  req.url = qs ? `${normalized}?${qs}` : normalized;
+  next();
+});
 const inboundWSS = attachMediaStreamServer(); // /media-stream
 const outboundWSS = createUpsellWSS(); // /upsell-stream
 
