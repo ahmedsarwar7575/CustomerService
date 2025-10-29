@@ -1,7 +1,7 @@
 import Ticket from "../models/ticket.js";
 import Agent from "../models/agent.js";
 import User from "../models/user.js";
-
+import Call from "../models/Call.js";
 // Create new ticket
 export const createTicket = async (req, res) => {
   try {
@@ -135,6 +135,7 @@ export const getAllTickets = async (req, res) => {
       include: [
         { model: Agent, attributes: ["id", "firstName", "lastName"] },
         { model: User, attributes: ["id", "name", "email"] },
+        { model: Call, attributes: ["id", "type", "summary", "createdAt", "QuestionsAnswers"] },
       ],
       order: [["updatedAt", "DESC"]],
     });
@@ -221,6 +222,7 @@ export const getticketById = async (req, res) => {
       include: [
         { model: Agent, attributes: ["id", "firstName", "lastName"] },
         { model: User, attributes: ["id", "name", "email"] },
+        { model: Call, attributes: ["id", "type", "summary", "createdAt", "QuestionsAnswers"] },
       ],
     });
     if (!ticket) {

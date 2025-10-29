@@ -6,6 +6,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import Call  from "../models/Call.js";
 import { Op } from 'sequelize';
 import User from "../models/user.js";
+import Ticket from "../models/ticket.js";
 const PER_PAGE = 10;
 async function findRecordingByCallSid(callSid) {
   const call = await Call.findOne({ where: { callSid } });
@@ -132,5 +133,52 @@ export const getCallById = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch the call.' });
+  }
+};
+
+export const getAllCallsForAgent = async (req, res) => {
+  try {
+    const agentId = Number(req.params.id);
+    if (!Number.isInteger(agentId) || agentId <= 0) {
+      return res.status(400).json({ error: 'Invalid id parameter.' });
+    }
+
+    // Get all tickets assigned to this agent
+    const tickets = await Ticket.findAll({
+      where: { agentId },
+    });
+
+    if (tickets.length === 0) {
+      return res.status(404).json({ error: "No tickets found for this agent." });
+    }
+
+    // Extract ticketIds and userIds
+    const ticketIds = tickets.map(t => t.id);
+    const userIds = tickets.map(t => t.userId).filter(Boolean);
+
+    // Find calls related to those tickets OR users
+    const calls = await Call.findAll({
+      where: {
+        [Op.or]: [
+          { ticketId: ticketIds },
+          { userId: userIds }
+        ]
+      },
+      include: [
+        {
+          model: User,
+          attributes: ["id", "name", "email", "phone"],
+        },
+        {
+          model: Ticket,
+        },
+      ],
+    });
+
+    res.json(calls);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch calls." });
   }
 };

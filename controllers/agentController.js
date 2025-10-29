@@ -5,6 +5,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import User from "../models/user.js";
+import Call from "../models/Call.js";
 dotenv.config();
 
 // Agent authentication
@@ -158,7 +159,14 @@ export const getAllAgents = async (req, res) => {
         // Get all tickets for this agent
         const tickets = await Ticket.findAll({
           where: { agentId: agent.id },
-          attributes: ["id", "priority", "ticketType", "status", "summary", "userId"],
+          attributes: [
+            "id",
+            "priority",
+            "ticketType",
+            "status",
+            "summary",
+            "userId",
+          ],
         });
 
         // Attach user to each ticket
@@ -212,7 +220,14 @@ export const getAgentById = async (req, res) => {
     // Get all tickets for this agent
     const tickets = await Ticket.findAll({
       where: { agentId: agent.id },
-      attributes: ["id", "priority", "ticketType", "status", "summary", "userId"],
+      attributes: [
+        "id",
+        "priority",
+        "ticketType",
+        "status",
+        "summary",
+        "userId",
+      ],
     });
 
     // Attach user to each ticket
@@ -309,11 +324,13 @@ export const adminLogin = async (req, res) => {
 export const getAllTicketsByAgentId = async (req, res) => {
   try {
     const agentId = req.params.id;
+
     if (!agentId) {
       return res.status(400).json({ error: "Agent ID is required" });
     }
+
     const tickets = await Ticket.findAll({
-      where: { agentId: agentId },
+      where: { agentId },
       include: [
         {
           model: Agent,
@@ -321,15 +338,24 @@ export const getAllTicketsByAgentId = async (req, res) => {
         },
         {
           model: User,
-          attributes: ["name", "email", "phone"],
+          attributes: ["id", "name", "email", "phone"],
+          include: [
+            {
+              model: Call, // Include calls of the user
+              attributes: ["id", "type", "summary", "createdAt", "updatedAt", "QuestionsAnswers"],
+            },
+          ],
         },
       ],
     });
-    if (!tickets) {
+
+    if (!tickets || tickets.length === 0) {
       return res.status(404).json({ error: "Tickets not found" });
     }
+
     res.json(tickets);
   } catch (error) {
+    console.error("Error fetching tickets:", error);
     res.status(500).json({ error: error.message });
   }
 };

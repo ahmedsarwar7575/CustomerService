@@ -23,4 +23,12 @@ Rating.belongsTo(User, { foreignKey: 'userId' });
 Rating.belongsTo(Agent, { foreignKey: 'agentId' });
 Rating.belongsTo(Ticket, { foreignKey: 'ticketId' });
 
+// Ticket associations
+Ticket.belongsTo(User, { foreignKey: "userId" });
+Ticket.belongsTo(Agent, { foreignKey: "agentId" });
+
+// User associations
+User.hasMany(Call, { foreignKey: "userId" });
+Call.belongsTo(User, { foreignKey: "userId" });
+
 export { Agent, User, Ticket, Rating, Call };
