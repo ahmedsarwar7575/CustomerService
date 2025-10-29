@@ -9,9 +9,9 @@ dotenv.config();
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 app.use((req, _res, next) => {
-  // Keep query intact, collapse multiple slashes in the path
+ console.log(req.url);
   const [path, qs] = req.url.split("?", 2);
-  const normalized = path.replace(/\/{2,}/g, "/") || "/";
+  const normalized = path.replace(/^\/+/, "/"); // e.g. //outbound... -> /outbound...
   req.url = qs ? `${normalized}?${qs}` : normalized;
   next();
 });

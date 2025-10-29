@@ -1,16 +1,20 @@
-// routes/outbound-upsell.ts
+// routes/outbound-upsell.js
 import { Router } from "express";
 const router = Router();
 
-router.all("/outbound-upsell/:userId", async (req, res) => {
-  const { userId } = req.params;
+// Accept /outbound-upsell/:userId with any number of leading slashes
+router.all(/^\/+outbound-upsell\/([^/]+)$/, async (req, res) => {
+  const userId = req.params[0]; // from regex capture
   const kind = typeof req.query.kind === "string" ? req.query.kind : "";
-  // In prod, use a stable public domain instead of ngrok if possible
+
   const WS_HOST = process.env.WS_HOST || "customerservice-kabe.onrender.com";
-  const wsUrl = `wss://${WS_HOST}/upsell-stream/${encodeURIComponent(userId)}?kind=${encodeURIComponent(kind)}`;
+  const wsUrl = `wss://${WS_HOST}/upsell-stream/${encodeURIComponent(
+    userId
+  )}?kind=${encodeURIComponent(kind)}`;
+
   console.log("USER ID RECIEVED ON TWALIO ROUTE1", userId);
   console.log(
-    `[HTTP] /outbound-upsell from ${req.ip} ua=${req.headers["user-agent"]} userId=${userId}`
+    `[HTTP] /outbound-upsell from ${req.ip} ua=${req.headers["user-agent"]} userId=${userId} kind=${kind}`
   );
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -18,8 +22,8 @@ router.all("/outbound-upsell/:userId", async (req, res) => {
   <Say>Please wait while we connect your call to the AI assistant.</Say>
   <Connect>
     <Stream url="${wsUrl}">
-      <Parameter name="userId" value="${userId ?? ""}"/>
-      <Parameter name="kind" value="${kind ?? ""}"/>
+      <Parameter name="userId" value="${userId || ""}"/>
+      <Parameter name="kind" value="${kind || ""}"/>
     </Stream>
   </Connect>
 </Response>`;
