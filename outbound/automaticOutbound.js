@@ -1,12 +1,17 @@
+// automaticOutbound.js
 import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
 dotenv.config();
+
 import User from "../models/user.js";
 import { makeSystemMessage } from "./prompt.js";
+import { summarizeUpsellLite } from "./summerize.js";
+
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const RT_MODEL = "gpt-4o-realtime-preview-2024-12-17";
-import { summarizeUpsellLite } from "./summerize.js";
+
+/** Create a connection to OpenAI Realtime */
 function createOpenAIWs() {
   const url = `wss://api.openai.com/v1/realtime?model=${RT_MODEL}`;
   return new WebSocket(url, {
@@ -17,6 +22,7 @@ function createOpenAIWs() {
   });
 }
 
+/** Build session.update payload */
 function buildSessionUpdate(instructions) {
   return {
     type: "session.update",
@@ -38,19 +44,27 @@ function buildSessionUpdate(instructions) {
   };
 }
 
-function kickoff(openAiWs, instructions) {
-  openAiWs.send(JSON.stringify(buildSessionUpdate(instructions)));
-  openAiWs.send(
-    JSON.stringify({
-      type: "response.create",
-      response: {
-        modalities: ["audio"],
-        instructions:
-          "Greet, confirm if now is a good time in one sentence, then a brief value pitch.",
-      },
-    })
-  );
-  console.log("[OPENAI] kickoff sent");
+/** Send session.update, then prime a first response */
+function kickoff(openAiWs, instructions, state) {
+  try {
+    openAiWs.send(JSON.stringify(buildSessionUpdate(instructions)));
+    // Mark session as configured AFTER sending session.update
+    state.sessionConfigured = true;
+
+    openAiWs.send(
+      JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio"],
+          instructions:
+            "Greet, confirm if now is a good time in one sentence, then a brief value pitch.",
+        },
+      })
+    );
+    console.log("[OPENAI] kickoff sent");
+  } catch (e) {
+    console.error("[OPENAI] kickoff error", e?.message || e);
+  }
 }
 
 export function createUpsellWSS() {
@@ -58,32 +72,11 @@ export function createUpsellWSS() {
 
   wss.on("connection", async (connection, req) => {
     console.log(`[WS] Twilio connected ${req?.url || ""}`);
+
+    // --- shared connection state ---
     let userId = null;
     let kind = null;
-
-    // Best-effort parse from URL (often missing on Twilio side)
-    try {
-      const url = new URL(req?.url || "", "http://localhost");
-      const parts = url.pathname.split("/").filter(Boolean);
-      if (parts[0] === "upsell-stream" && parts[1]) userId = parts[1];
-      kind = url.searchParams.get("kind") || null;
-    } catch {}
-
-    // Fallback parse (legacy)
-    if (!userId || !kind) {
-      try {
-        const raw = req?.url || "";
-        const qs = raw.includes("?") ? raw.split("?")[1] : "";
-        const sp = new URLSearchParams(qs);
-        userId = userId || sp.get("userId") || null;
-        kind = kind || sp.get("kind") || null;
-      } catch {}
-    }
-
-    const user = await User.findOne({ where: { id: userId } });
-    console.log("[WS] kind", kind);
-    console.log("[WS] user", user);
-    console.log("[WS] userID", userId);
+    let user = null;
 
     let streamSid = null;
     let callSid = null;
@@ -91,11 +84,14 @@ export function createUpsellWSS() {
     let hasActiveResponse = false;
     let pendingUserQ = null;
     let openaiReady = false;
+    let sessionConfigured = false; // gate: only stream audio after session.update
+    let commitTimer = null; // periodic commits to trigger VAD
+    let metricsTimer = null;
+
     let framesIn = 0,
       framesOut = 0,
       bytesIn = 0,
       bytesOut = 0;
-    let metricsTimer = null;
 
     const qaPairs = [];
     const openAiWs = createOpenAIWs();
@@ -123,6 +119,39 @@ export function createUpsellWSS() {
       } catch {}
     };
 
+    // ---- Try to parse userId/kind from URL (may be missing on Twilio) ----
+    try {
+      const url = new URL(req?.url || "", "http://localhost");
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (parts[0] === "upsell-stream" && parts[1]) userId = parts[1];
+      kind = url.searchParams.get("kind") || null;
+    } catch {}
+
+    // Fallback parse
+    if (!userId || !kind) {
+      try {
+        const raw = req?.url || "";
+        const qs = raw.includes("?") ? raw.split("?")[1] : "";
+        const sp = new URLSearchParams(qs);
+        userId = userId || sp.get("userId") || null;
+        kind = kind || sp.get("kind") || null;
+      } catch {}
+    }
+
+    // Load user if we have an id now
+    if (userId) {
+      try {
+        user = await User.findOne({ where: { id: userId } });
+      } catch (e) {
+        console.error("[WS] user load error", e?.message || e);
+      }
+    }
+
+    console.log("[WS] kind", kind);
+    console.log("[WS] user", user);
+    console.log("[WS] userID", userId);
+
+    // ---- OpenAI WS lifecycle ----
     openAiWs.on("open", () => {
       openaiReady = true;
       console.log("[OPENAI] socket opened");
@@ -135,6 +164,30 @@ export function createUpsellWSS() {
     openAiWs.on("message", (buf) => {
       try {
         const msg = JSON.parse(buf);
+
+        // Debug: confirm VAD events fire
+        if (msg.type === "input_audio_buffer.speech_started") {
+          console.log("[OPENAI] speech_started");
+          // If assistant was speaking, cancel & clear to avoid barge-in clash
+          if (markQueue.length) {
+            try {
+              openAiWs.send(JSON.stringify({ type: "response.cancel" }));
+            } catch {}
+            try {
+              connection.send(JSON.stringify({ event: "clear", streamSid }));
+            } catch {}
+            markQueue = [];
+          }
+        }
+        if (msg.type === "input_audio_buffer.speech_stopped") {
+          console.log("[OPENAI] speech_stopped");
+          if (!hasActiveResponse) {
+            try {
+              openAiWs.send(JSON.stringify({ type: "response.create" }));
+            } catch {}
+          }
+        }
+
         if (msg.type === "response.created") hasActiveResponse = true;
 
         if (
@@ -167,18 +220,6 @@ export function createUpsellWSS() {
           if (t) pendingUserQ = t;
         }
 
-        if (msg.type === "input_audio_buffer.speech_started") {
-          if (markQueue.length) {
-            try {
-              openAiWs.send(JSON.stringify({ type: "response.cancel" }));
-            } catch {}
-            try {
-              connection.send(JSON.stringify({ event: "clear", streamSid }));
-            } catch {}
-            markQueue = [];
-          }
-        }
-
         if (msg.type === "response.done") {
           hasActiveResponse = false;
           const outputs = msg.response?.output || [];
@@ -203,20 +244,12 @@ export function createUpsellWSS() {
             }
           }
         }
-
-        if (
-          msg.type === "input_audio_buffer.speech_stopped" &&
-          !hasActiveResponse
-        ) {
-          try {
-            openAiWs.send(JSON.stringify({ type: "response.create" }));
-          } catch {}
-        }
       } catch (e) {
         console.error("[OPENAI] parse error", e);
       }
     });
 
+    // ---- Twilio <-> WS bridge ----
     connection.on("message", async (raw) => {
       try {
         const data = JSON.parse(raw);
@@ -226,36 +259,74 @@ export function createUpsellWSS() {
           case "start": {
             streamSid = data.start.streamSid;
             callSid = data.start.callSid || null;
+            console.log(
+              `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
+            );
+
+            // Authoritative parameters from Twilio <Stream><Parameter>
             const cp = (data.start && data.start.customParameters) || {};
             if (!kind && typeof cp.kind === "string") kind = cp.kind;
             if (!userId && typeof cp.userId === "string") userId = cp.userId;
             console.log("[TWILIO] start customParameters", cp);
 
-            // (Optional) reload user if we only got it now
+            // (Re)load user if needed
             if (!user || String(user.id) !== String(userId)) {
               try {
-                const u2 = await User.findOne({ where: { id: userId } });
-                if (u2) {
+                user = await User.findOne({ where: { id: userId } });
+                if (user)
                   console.log("[WS] user reloaded via start.customParameters");
-                }
-              } catch {}
+              } catch (e) {
+                console.error("[WS] user reload error", e?.message || e);
+              }
             }
-            console.log(
-              `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
-            );
+
+            // Always have a kind default to avoid null prompts
+            if (!kind) {
+              console.warn("[OPENAI] missing kind; defaulting to 'upsell'");
+              kind = "upsell";
+            }
+
+            // Build instructions and kickoff
             const instr = makeSystemMessage(userId, kind);
             console.log("[OPENAI] instructions", instr);
-            if (openaiReady) kickoff(openAiWs, instr);
-            else {
+
+            if (openaiReady) {
+              kickoff(openAiWs, instr, {
+                sessionConfiguredRef: null,
+                sessionConfigured: (sessionConfigured = true),
+              });
+            } else {
+              // Wait briefly until WS is open
               const t = setInterval(() => {
                 if (openaiReady) {
-                  kickoff(openAiWs, instr);
+                  kickoff(openAiWs, instr, {
+                    sessionConfiguredRef: null,
+                    sessionConfigured: (sessionConfigured = true),
+                  });
                   clearInterval(t);
                 }
               }, 50);
               setTimeout(() => clearInterval(t), 5000);
             }
 
+            // Periodic commit so VAD can detect turn boundaries
+            if (!commitTimer) {
+              commitTimer = setInterval(() => {
+                if (
+                  openAiWs.readyState === WebSocket.OPEN &&
+                  sessionConfigured &&
+                  !hasActiveResponse
+                ) {
+                  try {
+                    openAiWs.send(
+                      JSON.stringify({ type: "input_audio_buffer.commit" })
+                    );
+                  } catch {}
+                }
+              }, 300); // 300ms works well with 8kHz μ-law frames
+            }
+
+            // Start dual-channel recording (optional)
             try {
               const client = twilio(
                 process.env.TWILIO_ACCOUNT_SID,
@@ -283,7 +354,9 @@ export function createUpsellWSS() {
             const payload = data.media?.payload || "";
             framesIn++;
             bytesIn += Buffer.byteLength(payload);
-            if (openAiWs.readyState === WebSocket.OPEN) {
+
+            // Only forward audio AFTER session.update is sent
+            if (openAiWs.readyState === WebSocket.OPEN && sessionConfigured) {
               try {
                 openAiWs.send(
                   JSON.stringify({
@@ -303,6 +376,10 @@ export function createUpsellWSS() {
 
           case "stop": {
             console.log("[TWILIO] stop");
+            if (commitTimer) {
+              clearInterval(commitTimer);
+              commitTimer = null;
+            }
             if (openAiWs.readyState === WebSocket.OPEN) {
               try {
                 openAiWs.send(
@@ -328,6 +405,10 @@ export function createUpsellWSS() {
     connection.on("close", async () => {
       console.log("[WS] Twilio disconnected");
       if (metricsTimer) clearInterval(metricsTimer);
+      if (commitTimer) {
+        clearInterval(commitTimer);
+        commitTimer = null;
+      }
       try {
         if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
       } catch {}
