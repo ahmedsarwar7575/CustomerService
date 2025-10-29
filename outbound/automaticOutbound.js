@@ -53,31 +53,38 @@ function kickoff(openAiWs, instructions) {
   console.log("[OPENAI] kickoff sent");
 }
 
-export  function createUpsellWSS() {
+export function createUpsellWSS() {
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
-  wss.on("connection", async(connection, req) => {
+  wss.on("connection", async (connection, req) => {
     console.log(`[WS] Twilio connected ${req?.url || ""}`);
     let userId = null;
+    let kind = null;
+
     try {
-      const path = (req?.url || "").split("?")[0];
-      const parts = path.split("/").filter(Boolean);
+      const url = new URL(req?.url || "", "http://localhost");
+      const parts = url.pathname.split("/").filter(Boolean);
       if (parts[0] === "upsell-stream" && parts[1]) {
         userId = parts[1];
       }
+      kind = url.searchParams.get("kind") || null;
     } catch {}
-    if (!userId) {
+
+    // Fallbacks if the above somehow didn’t run (keeps your original behavior)
+    if (!userId || !kind) {
       try {
         const raw = req?.url || "";
         const qs = raw.includes("?") ? raw.split("?")[1] : "";
         const sp = new URLSearchParams(qs);
-        userId = sp.get("userId") || null;
+        userId = userId || sp.get("userId") || null;
+        kind = kind || sp.get("kind") || null;
       } catch {}
     }
     const user = await User.findOne({ where: { id: userId } });
+    console.log("[WS] kind", kind);
     console.log("[WS] user", user);
     console.log("[WS] userID", userId);
-    
+
     let streamSid = null;
     let callSid = null;
     let markQueue = [];
@@ -223,8 +230,8 @@ export  function createUpsellWSS() {
               `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
             );
             const userDetails = JSON.stringify({ user });
-            const instr = makeSystemMessage(userDetails);
-            console.log("[OPENAI] instr", instr);
+            const instr = makeSystemMessage(userId, kind);
+            console.log("[OPENAI] instructions", instr);
             if (openaiReady) kickoff(openAiWs, instr);
             else {
               const t = setInterval(() => {

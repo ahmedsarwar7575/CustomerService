@@ -46,8 +46,8 @@ async function fetchUsers(daysAgo, kind) {
   return User.findAll({ where, order: [["createdAt", "ASC"]] });
 }
 
-function makeUrl( userId) {
-  return `${PUBLIC_BASE_URL}/outbound-upsell/${userId}`;
+function makeUrl( userId, kind) {
+  return `${PUBLIC_BASE_URL}/outbound-upsell/${userId}?kind=${kind}`;
 }
 
 async function waitForCompletion(callSid) {
@@ -64,7 +64,7 @@ async function waitForCompletion(callSid) {
 async function dialSequential(users, kind) {
   for (const u of users) {
     try {
-      const url = makeUrl(u.id);
+      const url = makeUrl(u.id, kind);
       console.log('[CRON] placing call', { kind, userId: u.id, url });
       const call = await client.calls.create({ to: u.phone, from: TWILIO_FROM_NUMBER, url });
       const final = await waitForCompletion(call.sid);
