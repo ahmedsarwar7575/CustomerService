@@ -61,16 +61,15 @@ export function createUpsellWSS() {
     let userId = null;
     let kind = null;
 
+    // Best-effort parse from URL (often missing on Twilio side)
     try {
       const url = new URL(req?.url || "", "http://localhost");
       const parts = url.pathname.split("/").filter(Boolean);
-      if (parts[0] === "upsell-stream" && parts[1]) {
-        userId = parts[1];
-      }
+      if (parts[0] === "upsell-stream" && parts[1]) userId = parts[1];
       kind = url.searchParams.get("kind") || null;
     } catch {}
 
-    // Fallbacks if the above somehow didn’t run (keeps your original behavior)
+    // Fallback parse (legacy)
     if (!userId || !kind) {
       try {
         const raw = req?.url || "";
@@ -80,6 +79,7 @@ export function createUpsellWSS() {
         kind = kind || sp.get("kind") || null;
       } catch {}
     }
+
     const user = await User.findOne({ where: { id: userId } });
     console.log("[WS] kind", kind);
     console.log("[WS] user", user);
@@ -226,10 +226,23 @@ export function createUpsellWSS() {
           case "start": {
             streamSid = data.start.streamSid;
             callSid = data.start.callSid || null;
+            const cp = (data.start && data.start.customParameters) || {};
+            if (!kind && typeof cp.kind === "string") kind = cp.kind;
+            if (!userId && typeof cp.userId === "string") userId = cp.userId;
+            console.log("[TWILIO] start customParameters", cp);
+
+            // (Optional) reload user if we only got it now
+            if (!user || String(user.id) !== String(userId)) {
+              try {
+                const u2 = await User.findOne({ where: { id: userId } });
+                if (u2) {
+                  console.log("[WS] user reloaded via start.customParameters");
+                }
+              } catch {}
+            }
             console.log(
               `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
             );
-            const userDetails = JSON.stringify({ user });
             const instr = makeSystemMessage(userId, kind);
             console.log("[OPENAI] instructions", instr);
             if (openaiReady) kickoff(openAiWs, instr);
