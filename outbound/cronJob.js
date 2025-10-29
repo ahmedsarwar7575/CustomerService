@@ -28,12 +28,12 @@ const U_DAYS = parseInt(UPSELL_DAYS, 10) || 21;
 const POLL = parseInt(CALL_STATUS_POLL_SEC, 10) || 5;
 const TIMEOUT = parseInt(CALL_STATUS_TIMEOUT_SEC, 10) || 1200;
 
- function dayWindowUtc(daysAgo) {
-     const dayLocal = subDays(new Date(), daysAgo);     // local date anchor
-     const startUtc = fromZonedTime(startOfDay(dayLocal), TZ);
-     const endUtc = fromZonedTime(endOfDay(dayLocal), TZ);
-     return { startUtc, endUtc };
-   }
+function dayWindowUtc(daysAgo) {
+  const dayLocal = subDays(new Date(), daysAgo); // local date anchor
+  const startUtc = fromZonedTime(startOfDay(dayLocal), TZ);
+  const endUtc = fromZonedTime(endOfDay(dayLocal), TZ);
+  return { startUtc, endUtc };
+}
 
 async function fetchUsers(daysAgo, kind) {
   const { startUtc, endUtc } = dayWindowUtc(daysAgo);
@@ -46,17 +46,30 @@ async function fetchUsers(daysAgo, kind) {
   return User.findAll({ where, order: [["createdAt", "ASC"]] });
 }
 
-function makeUrl( userId, kind) {
-  return `${PUBLIC_BASE_URL}/outbound-upsell/${userId}?kind=${kind}`;
+function makeUrl(userId, kind) {
+  const base =
+    process.env.PUBLIC_BASE_URL || "https://customerservice-kabe.onrender.com";
+
+  const u = new URL(base);
+  const basePath = u.pathname.replace(/\/+$/, "");
+  u.pathname = `${basePath}/outbound-upsell/${encodeURIComponent(userId)}`;
+  u.searchParams.set("kind", String(kind || ""));
+  return u.toString();
 }
 
 async function waitForCompletion(callSid) {
-  const endStatuses = new Set(["completed", "busy", "failed", "no-answer", "canceled"]);
+  const endStatuses = new Set([
+    "completed",
+    "busy",
+    "failed",
+    "no-answer",
+    "canceled",
+  ]);
   const start = Date.now();
   while (Date.now() - start < TIMEOUT * 1000) {
     const c = await client.calls(callSid).fetch();
     if (endStatuses.has(c.status)) return c.status;
-    await new Promise(r => setTimeout(r, POLL * 1000));
+    await new Promise((r) => setTimeout(r, POLL * 1000));
   }
   return "timeout";
 }
@@ -65,11 +78,16 @@ async function dialSequential(users, kind) {
   for (const u of users) {
     try {
       const url = makeUrl(u.id, kind);
-      console.log('[CRON] placing call', { kind, userId: u.id, url });
-      const call = await client.calls.create({ to: u.phone, from: TWILIO_FROM_NUMBER, url });
+      console.log("[CRON] placing call", { kind, userId: u.id, url });
+      const call = await client.calls.create({
+        to: u.phone,
+        from: TWILIO_FROM_NUMBER,
+        url,
+      });
       const final = await waitForCompletion(call.sid);
       if (final === "completed") {
-        if (kind === "satisfaction") await u.update({ isSatisfactionCall: true });
+        if (kind === "satisfaction")
+          await u.update({ isSatisfactionCall: true });
         if (kind === "upsell") await u.update({ isUpSellCall: true });
         console.log(`[CRON] ${kind} OK userId=${u.id} sid=${call.sid}`);
       } else {
@@ -83,21 +101,39 @@ async function dialSequential(users, kind) {
 
 export async function runSatisfactionOnce() {
   const users = await fetchUsers(S_DAYS, "satisfaction");
-  if (!users.length) { console.log("[CRON] no 7-day (config) users"); return; }
+  if (!users.length) {
+    console.log("[CRON] no 7-day (config) users");
+    return;
+  }
   await dialSequential(users, "satisfaction");
 }
 
 export async function runUpsellJobOnce() {
   const users = await fetchUsers(U_DAYS, "upsell");
-  if (!users.length) { console.log("[CRON] no 21-day (config) users"); return; }
+  if (!users.length) {
+    console.log("[CRON] no 21-day (config) users");
+    return;
+  }
   await dialSequential(users, "upsell");
 }
 
 export function startUpsellCron() {
-  cron.schedule("*/1 * * * *", async () => {
-    console.log("[CRON] tick 30m");
-    try { await runSatisfactionOnce(); } catch (e) { console.error("[CRON] sat error", e); }
-    try { await runUpsellJobOnce(); } catch (e) { console.error("[CRON] upsell error", e); }
-  }, { timezone: TZ });
+  cron.schedule(
+    "*/1 * * * *",
+    async () => {
+      console.log("[CRON] tick 30m");
+      try {
+        await runSatisfactionOnce();
+      } catch (e) {
+        console.error("[CRON] sat error", e);
+      }
+      try {
+        await runUpsellJobOnce();
+      } catch (e) {
+        console.error("[CRON] upsell error", e);
+      }
+    },
+    { timezone: TZ }
+  );
   console.log("[CRON] scheduled every 30m Asia/Karachi");
 }
