@@ -2,7 +2,7 @@
 import cron from "node-cron";
 import { Op } from "sequelize";
 import twilio from "twilio";
-import User from "../models/usser.js";
+import User from "../models/user.js";
 import { subDays, startOfDay, endOfDay } from "date-fns";
 import { fromZonedTime } from "date-fns-tz";
 import dotenv from "dotenv";
