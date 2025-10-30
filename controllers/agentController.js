@@ -142,6 +142,7 @@ export const getAgentPerformance = async (req, res) => {
 export const getAllAgents = async (req, res) => {
   try {
     const agents = await Agent.findAll({
+      where: { role: "agent" },
       attributes: [
         "id",
         "firstName",

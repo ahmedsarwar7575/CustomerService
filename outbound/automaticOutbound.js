@@ -1,4 +1,3 @@
-// automaticOutbound.js
 import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -11,18 +10,15 @@ import { summarizeUpsellLite } from "./summerize.js";
 const {
   OPENAI_API_KEY,
   REALTIME_VOICE = "alloy",
-  REALTIME_MODEL, // optional override via env
+  REALTIME_MODEL,
 } = process.env;
 
-// Default to a stable realtime model name if none provided via env.
-// If your account supports a different model, set REALTIME_MODEL=<model> in env.
 const RT_MODEL = REALTIME_MODEL || "gpt-4o-realtime-preview";
 
 if (!OPENAI_API_KEY) {
   console.error("[OPENAI] ERROR: Missing OPENAI_API_KEY in environment");
 }
 
-/** Create a connection to OpenAI Realtime with strong diagnostics */
 function createOpenAIWs() {
   const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
     RT_MODEL
@@ -32,13 +28,11 @@ function createOpenAIWs() {
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY || "MISSING"}`,
       "OpenAI-Beta": "realtime=v1",
-      // Some environments require Origin; it’s harmless to include:
       Origin: "https://server.local",
     },
     perMessageDeflate: false,
   });
 
-  // Log HTTP response when the WS handshake fails
   ws.on("unexpected-response", async (_req, res) => {
     let body = "";
     try {
@@ -64,7 +58,6 @@ function createOpenAIWs() {
   return ws;
 }
 
-/** Build session.update payload */
 function buildSessionUpdate(instructions) {
   return {
     type: "session.update",
@@ -86,11 +79,10 @@ function buildSessionUpdate(instructions) {
   };
 }
 
-/** Kick off the session: send session.update, then a first response */
-function kickoff(openAiWs, instructions, state) {
+// kickoff now RETURNS true/false instead of mutating a passed-in object
+function kickoff(openAiWs, instructions) {
   try {
     openAiWs.send(JSON.stringify(buildSessionUpdate(instructions)));
-    state.sessionConfigured = true; // safe to stream/flush audio now
 
     openAiWs.send(
       JSON.stringify({
@@ -102,9 +94,12 @@ function kickoff(openAiWs, instructions, state) {
         },
       })
     );
+
     console.log("[OPENAI] kickoff sent");
+    return true;
   } catch (e) {
     console.error("[OPENAI] kickoff error", e?.message || e);
+    return false;
   }
 }
 
@@ -114,7 +109,6 @@ export function createUpsellWSS() {
   wss.on("connection", async (connection, req) => {
     console.log(`[WS] Twilio connected ${req?.url || ""}`);
 
-    // ---- connection state ----
     let userId = null;
     let kind = null;
     let user = null;
@@ -125,11 +119,10 @@ export function createUpsellWSS() {
     let hasActiveResponse = false;
     let pendingUserQ = null;
     let openaiReady = false;
-    let sessionConfigured = false; // set true after session.update
+    let sessionConfigured = false;
     let commitTimer = null;
     let metricsTimer = null;
 
-    // queue incoming audio frames until OpenAI is ready & configured
     let mediaQueue = [];
 
     let framesIn = 0,
@@ -163,15 +156,13 @@ export function createUpsellWSS() {
       } catch {}
     };
 
-    // Parse from URL (best effort; Twilio may strip)
+    // try to parse ?userId=&kind= from URL
     try {
       const url = new URL(req?.url || "", "http://localhost");
       const parts = url.pathname.split("/").filter(Boolean);
       if (parts[0] === "upsell-stream" && parts[1]) userId = parts[1];
       kind = url.searchParams.get("kind") || null;
     } catch {}
-
-    // Fallback parse
     if (!userId || !kind) {
       try {
         const raw = req?.url || "";
@@ -200,26 +191,24 @@ export function createUpsellWSS() {
       console.log("[OPENAI] socket opened (model:", RT_MODEL, ")");
     });
 
-    openAiWs.on("close", (code, reason) =>
+    openAiWs.on("close", (code, reason) => {
       console.log(
         "[OPENAI] socket closed",
         code,
         reason ? reason.toString() : ""
-      )
-    );
+      );
+    });
 
-    openAiWs.on("error", (e) =>
-      console.error("[OPENAI] error", e?.message || e)
-    );
+    openAiWs.on("error", (e) => {
+      console.error("[OPENAI] error", e?.message || e);
+    });
 
     openAiWs.on("message", (buf) => {
       try {
         const msg = JSON.parse(buf);
 
-        // VAD debug
         if (msg.type === "input_audio_buffer.speech_started") {
           console.log("[OPENAI] speech_started");
-          // Cancel/clear TTS if user barges in
           if (markQueue.length) {
             try {
               openAiWs.send(JSON.stringify({ type: "response.cancel" }));
@@ -315,13 +304,11 @@ export function createUpsellWSS() {
               `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
             );
 
-            // Authoritative params from TwiML <Parameter>
             const cp = (data.start && data.start.customParameters) || {};
             if (!kind && typeof cp.kind === "string") kind = cp.kind;
             if (!userId && typeof cp.userId === "string") userId = cp.userId;
             console.log("[TWILIO] start customParameters", cp);
 
-            // (Re)load user if needed
             if (!user || String(user.id) !== String(userId)) {
               try {
                 user = await User.findOne({ where: { id: userId } });
@@ -337,7 +324,7 @@ export function createUpsellWSS() {
               kind = "upsell";
             }
 
-            // Wait for OpenAI socket to open, up to ~5s
+            // wait up to ~5s for OpenAI WS to open
             const waitStart = Date.now();
             const waitUntil = (ms) =>
               new Promise((resolve) => setTimeout(resolve, ms));
@@ -351,12 +338,14 @@ export function createUpsellWSS() {
               );
             }
 
-            // Build prompt + kickoff (this sets sessionConfigured=true)
-            const instr = makeSystemMessage(userId, kind);
-            console.log("[OPENAI] instructions", instr);
-            kickoff(openAiWs, instr, { sessionConfigured });
+            // build system prompt
+            const instr = await makeSystemMessage(userId, kind);
+            console.log("[OPENAI] FINAL SYSTEM MESSAGE >>>", instr);
 
-            // Start periodic commits so VAD can process buffered audio
+            // send session.update + first assistant turn
+            sessionConfigured = kickoff(openAiWs, instr);
+
+            // start periodic commits so VAD can cut turns
             if (!commitTimer) {
               commitTimer = setInterval(() => {
                 if (
@@ -373,8 +362,8 @@ export function createUpsellWSS() {
               }, 300);
             }
 
-            // Flush any queued media frames captured before sessionConfigured
-            if (mediaQueue.length) {
+            // flush any media we got before sessionConfigured
+            if (mediaQueue.length && sessionConfigured) {
               try {
                 for (const payload of mediaQueue) {
                   openAiWs.send(
@@ -393,7 +382,7 @@ export function createUpsellWSS() {
               }
             }
 
-            // Optional: start call recording
+            // optional call recording
             try {
               const client = twilio(
                 process.env.TWILIO_ACCOUNT_SID,
@@ -422,8 +411,11 @@ export function createUpsellWSS() {
             framesIn++;
             bytesIn += Buffer.byteLength(payload);
 
-            // If not ready yet, queue; else send straight through
-            if (openAiWs.readyState === WebSocket.OPEN && sessionConfigured) {
+            // either queue or forward
+            if (
+              openAiWs.readyState === WebSocket.OPEN &&
+              sessionConfigured === true
+            ) {
               try {
                 openAiWs.send(
                   JSON.stringify({
@@ -460,9 +452,10 @@ export function createUpsellWSS() {
             break;
           }
 
-          default:
+          default: {
             console.log("[TWILIO] event", data.event);
             break;
+          }
         }
       } catch (e) {
         console.error("[WS] parse error", e);
@@ -480,7 +473,12 @@ export function createUpsellWSS() {
         if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
       } catch {}
       console.log("[SUMMARY] qaPairs", qaPairs.length);
-      summarizeUpsellLite(qaPairs, userId);
+
+      try {
+        await summarizeUpsellLite(qaPairs, userId);
+      } catch (e) {
+        console.error("[SUMMARY] summarize error", e?.message || e);
+      }
     });
 
     connection.on("error", (e) => console.error("[WS] error", e?.message || e));
