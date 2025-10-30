@@ -46,6 +46,21 @@ const Call = sequelize.define('Call', {
   outboundDetails: {
     type: DataTypes.JSON,
     allowNull: true
+  },
+  callCategory: {
+    // what kind of call was this?
+    type: DataTypes.ENUM('satisfaction', 'upsell', 'both', 'other'),
+    allowNull: true,
+  },
+  customerSatisfied: {
+    // only meaningful for satisfaction calls
+    type: DataTypes.BOOLEAN,
+    allowNull: true,
+  },
+  customerInterestedInUpsell: {
+    // only meaningful for upsell calls
+    type: DataTypes.BOOLEAN,
+    allowNull: true,
   }
 }, {
   tableName: 'calls',

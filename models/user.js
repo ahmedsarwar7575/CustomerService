@@ -42,7 +42,7 @@ const User = sequelize.define('User', {
   isBothCall: {
     type: DataTypes.BOOLEAN,
     defaultValue: false
-  }
+  },
 }, {
   tableName: 'users',
   timestamps: true

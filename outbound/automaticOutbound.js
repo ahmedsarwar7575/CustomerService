@@ -5,8 +5,7 @@ import dotenv from "dotenv";
 dotenv.config();
 import User from "../models/user.js";
 import { makeSystemMessage } from "./prompt.js";
-import { summarizeUpsellLite } from "./summerize.js";
-
+import processCallOutcome from './summerize.js';
 const {
   OPENAI_API_KEY,
   REALTIME_VOICE = "alloy",
@@ -495,7 +494,7 @@ export function createUpsellWSS() {
       console.log("[SUMMARY] qaPairs", qaPairs.length);
 
       try {
-        await summarizeUpsellLite(qaPairs, userId);
+        await processCallOutcome(qaPairs, userId, callSid);
       } catch (e) {
         console.error("[SUMMARY] summarize error", e?.message || e);
       }
