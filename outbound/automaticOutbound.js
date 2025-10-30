@@ -3,7 +3,6 @@ import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
 dotenv.config();
-import { op } from "sequelize";
 import User from "../models/user.js";
 import { makeSystemMessage } from "./prompt.js";
 import { summarizeUpsellLite } from "./summerize.js";
