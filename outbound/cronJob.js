@@ -76,8 +76,8 @@ async function waitForCompletion(callSid) {
 async function dialSequential(users, kind) {
   for (const u of users) {
     try {
-      console.log("[CRON] placing call", { kind, userId: u.id, url });
       const url = makeUrl(u.id, kind);
+      console.log("[CRON] placing call", { kind, userId: u.id, url });
       const call = await client.calls.create({
         to: u.phone,
         from: TWILIO_FROM_NUMBER,
