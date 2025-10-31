@@ -2,7 +2,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { summarizer } from "./summery.js";
 import twilio from "twilio";
 import dotenv from "dotenv";
-// import Call from "../models/Call.js";
+import Call from "../models/callss.js";
 dotenv.config();
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const MODEL = "gpt-4o-realtime-preview-2024-12-17";
