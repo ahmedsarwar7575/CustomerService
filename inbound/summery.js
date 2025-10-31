@@ -174,7 +174,7 @@ export const summarizer = async (pairs, callSid) => {
         },
         { transaction: t }
       );
-      const call = await Call.create(
+      const call = await Call.update(
         {
           userId: userRecord.id,
           ticketId: ticket.id,
@@ -182,10 +182,13 @@ export const summarizer = async (pairs, callSid) => {
           isResolvedByAi: safe.ticket.isSatisfied,
           languages: safe.non_english_detected,
           summary: safe.summary,
-          callSid: callSid,
           type: "inbound",
+          // don't touch recordingUrl here — `/recording-status` handles that
         },
-        { transaction: t }
+        {
+          where: { callSid: callSid },
+          transaction: t,
+        }
       );
       return { user: userRecord, ticket, call, extracted: safe };
     });

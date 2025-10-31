@@ -250,21 +250,25 @@ export async function processCallOutcome({ qaPairs, userId, callSid }) {
   }
 
   // final Call row
-  const callRecord = await Call.create({
-    type: "outbound",
-    userId: userId,
-    ticketId: ticket ? ticket.id : null,
-    QuestionsAnswers: qaPairs || null,
-    languages: languages || null,
-    isResolvedByAi: null,
-    summary: summary || "",
-    recordingUrl: null,
-    callSid: callSid || null,
-    outboundDetails: null,
-    callCategory: callCategory || null,
-    customerSatisfied: satisfaction.isSatisfied,
-    customerInterestedInUpsell: upsell.interestedInOffer,
-  });
+  const callRecord = await Call.update(
+    {
+      type: "outbound",
+      userId: userId,
+      ticketId: ticket ? ticket.id : null,
+      QuestionsAnswers: qaPairs || null,
+      languages: languages || null,
+      isResolvedByAi: null,
+      summary: summary || "",
+      callSid: callSid || null,
+      outboundDetails: null,
+      callCategory: callCategory || null,
+      customerSatisfied: satisfaction.isSatisfied,
+      customerInterestedInUpsell: upsell.interestedInOffer,
+    },
+    {
+      where: { callSid: callSid },
+    }
+  );
 
   return {
     call: callRecord.toJSON(),

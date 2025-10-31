@@ -2,7 +2,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { summarizer } from "./summery.js";
 import twilio from "twilio";
 import dotenv from "dotenv";
-
+import Call from "../models/Call.js";
 dotenv.config();
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const MODEL = "gpt-4o-realtime-preview-2024-12-17";
@@ -369,6 +369,12 @@ export function attachMediaStreamServer(server) {
             case "start":
               streamSid = data.start.streamSid;
               callSid = data.start.callSid || null;
+              await Call.findOrCreate({
+                where: { callSid },           // <-- IMPORTANT: must match your model
+                defaults: {
+                  callSid,
+                },
+              });
               if (!callSid || started.has(callSid)) return;
               started.add(callSid);
               const base = process.env.PUBLIC_BASE_URL;

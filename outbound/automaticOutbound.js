@@ -5,7 +5,8 @@ import dotenv from "dotenv";
 dotenv.config();
 import User from "../models/user.js";
 import { makeSystemMessage } from "./prompt.js";
-import processCallOutcome from './summerize.js';
+import Call from "../models/Call.js";
+import processCallOutcome from "./summerize.js";
 const {
   OPENAI_API_KEY,
   REALTIME_VOICE = "alloy",
@@ -395,6 +396,12 @@ export function createUpsellWSS() {
 
             try {
               if (callSid) {
+                await Call.findOrCreate({
+                  where: { callSid }, // <-- IMPORTANT: must match your model
+                  defaults: {
+                    callSid,
+                  },
+                });
                 const client = twilio(
                   process.env.TWILIO_ACCOUNT_SID,
                   process.env.TWILIO_AUTH_TOKEN
