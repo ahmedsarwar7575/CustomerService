@@ -182,3 +182,23 @@ export const getAllCallsForAgent = async (req, res) => {
     res.status(500).json({ error: "Failed to fetch calls." });
   }
 };
+
+export const deleteCall = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid id parameter.' });
+    }
+
+    const call = await Call.findByPk(id);
+    if (!call) {
+      return res.status(404).json({ error: 'Call not found.' });
+    }
+
+    await call.destroy();
+    res.json({ message: 'Call deleted successfully.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete the call.' });
+  }
+};

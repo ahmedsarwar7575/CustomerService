@@ -34,7 +34,7 @@ import {
   getAgentRatings,
   getAllRatings
 } from '../controllers/ratingController.js';
-import {getAllCalls, getCallById, getAllCallsForAgent} from '../controllers/Call.js';
+import {getAllCalls, getCallById, getAllCallsForAgent, deleteCall} from '../controllers/Call.js';
 const router = express.Router();
 
 // Agent Routes
@@ -75,6 +75,7 @@ router.get('/api/ratings', /* #swagger.tags = ['Ratings'] */  getAllRatings);
 
 
 router.get('/api/calls', /* #swagger.tags = ['Calls'] */  getAllCalls);
+router.delete('/api/call/:id', /* #swagger.tags = ['Calls'] */  deleteCall);
 router.get('/api/call/:id', /* #swagger.tags = ['Calls'] */  getCallById);
 router.get('/api/call/:id/agent', /* #swagger.tags = ['Calls'] */  getAllCallsForAgent);
 
