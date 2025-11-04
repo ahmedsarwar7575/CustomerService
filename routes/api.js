@@ -36,6 +36,7 @@ import {
 } from '../controllers/ratingController.js';
 import {getAllCalls, getCallById, getAllCallsForAgent, deleteCall} from '../controllers/Call.js';
 import { dashboardLite  } from '../controllers/dashboard.js';
+import getRecordingUrlBySid from '../controllers/recoerding.js';
 const router = express.Router();
 
 // Agent Routes
@@ -76,6 +77,7 @@ router.get('/api/ratings', /* #swagger.tags = ['Ratings'] */  getAllRatings);
 
 
 router.get('/api/dashboard', /* #swagger.tags = ['dashhboard'] */  dashboardLite );
+router.get('/api/getRecordingUrlById/:id', /* #swagger.tags = ['dashhboard'] */  getRecordingUrlBySid );
 
 
 router.get('/api/calls', /* #swagger.tags = ['Calls'] */  getAllCalls);
