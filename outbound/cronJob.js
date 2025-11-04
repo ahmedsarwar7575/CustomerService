@@ -1,9 +1,10 @@
-// outbound/cronJob.js
+// outbound/cronJob.js (revised, lean)
 import cron from "node-cron";
-import { Op } from "sequelize";
+import { Op, fn, col } from "sequelize";
 import twilio from "twilio";
 import User from "../models/user.js";
-import { subDays, startOfDay, endOfDay } from "date-fns";
+import Call from "../models/Call.js";
+import { subDays, startOfDay, endOfDay, addDays } from "date-fns";
 import { fromZonedTime } from "date-fns-tz";
 import dotenv from "dotenv";
 dotenv.config();
@@ -13,42 +14,80 @@ const {
   TWILIO_AUTH_TOKEN,
   TWILIO_FROM_NUMBER,
   PUBLIC_BASE_URL,
-  // dynamic/test overrides:
   SATISFACTION_DAYS = "7",
   UPSELL_DAYS = "21",
   CALL_STATUS_POLL_SEC = "5",
-  CALL_STATUS_TIMEOUT_SEC = "1200", // 20m
+  CALL_STATUS_TIMEOUT_SEC = "1200",
 } = process.env;
 
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const TZ = "Asia/Karachi";
-
 const S_DAYS = parseInt(SATISFACTION_DAYS, 10) || 7;
 const U_DAYS = parseInt(UPSELL_DAYS, 10) || 21;
 const POLL = parseInt(CALL_STATUS_POLL_SEC, 10) || 5;
 const TIMEOUT = parseInt(CALL_STATUS_TIMEOUT_SEC, 10) || 1200;
 
 function dayWindowUtc(daysAgo) {
-  const dayLocal = subDays(new Date(), daysAgo); // local date anchor
+  const dayLocal = subDays(new Date(), daysAgo);
   const startUtc = fromZonedTime(startOfDay(dayLocal), TZ);
   const endUtc = fromZonedTime(endOfDay(dayLocal), TZ);
   return { startUtc, endUtc };
 }
 
-async function fetchUsers(daysAgo, kind) {
+async function getLatestInboundMap() {
+  const rows = await Call.findAll({
+    attributes: ["userId", [fn("MAX", col("createdAt")), "lastInboundAt"]],
+    where: { type: "inbound" },
+    group: ["userId"],
+    raw: true,
+  });
+  const m = new Map();
+  for (const r of rows)
+    if (r.userId && r.lastInboundAt) m.set(r.userId, new Date(r.lastInboundAt));
+  return m;
+}
+
+async function fetchUsersDueByInbound(daysAgo, kind) {
   const { startUtc, endUtc } = dayWindowUtc(daysAgo);
-  const where = {
-    createdAt: { [Op.between]: [startUtc, endUtc] },
-    phone: { [Op.ne]: null },
-  };
-  if (kind === "satisfaction") where.isSatisfactionCall = false;
-  if (kind === "upsell") where.isUpSellCall = false;
-  return User.findAll({ where, order: [["createdAt", "ASC"]] });
+  const latestInboundMap = await getLatestInboundMap();
+  const userIds = Array.from(latestInboundMap.keys());
+  if (!userIds.length) return [];
+
+  const users = await User.findAll({
+    where: { id: { [Op.in]: userIds }, phone: { [Op.ne]: null } },
+    order: [["createdAt", "ASC"]],
+  });
+
+  const markerField =
+    kind === "satisfaction" ? "satisfactionForInboundAt" : "upsellForInboundAt";
+  const entries = [];
+
+  for (const u of users) {
+    const lastInboundAt = latestInboundMap.get(u.id);
+    if (!lastInboundAt) continue;
+
+    const alreadyForThisInbound =
+      Object.prototype.hasOwnProperty.call(u.dataValues || u, markerField) &&
+      u[markerField] &&
+      new Date(u[markerField]).getTime() === lastInboundAt.getTime();
+    if (alreadyForThisInbound) continue;
+
+    if (lastInboundAt >= startUtc && lastInboundAt <= endUtc) {
+      entries.push({ user: u, lastInboundAt });
+    } else if (lastInboundAt > startUtc) {
+      const nextAt = addDays(lastInboundAt, daysAgo);
+      // console.log(
+      //   `[CRON] ${kind} defer userId=${
+      //     u.id
+      //   } lastInbound=${lastInboundAt.toISOString()} next=${nextAt.toISOString()}`
+      // );
+    }
+  }
+  return entries;
 }
 
 function makeUrl(userId, kind) {
-  const base =
-    process.env.PUBLIC_BASE_URL || "https://customerservice-kabe.onrender.com";
+  const base = PUBLIC_BASE_URL || "https://customerservice-kabe.onrender.com";
   const u = new URL(base);
   const basePath = u.pathname.replace(/\/+$/, "");
   u.pathname = `${basePath}/outbound-upsell/${encodeURIComponent(userId)}`;
@@ -73,8 +112,8 @@ async function waitForCompletion(callSid) {
   return "timeout";
 }
 
-async function dialSequential(users, kind) {
-  for (const u of users) {
+async function dialSequential(entries, kind) {
+  for (const { user: u, lastInboundAt } of entries) {
     try {
       const url = makeUrl(u.id, kind);
       console.log("[CRON] placing call", { kind, userId: u.id, url });
@@ -85,9 +124,19 @@ async function dialSequential(users, kind) {
       });
       const final = await waitForCompletion(call.sid);
       if (final === "completed") {
-        if (kind === "satisfaction")
-          await u.update({ isSatisfactionCall: true });
-        if (kind === "upsell") await u.update({ isUpSellCall: true });
+        const markerField =
+          kind === "satisfaction"
+            ? "satisfactionForInboundAt"
+            : "upsellForInboundAt";
+        if (
+          Object.prototype.hasOwnProperty.call(u.dataValues || u, markerField)
+        )
+          await u.update({ [markerField]: lastInboundAt });
+        else {
+          if (kind === "satisfaction")
+            await u.update({ isSatisfactionCall: true });
+          if (kind === "upsell") await u.update({ isUpSellCall: true });
+        }
         console.log(`[CRON] ${kind} OK userId=${u.id} sid=${call.sid}`);
       } else {
         console.log(`[CRON] ${kind} ended status=${final} userId=${u.id}`);
@@ -99,28 +148,26 @@ async function dialSequential(users, kind) {
 }
 
 export async function runSatisfactionOnce() {
-  const users = await fetchUsers(S_DAYS, "satisfaction");
-  if (!users.length) {
-    console.log("[CRON] no 7-day (config) users");
-    return;
-  }
-  await dialSequential(users, "satisfaction");
+  const entries = await fetchUsersDueByInbound(S_DAYS, "satisfaction");
+  if (!entries.length)
+    return console.log(
+      "[CRON] no users due for 7-day satisfaction (inbound-based)"
+    );
+  await dialSequential(entries, "satisfaction");
 }
 
 export async function runUpsellJobOnce() {
-  const users = await fetchUsers(U_DAYS, "upsell");
-  if (!users.length) {
-    console.log("[CRON] no 21-day (config) users");
-    return;
-  }
-  await dialSequential(users, "upsell");
+  const entries = await fetchUsersDueByInbound(U_DAYS, "upsell");
+  if (!entries.length)
+    return console.log("[CRON] no users due for 21-day upsell (inbound-based)");
+  await dialSequential(entries, "upsell");
 }
 
 export function startUpsellCron() {
   cron.schedule(
     "*/1 * * * *",
     async () => {
-      console.log("[CRON] tick 30m");
+      console.log("[CRON] tick 1m");
       try {
         await runSatisfactionOnce();
       } catch (e) {
@@ -134,5 +181,5 @@ export function startUpsellCron() {
     },
     { timezone: TZ }
   );
-  console.log("[CRON] scheduled every 30m Asia/Karachi");
+  console.log("[CRON] scheduled every 1m Asia/Karachi");
 }
