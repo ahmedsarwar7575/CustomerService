@@ -202,3 +202,15 @@ export const deleteCall = async (req, res) => {
     res.status(500).json({ error: 'Failed to delete the call.' });
   }
 };
+export const toggleIsSatisfied = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "User id is required" });
+    const user = await Call.findByPk(id);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    await user.update({ customerSatisfied: !user.customerSatisfied });
+    res.json({ message: "User isSatisfied updated successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};

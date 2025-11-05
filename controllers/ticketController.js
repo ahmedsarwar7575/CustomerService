@@ -2,6 +2,9 @@ import Ticket from "../models/ticket.js";
 import Agent from "../models/agent.js";
 import User from "../models/user.js";
 import Call from "../models/Call.js";
+import { randomUUID } from 'node:crypto';
+
+const nz = (arr) => (Array.isArray(arr) ? arr : []);
 // Create new ticket
 export const createTicket = async (req, res) => {
   try {
@@ -135,7 +138,16 @@ export const getAllTickets = async (req, res) => {
       include: [
         { model: Agent, attributes: ["id", "firstName", "lastName"] },
         { model: User, attributes: ["id", "name", "email"] },
-        { model: Call, attributes: ["id", "type", "summary", "createdAt", "QuestionsAnswers"] },
+        {
+          model: Call,
+          attributes: [
+            "id",
+            "type",
+            "summary",
+            "createdAt",
+            "QuestionsAnswers",
+          ],
+        },
       ],
       order: [["updatedAt", "DESC"]],
     });
@@ -222,7 +234,16 @@ export const getticketById = async (req, res) => {
       include: [
         { model: Agent, attributes: ["id", "firstName", "lastName"] },
         { model: User, attributes: ["id", "name", "email"] },
-        { model: Call, attributes: ["id", "type", "summary", "createdAt", "QuestionsAnswers"] },
+        {
+          model: Call,
+          attributes: [
+            "id",
+            "type",
+            "summary",
+            "createdAt",
+            "QuestionsAnswers",
+          ],
+        },
       ],
     });
     if (!ticket) {
@@ -245,5 +266,94 @@ export const deleteTicket = async (req, res) => {
     res.json({ message: "Ticket deleted successfully" });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+};
+
+
+
+export const addNotes = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { text } = req.body;
+    if (!id) return res.status(400).json({ error: "Ticket id is required" });
+    if (!text) return res.status(400).json({ error: "text is required" });
+
+    const ticket = await Ticket.findByPk(id);
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+
+    const note = { id: randomUUID(), text: String(text).trim(), timestamp: new Date().toISOString() };
+    ticket.set('notes', [...nz(ticket.notes), note]);
+    await ticket.save();
+
+    res.json({ message: "Note added", note });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+};
+
+export const getNotes = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "Ticket id is required" });
+    const ticket = await Ticket.findByPk(id);
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+    res.json({ notes: nz(ticket.notes) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+};
+
+export const getNoteById = async (req, res) => {
+  try {
+    const { id, noteId } = req.params;
+    const ticket = await Ticket.findByPk(id);
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+    const note = nz(ticket.notes).find(n => n.id === noteId);
+    if (!note) return res.status(404).json({ error: "Note not found" });
+    res.json({ note });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+};
+
+export const updateNoteById = async (req, res) => {
+  try {
+    const { id, noteId } = req.params;
+    const { text } = req.body;
+    if (!text) return res.status(400).json({ error: "text is required" });
+
+    const ticket = await Ticket.findByPk(id);
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+
+    const notes = nz(ticket.notes);
+    const i = notes.findIndex(n => n.id === noteId);
+    if (i === -1) return res.status(404).json({ error: "Note not found" });
+
+    const updated = { ...notes[i], text: String(text).trim(), timestamp: new Date().toISOString() };
+    const next = notes.slice(); next[i] = updated;
+    ticket.set('notes', next);
+    await ticket.save();
+
+    res.json({ message: "Note updated", note: updated });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+};
+
+export const deleteNoteById = async (req, res) => {
+  try {
+    const { id, noteId } = req.params;
+    const ticket = await Ticket.findByPk(id);
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+
+    const notes = nz(ticket.notes);
+    if (!notes.some(n => n.id === noteId)) return res.status(404).json({ error: "Note not found" });
+
+    ticket.set('notes', notes.filter(n => n.id !== noteId));
+    await ticket.save();
+
+    res.json({ message: "Note deleted", noteId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 };

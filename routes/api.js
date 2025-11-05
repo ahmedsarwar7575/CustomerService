@@ -19,7 +19,11 @@ import {
   getAllTickets,
   updatePiority,
   getticketById,
-  deleteTicket
+  deleteTicket,
+  addNotes,
+  getNotes,
+  updateNoteById,
+  deleteNoteById
 } from '../controllers/ticketController.js';
 import {
   createUser,
@@ -27,14 +31,15 @@ import {
   updateUserStatus,
   getUsersByTicketType,
   getAllUsers,
-  deleteUser
+  deleteUser,
+  
 } from '../controllers/userController.js';
 import {
   createRating,
   getAgentRatings,
   getAllRatings
 } from '../controllers/ratingController.js';
-import {getAllCalls, getCallById, getAllCallsForAgent, deleteCall} from '../controllers/Call.js';
+import {getAllCalls, getCallById, getAllCallsForAgent, deleteCall, toggleIsSatisfied} from '../controllers/Call.js';
 import { dashboardLite  } from '../controllers/dashboard.js';
 import getRecordingUrlBySid from '../controllers/recoerding.js';
 const router = express.Router();
@@ -61,6 +66,16 @@ router.patch('/api/tickets/:id/escalate', /* #swagger.tags = ['Tickets'] */  esc
 router.get('/api/ticket/:id', /* #swagger.tags = ['Tickets'] */  getticketById);
 router.delete('/api/ticket/:id', /* #swagger.tags = ['Tickets'] */  deleteTicket);
 
+
+
+router.patch('/api/tickets/:id/note', /* #swagger.tags = ['Tickets'] */  addNotes);
+router.get('/api/tickets/:id/note', /* #swagger.tags = ['Tickets'] */  getNotes);
+router.delete('/api/tickets/:id/note/:noteId', /* #swagger.tags = ['Tickets'] */  deleteNoteById);
+router.patch('/api/tickets/:id/updateNote/:noteId', /* #swagger.tags = ['Tickets'] */  updateNoteById);
+
+
+
+
 // User Routes
 router.post('/api/users', /* #swagger.tags = ['Users'] */ createUser);
 router.get('/api/users/:id', /* #swagger.tags = ['Users'] */  getUserWithTickets);
@@ -81,6 +96,7 @@ router.get('/api/getRecordingUrlById/:id', /* #swagger.tags = ['dashhboard'] */ 
 
 
 router.get('/api/calls', /* #swagger.tags = ['Calls'] */  getAllCalls);
+router.patch('/api/call/:id/satisfied', /* #swagger.tags = ['Users'] */  toggleIsSatisfied);
 router.delete('/api/call/:id', /* #swagger.tags = ['Calls'] */  deleteCall);
 router.get('/api/call/:id', /* #swagger.tags = ['Calls'] */  getCallById);
 router.get('/api/call/:id/agent', /* #swagger.tags = ['Calls'] */  getAllCallsForAgent);
