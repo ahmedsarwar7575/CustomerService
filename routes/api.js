@@ -37,7 +37,7 @@ import {
   createRating,
   getAgentRatings,
   getAllRatings,
-  toggleIsSatisfied
+  
 } from "../controllers/ratingController.js";
 import {
   getAllCalls,
