@@ -1,4 +1,4 @@
-import express from 'express';
+import express from "express";
 import {
   login as agentLogin,
   createAgent,
@@ -8,8 +8,8 @@ import {
   deactivateAgent,
   getAgentPerformance,
   adminLogin,
-  getAllTicketsByAgentId
-} from '../controllers/agentController.js';
+  getAllTicketsByAgentId,
+} from "../controllers/agentController.js";
 import {
   createTicket,
   assignTicket,
@@ -23,8 +23,8 @@ import {
   addNotes,
   getNotes,
   updateNoteById,
-  deleteNoteById
-} from '../controllers/ticketController.js';
+  deleteNoteById,
+} from "../controllers/ticketController.js";
 import {
   createUser,
   getUserWithTickets,
@@ -32,73 +32,134 @@ import {
   getUsersByTicketType,
   getAllUsers,
   deleteUser,
-  
-} from '../controllers/userController.js';
+} from "../controllers/userController.js";
 import {
   createRating,
   getAgentRatings,
-  getAllRatings
-} from '../controllers/ratingController.js';
-import {getAllCalls, getCallById, getAllCallsForAgent, deleteCall, toggleIsSatisfied} from '../controllers/Call.js';
-import { dashboardLite  } from '../controllers/dashboard.js';
-import getRecordingUrlBySid from '../controllers/recoerding.js';
+  getAllRatings,
+  toggleIsSatisfied
+} from "../controllers/ratingController.js";
+import {
+  getAllCalls,
+  getCallById,
+  getAllCallsForAgent,
+  deleteCall,
+  toggleIsSatisfied,
+} from "../controllers/Call.js";
+import { dashboardLite } from "../controllers/dashboard.js";
+import getRecordingUrlBySid from "../controllers/recoerding.js";
 const router = express.Router();
 
 // Agent Routes
-router.post('/api/login', /* #swagger.tags = ['Agents'] */ agentLogin);
-router.post('/api/agents', /* #swagger.tags = ['Agents'] */   createAgent);
-router.get('/api/agents', /* #swagger.tags = ['Agents'] */  getAllAgents);
-router.get('/api/agents/:id', /* #swagger.tags = ['Agents'] */  getAgentById);
-router.put('/api/agents/:id', /* #swagger.tags = ['Agents'] */  updateAgent);
-router.delete('/api/agents/:id', /* #swagger.tags = ['Agents'] */   deactivateAgent);
-router.get('/api/agents/:id/performance', /* #swagger.tags = ['Agents'] */  getAgentPerformance);
-router.get('/api/adminLogin', /* #swagger.tags = ['Agents'] */  adminLogin);
-router.get('/api/agents/:id/tickets', /* #swagger.tags = ['Agents'] */  getAllTicketsByAgentId);
+router.post("/api/login", /* #swagger.tags = ['Agents'] */ agentLogin);
+router.post("/api/agents", /* #swagger.tags = ['Agents'] */ createAgent);
+router.get("/api/agents", /* #swagger.tags = ['Agents'] */ getAllAgents);
+router.get("/api/agents/:id", /* #swagger.tags = ['Agents'] */ getAgentById);
+router.put("/api/agents/:id", /* #swagger.tags = ['Agents'] */ updateAgent);
+router.delete(
+  "/api/agents/:id",
+  /* #swagger.tags = ['Agents'] */ deactivateAgent
+);
+router.get(
+  "/api/agents/:id/performance",
+  /* #swagger.tags = ['Agents'] */ getAgentPerformance
+);
+router.get("/api/adminLogin", /* #swagger.tags = ['Agents'] */ adminLogin);
+router.get(
+  "/api/agents/:id/tickets",
+  /* #swagger.tags = ['Agents'] */ getAllTicketsByAgentId
+);
 
 // Ticket Routes
-router.post('/api/tickets', /* #swagger.tags = ['Tickets'] */  createTicket);
-router.patch('/api/tickets/:ticketId/assign/:agentId', /* #swagger.tags = ['Tickets'] */  assignTicket);
-router.patch('/api/tickets/:id/status', /* #swagger.tags = ['Tickets'] */  updateTicketStatus);
-router.patch('/api/tickets/:id/piority', /* #swagger.tags = ['Tickets'] */  updatePiority);
-router.get('/api/tickets/status/:status', /* #swagger.tags = ['Tickets'] */  getTicketsByStatus); 
-router.get('/api/tickets', /* #swagger.tags = ['Tickets'] */  getAllTickets); 
-router.patch('/api/tickets/:id/escalate', /* #swagger.tags = ['Tickets'] */  escalateTicket);
-router.get('/api/ticket/:id', /* #swagger.tags = ['Tickets'] */  getticketById);
-router.delete('/api/ticket/:id', /* #swagger.tags = ['Tickets'] */  deleteTicket);
+router.post("/api/tickets", /* #swagger.tags = ['Tickets'] */ createTicket);
+router.patch(
+  "/api/tickets/:ticketId/assign/:agentId",
+  /* #swagger.tags = ['Tickets'] */ assignTicket
+);
+router.patch(
+  "/api/tickets/:id/status",
+  /* #swagger.tags = ['Tickets'] */ updateTicketStatus
+);
+router.patch(
+  "/api/tickets/:id/piority",
+  /* #swagger.tags = ['Tickets'] */ updatePiority
+);
+router.get(
+  "/api/tickets/status/:status",
+  /* #swagger.tags = ['Tickets'] */ getTicketsByStatus
+);
+router.get("/api/tickets", /* #swagger.tags = ['Tickets'] */ getAllTickets);
+router.patch(
+  "/api/tickets/:id/escalate",
+  /* #swagger.tags = ['Tickets'] */ escalateTicket
+);
+router.get("/api/ticket/:id", /* #swagger.tags = ['Tickets'] */ getticketById);
+router.delete(
+  "/api/ticket/:id",
+  /* #swagger.tags = ['Tickets'] */ deleteTicket
+);
 
-
-
-router.patch('/api/tickets/:id/note', /* #swagger.tags = ['Tickets'] */  addNotes);
-router.get('/api/tickets/:id/note', /* #swagger.tags = ['Tickets'] */  getNotes);
-router.delete('/api/tickets/:id/note/:noteId', /* #swagger.tags = ['Tickets'] */  deleteNoteById);
-router.patch('/api/tickets/:id/updateNote/:noteId', /* #swagger.tags = ['Tickets'] */  updateNoteById);
-
-
-
+router.patch(
+  "/api/tickets/:id/note",
+  /* #swagger.tags = ['Tickets'] */ addNotes
+);
+router.get("/api/tickets/:id/note", /* #swagger.tags = ['Tickets'] */ getNotes);
+router.delete(
+  "/api/tickets/:id/note/:noteId",
+  /* #swagger.tags = ['Tickets'] */ deleteNoteById
+);
+router.patch(
+  "/api/tickets/:id/updateNote/:noteId",
+  /* #swagger.tags = ['Tickets'] */ updateNoteById
+);
 
 // User Routes
-router.post('/api/users', /* #swagger.tags = ['Users'] */ createUser);
-router.get('/api/users/:id', /* #swagger.tags = ['Users'] */  getUserWithTickets);
-router.patch('/api/users/:id/status', /* #swagger.tags = ['Users'] */  updateUserStatus);
-router.get('/api/users/type/:ticketType', /* #swagger.tags = ['Users'] */  getUsersByTicketType);
-router.get('/api/users', /* #swagger.tags = ['Users'] */  getAllUsers);
-router.delete('/api/user/:id', /* #swagger.tags = ['Users'] */  deleteUser);
+router.post("/api/users", /* #swagger.tags = ['Users'] */ createUser);
+router.get(
+  "/api/users/:id",
+  /* #swagger.tags = ['Users'] */ getUserWithTickets
+);
+router.patch(
+  "/api/users/:id/status",
+  /* #swagger.tags = ['Users'] */ updateUserStatus
+);
+router.get(
+  "/api/users/type/:ticketType",
+  /* #swagger.tags = ['Users'] */ getUsersByTicketType
+);
+router.get("/api/users", /* #swagger.tags = ['Users'] */ getAllUsers);
+router.delete("/api/user/:id", /* #swagger.tags = ['Users'] */ deleteUser);
 
 // Rating Routes
-router.post('/api/tickets/:ticketId/ratings', /* #swagger.tags = ['Ratings'] */ createRating);
-router.get('/api/agents/:agentId/ratings', /* #swagger.tags = ['Ratings'] */  getAgentRatings);
-router.get('/api/ratings', /* #swagger.tags = ['Ratings'] */  getAllRatings);
+router.post(
+  "/api/tickets/:ticketId/ratings",
+  /* #swagger.tags = ['Ratings'] */ createRating
+);
+router.get(
+  "/api/agents/:agentId/ratings",
+  /* #swagger.tags = ['Ratings'] */ getAgentRatings
+);
+router.get("/api/ratings", /* #swagger.tags = ['Ratings'] */ getAllRatings);
 
+router.get(
+  "/api/dashboard",
+  /* #swagger.tags = ['dashhboard'] */ dashboardLite
+);
+router.get(
+  "/api/getRecordingUrlById/:id",
+  /* #swagger.tags = ['dashhboard'] */ getRecordingUrlBySid
+);
 
-
-router.get('/api/dashboard', /* #swagger.tags = ['dashhboard'] */  dashboardLite );
-router.get('/api/getRecordingUrlById/:id', /* #swagger.tags = ['dashhboard'] */  getRecordingUrlBySid );
-
-
-router.get('/api/calls', /* #swagger.tags = ['Calls'] */  getAllCalls);
-router.patch('/api/call/:id/satisfied', /* #swagger.tags = ['Users'] */  toggleIsSatisfied);
-router.delete('/api/call/:id', /* #swagger.tags = ['Calls'] */  deleteCall);
-router.get('/api/call/:id', /* #swagger.tags = ['Calls'] */  getCallById);
-router.get('/api/call/:id/agent', /* #swagger.tags = ['Calls'] */  getAllCallsForAgent);
+router.get("/api/calls", /* #swagger.tags = ['Calls'] */ getAllCalls);
+router.patch(
+  "/api/call/:id/satisfied",
+  /* #swagger.tags = ['Users'] */ toggleIsSatisfied
+);
+router.delete("/api/call/:id", /* #swagger.tags = ['Calls'] */ deleteCall);
+router.get("/api/call/:id", /* #swagger.tags = ['Calls'] */ getCallById);
+router.get(
+  "/api/call/:id/agent",
+  /* #swagger.tags = ['Calls'] */ getAllCallsForAgent
+);
 
 export default router;
