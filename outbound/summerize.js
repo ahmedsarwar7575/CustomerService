@@ -1,281 +1,328 @@
-import dotenv from "dotenv";
+// outbound/processCallOutcome.v2.js
+import "dotenv/config";
 import { Op } from "sequelize";
 import User from "../models/user.js";
 import Agent from "../models/agent.js";
 import Call from "../models/Call.js";
 import Ticket from "../models/ticket.js";
 
-dotenv.config();
+/**
+ * CAMPAIGNS:
+ *  - "satisfaction"
+ *  - "upsell"
+ *
+ * OUTCOME CASES (strings we return in result.outcome.case):
+ *  Satisfaction:
+ *    - "satisfied"
+ *    - "not_satisfied"
+ *    - "no_response"   (prefer not to say / call cut / silence) → treat as not satisfied
+ *  Upsell:
+ *    - "interested"
+ *    - "not_interested"
+ *    - "no_response"   (prefer not to say / call cut / silence)
+ */
 
-async function getLeastLoadedAgent() {
-  const agents = await Agent.findAll({
-    where: { role: "agent" },
-    attributes: ["id"],
-    raw: true,
-  });
+// ---------- helpers ----------
+const now = () => new Date();
+const addDays = (d, n) => new Date(d.getTime() + n * 24 * 60 * 60 * 1000);
 
-  if (!agents.length) return { agentId: null };
-
-  const { fn, col } = Ticket.sequelize;
-  const ticketCounts = await Ticket.findAll({
-    where: {
-      status: { [Op.in]: ["open", "in_progress"] },
-    },
-    attributes: ["agentId", [fn("COUNT", col("id")), "count"]],
-    group: ["agentId"],
-    raw: true,
-  });
-
-  const loadMap = {};
-  for (const row of ticketCounts) {
-    if (!row.agentId) continue;
-    loadMap[row.agentId] = parseInt(row.count, 10);
-  }
-
-  let best = null;
-  let bestLoad = Infinity;
-  for (const { id } of agents) {
-    const load = loadMap[id] ?? 0;
-    if (load < bestLoad) {
-      best = id;
-      bestLoad = load;
-    }
-  }
-
-  return { agentId: best };
-}
-
-// this calls OpenAI once and decides everything
-async function analyzeCallWithGPT(qaPairs, userId, callSid) {
-  const nowIso = new Date().toISOString();
-
-  const system = [
-    "You are an accurate call analyzer for a payments/fintech company.",
-    "Return ONLY valid JSON.",
-    "Do not add explanations.",
-    "If you are unsure for any field, use 'not specified' or [] as appropriate.",
-    "Booleans must be true or false, never strings.",
-    "Detect languages used by caller and agent: return ISO-like short codes if possible like 'en','ur','ar' etc.",
-    "Classify callCategory: 'satisfaction' if goal is CSAT / are you happy; 'upsell' if goal is pitch/sell product; 'both' if both happened; otherwise 'other'.",
-    "CustomerSatisfied means: caller said they are happy / okay / satisfied with service.",
-    "CustomerInterestedInUpsell means: caller showed real interest in buying, demo, follow-up, more info, or agreed to be contacted.",
-  ].join(" ");
-
-  const userPrompt = `
-Return ONLY this JSON:
-
-{
-  "callCategory": "satisfaction" | "upsell" | "both" | "other",
-  "languages": string[],
-  "satisfaction": {
-    "isSatisfied": true | false | "not specified",
-    "needsFollowup": true | false | "not specified"
-  },
-  "upsell": {
-    "interestedInOffer": true | false | "not specified",
-    "next_step": "demo" | "follow_up_call" | "email_summary" | "not specified",
-    "recommended_option": "website" | "loan" | "advertising" | "multiple" | "not specified"
-  },
-  "issue_or_goal": string | "not specified",
-  "summary": string,
-  "meta": {
-    "userId": ${userId},
-    "callSid": "${callSid}",
-    "current_datetime_iso": "${nowIso}",
-    "timezone": "Asia/Karachi"
-  }
-}
-
-SOURCE_QA_PAIRS:
-${JSON.stringify(qaPairs, null, 2)}
-`.trim();
-
-  const ctrl = new AbortController();
-  const timeoutId = setTimeout(() => ctrl.abort(), 20000);
-
-  const payload = {
-    model: "gpt-4o-mini",
-    temperature: 0.2,
-    max_output_tokens: 700,
-    text: { format: { type: "json_object" } },
-    input: [
-      { role: "system", content: [{ type: "input_text", text: system }] },
-      { role: "user", content: [{ type: "input_text", text: userPrompt }] },
-    ],
-  };
-
-  const r = await fetch("https://api.openai.com/v1/responses", {
-    signal: ctrl.signal,
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  clearTimeout(timeoutId);
-
-  const rawText = await r.text();
-  if (!r.ok) {
-    console.error("[analyzeCallWithGPT] openai.responses error", rawText);
-    return { error: "openai", detail: { status: r.status, body: rawText } };
-  }
-
-  let outText = null;
+async function getLeastLoadedAgentSafe() {
   try {
-    const data = JSON.parse(rawText);
-    outText =
-      data.output_text ??
-      data.output?.find?.((o) => o.type === "output_text")?.content?.[0]
-        ?.text ??
-      data.output?.[0]?.content?.[0]?.text ??
-      null;
-  } catch {
-    outText = null;
-  }
-
-  if (!outText) {
-    console.error("[analyzeCallWithGPT] no output_text", rawText);
-    return { error: "no_output_text" };
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(outText);
-  } catch {
-    console.error("[analyzeCallWithGPT] JSON parse fail", outText);
-    return { error: "parse_error", detail: outText };
-  }
-
-  const normBool = (v) => (v === true ? true : v === false ? false : null);
-  const normString = (v) => (v === "not specified" ? null : v);
-
-  const callCategory = parsed?.callCategory || "other";
-
-  const langsRaw = Array.isArray(parsed?.languages) ? parsed.languages : [];
-  const languages = langsRaw.filter(
-    (x) => typeof x === "string" && x.trim() !== ""
-  );
-
-  const isSatisfied = normBool(parsed?.satisfaction?.isSatisfied);
-  const needsFollow = normBool(parsed?.satisfaction?.needsFollowup);
-
-  const interestedInOffer = normBool(parsed?.upsell?.interestedInOffer);
-  const nextStep = parsed?.upsell?.next_step || null;
-  const recOption = parsed?.upsell?.recommended_option || null;
-
-  const issueOrGoal = normString(parsed?.issue_or_goal);
-  const summary = parsed?.summary || "";
-
-  return {
-    callCategory,
-    languages,
-    satisfaction: {
-      isSatisfied,
-      needsFollow,
-    },
-    upsell: {
-      interestedInOffer,
-      nextStep,
-      recOption,
-    },
-    issueOrGoal,
-    summary,
-    meta: parsed?.meta || {},
-  };
-}
-
-// THIS IS THE ONLY FUNCTION YOU CALL
-export async function processCallOutcome({ qaPairs, userId, callSid }) {
-  if (!Array.isArray(qaPairs) || !qaPairs.length) {
-    throw new Error("qaPairs empty");
-  }
-
-  const user = await User.findByPk(userId);
-  if (!user) {
-    throw new Error(`User ${userId} not found`);
-  }
-
-  const analysis = await analyzeCallWithGPT(qaPairs, userId, callSid);
-  if (analysis.error) {
-    throw new Error("LLM analysis failed " + JSON.stringify(analysis));
-  }
-
-  const { callCategory, languages, satisfaction, upsell, summary } = analysis;
-
-  let ticket = null;
-
-  // rule: if it's a satisfaction/both call and user unhappy -> support ticket
-  const shouldMakeSupportTicket =
-    (callCategory === "satisfaction" || callCategory === "both") &&
-    satisfaction.isSatisfied === false;
-
-  // rule: else if it's an upsell/both call and user is interested -> sales ticket
-  const shouldMakeSalesTicket =
-    !shouldMakeSupportTicket &&
-    (callCategory === "upsell" || callCategory === "both") &&
-    upsell.interestedInOffer === true;
-
-  if (shouldMakeSupportTicket || shouldMakeSalesTicket) {
-    const { agentId } = await getLeastLoadedAgent();
-
-    ticket = await Ticket.create({
-      status: "open",
-      ticketType: shouldMakeSupportTicket ? "support" : "sales",
-      priority: "medium",
-      proposedSolution: shouldMakeSupportTicket
-        ? null
-        : upsell.recOption && upsell.recOption !== "not specified"
-        ? upsell.recOption
-        : null,
-      isSatisfied: shouldMakeSupportTicket ? false : null,
-      summary:
-        summary ||
-        (shouldMakeSupportTicket
-          ? "Customer not satisfied"
-          : "Customer interested in offer"),
-      userId: userId,
-      agentId: agentId || null,
+    const hasRole = !!Agent?.rawAttributes?.role;
+    const agents = await Agent.findAll({
+      where: hasRole ? { role: "agent" } : {},
+      attributes: ["id"],
+      raw: true,
     });
-  }
 
-  // update user flags based on category
-  if (callCategory === "satisfaction") {
-    await user.update({ isSatisfactionCall: true });
-  } else if (callCategory === "upsell") {
-    await user.update({ isUpSellCall: true });
-  } else if (callCategory === "both") {
-    await user.update({ isBothCall: true });
-  }
+    if (!agents.length) return { agentId: null };
 
-  // final Call row
-  const callRecord = await Call.update(
-    {
-      type: "outbound",
-      userId: userId,
-      ticketId: ticket ? ticket.id : null,
-      QuestionsAnswers: qaPairs || null,
-      languages: languages || null,
-      isResolvedByAi: null,
-      summary: summary || "",
-      callSid: callSid || null,
-      outboundDetails: null,
-      callCategory: callCategory || null,
-      customerSatisfied: satisfaction.isSatisfied,
-      customerInterestedInUpsell: upsell.interestedInOffer,
-    },
-    {
-      where: { callSid: callSid },
+    const { fn, col } = Ticket.sequelize;
+    const ticketCounts = await Ticket.findAll({
+      where: { status: { [Op.in]: ["open", "in_progress"] } },
+      attributes: ["agentId", [fn("COUNT", col("id")), "count"]],
+      group: ["agentId"],
+      raw: true,
+    });
+
+    const loadMap = {};
+    for (const row of ticketCounts) {
+      if (!row.agentId) continue;
+      loadMap[row.agentId] = parseInt(row.count, 10) || 0;
     }
-  );
 
-  return {
-    call: callRecord.toJSON(),
-    ticket: ticket ? ticket.toJSON() : null,
-    user: await user.reload().then((u) => u.toJSON()),
-    analysis,
-  };
+    let best = null;
+    let bestLoad = Infinity;
+    for (const { id } of agents) {
+      const load = loadMap[id] ?? 0;
+      if (load < bestLoad) {
+        best = id;
+        bestLoad = load;
+      }
+    }
+    return { agentId: best };
+  } catch (e) {
+    console.warn("[getLeastLoadedAgentSafe] skipped:", e?.message || e);
+    return { agentId: null };
+  }
+}
+
+const textOfPairs = (pairs) =>
+  (Array.isArray(pairs) ? pairs : [])
+    .map((p) => `${p.q ?? ""} ${p.a ?? ""}`)
+    .join(" ")
+    .toLowerCase();
+
+function detectSatisfactionCase(qaPairs) {
+  const t = textOfPairs(qaPairs);
+
+  const yesSatisfied =
+    /\b(i'?m|i am|am)\s+(ok|okay|fine|good|satisfied|happy)\b/.test(t) ||
+    /\bthis (solves|fixed|works)\b/.test(t) ||
+    /\bresolved\b/.test(t);
+
+  const explicitNo =
+    /\bnot\s+(ok|okay|happy|satisfied)\b/.test(t) ||
+    /\bnot\s+resolved\b/.test(t) ||
+    /\bstill (failing|broken)\b/.test(t) ||
+    /\b(unhappy|unsatisfied|dissatisfied)\b/.test(t);
+
+  const noResponseOrCut =
+    /\b(call\s*(got)?\s*cut|hang\s*up|hung\s*up|prefer not to say|no comment|no response|silent|silence)\b/.test(
+      t
+    );
+
+  if (yesSatisfied) return "satisfied";
+  if (explicitNo) return "not_satisfied";
+  if (noResponseOrCut) return "no_response";
+  // default conservative → not satisfied if any issue keyword, else no_response
+  const issue =
+    /\b(refund|charge|error|bug|fail|declined|problem|issue|login|shipment|lost|delay)\b/.test(
+      t
+    );
+  return issue ? "not_satisfied" : "no_response";
+}
+
+function detectUpsellCase(qaPairs) {
+  const t = textOfPairs(qaPairs);
+
+  const interested =
+    /\b(yes|yeah|yep|sure|ok|okay|interested|sounds good|let'?s do|book|schedule|set up)\b.*\b(demo|call|meeting|follow\s*up|trial|plan|offer)\b/.test(
+      t
+    ) ||
+    /\b(send|share)\b.*\b(details|info|information|proposal|quote|pricing)\b/.test(
+      t
+    );
+
+  const notInterested =
+    /\b(not\s+interested|no\s+thanks|no thank you|maybe later|not now)\b/.test(
+      t
+    ) || /\b(stop\s+calling|remove me|do not contact)\b/.test(t);
+
+  const noResponseOrCut =
+    /\b(call\s*(got)?\s*cut|hang\s*up|hung\s*up|prefer not to say|no comment|no response|silent|silence)\b/.test(
+      t
+    );
+
+  if (interested) return "interested";
+  if (notInterested) return "not_interested";
+  if (noResponseOrCut) return "no_response";
+  // default conservative
+  return "no_response";
+}
+
+function computeFollowup(campaignType, outcomeCase) {
+  const nowDate = now();
+  if (campaignType === "satisfaction" && outcomeCase === "satisfied") {
+    return addDays(nowDate, 7);
+  }
+  if (campaignType === "upsell" && outcomeCase === "interested") {
+    return addDays(nowDate, 21);
+  }
+  return null;
+}
+
+/**
+ * Safely write follow-up timestamps only if such columns exist.
+ * Preferred columns:
+ *  - satisfaction: Call.nextSatisfactionAt
+ *  - upsell:       Call.nextUpsellAt
+ * Fallback:
+ *  - Call.followUpAt (generic)
+ */
+function buildFollowupPatch(campaignType, followupAt) {
+  if (!followupAt) return {};
+  const hasNextSat = !!Call?.rawAttributes?.nextSatisfactionAt;
+  const hasNextUps = !!Call?.rawAttributes?.nextUpsellAt;
+  const hasGeneric = !!Call?.rawAttributes?.followUpAt;
+
+  if (campaignType === "satisfaction") {
+    if (hasNextSat) return { nextSatisfactionAt: followupAt };
+    if (hasGeneric) return { followUpAt: followupAt };
+  } else if (campaignType === "upsell") {
+    if (hasNextUps) return { nextUpsellAt: followupAt };
+    if (hasGeneric) return { followUpAt: followupAt };
+  }
+  return {};
+}
+
+// ---------- MAIN ----------
+/**
+ * @param {Object} params
+ * @param {Array<{q:string,a:string}>} params.qaPairs
+ * @param {number|string} params.userId
+ * @param {string} params.callSid
+ * @param {import('sequelize').Sequelize} params.sequelize
+ * @param {"satisfaction"|"upsell"} params.campaignType
+ */
+export async function processCallOutcome({
+  qaPairs,
+  userId,
+  callSid,
+  sequelize,
+  campaignType,
+}) {
+  if (!Array.isArray(qaPairs) || !qaPairs.length)
+    return { error: "qa_pairs_empty" };
+  if (!callSid || typeof callSid !== "string")
+    return { error: "missing_callSid" };
+  if (campaignType !== "satisfaction" && campaignType !== "upsell")
+    return { error: "invalid_campaign", detail: campaignType };
+
+  try {
+    const user = await User.findByPk(userId);
+    if (!user) return { error: "user_not_found", detail: { userId } };
+
+    // classify outcome per campaign (NO LLM)
+    let outcomeCase;
+    if (campaignType === "satisfaction") {
+      outcomeCase = detectSatisfactionCase(qaPairs);
+    } else {
+      outcomeCase = detectUpsellCase(qaPairs);
+    }
+
+    // decide actions
+    let makeSupportTicket = false;
+    let makeSalesTicket = false;
+
+    if (campaignType === "satisfaction") {
+      // case map:
+      // 1 satisfied           → no ticket; schedule +7d
+      // 2 not satisfied       → SUPPORT ticket
+      // 3 no response         → treat as not satisfied → SUPPORT ticket
+      if (outcomeCase === "not_satisfied" || outcomeCase === "no_response") {
+        makeSupportTicket = true;
+      }
+    } else {
+      // upsell
+      // 4 interested          → SALES ticket; schedule +21d
+      // 5 not interested      → no ticket
+      // 6 no response         → no ticket
+      if (outcomeCase === "interested") {
+        makeSalesTicket = true;
+      }
+    }
+
+    const followupAt = computeFollowup(campaignType, outcomeCase);
+
+    // one transaction: optional ticket + call upsert + user flags
+    const result = await sequelize.transaction(async (t) => {
+      // update user flag per campaign
+      const userPatch = {};
+      if (campaignType === "satisfaction") userPatch.isSatisfactionCall = true;
+      if (campaignType === "upsell") userPatch.isUpSellCall = true;
+      if (Object.keys(userPatch).length) {
+        await user.update(userPatch, { transaction: t });
+      }
+
+      // create ticket if needed
+      let ticket = null;
+      if (makeSupportTicket || makeSalesTicket) {
+        const { agentId } = await getLeastLoadedAgentSafe();
+        ticket = await Ticket.create(
+          {
+            status: "open",
+            ticketType: makeSupportTicket ? "support" : "sales",
+            priority: "medium",
+            proposedSolution: null,
+            isSatisfied: makeSupportTicket ? false : null,
+            summary:
+              campaignType === "satisfaction"
+                ? outcomeCase === "no_response"
+                  ? "CSAT: no response / call cut; treating as not satisfied."
+                  : "CSAT: customer not satisfied."
+                : "Upsell: customer interested in offer.",
+            userId,
+            agentId: agentId || null,
+          },
+          { transaction: t }
+        );
+      }
+
+      // prepare call patch
+      const basePatch = {
+        type: "outbound",
+        userId,
+        ticketId: ticket ? ticket.id : null,
+        QuestionsAnswers: qaPairs.slice(0, 200),
+        languages: null, // not detecting here, could plug in later
+        isResolvedByAi: null,
+        summary:
+          campaignType === "satisfaction"
+            ? outcomeCase === "satisfied"
+              ? "CSAT: satisfied."
+              : outcomeCase === "not_satisfied"
+              ? "CSAT: not satisfied."
+              : "CSAT: no response / call cut."
+            : outcomeCase === "interested"
+            ? "Upsell: interested."
+            : outcomeCase === "not_interested"
+            ? "Upsell: not interested."
+            : "Upsell: no response / call cut.",
+        callSid,
+        outboundDetails: null,
+        callCategory: campaignType, // keep simple: 'satisfaction' | 'upsell'
+        customerSatisfied:
+          campaignType === "satisfaction" ? outcomeCase === "satisfied" : null,
+        customerInterestedInUpsell:
+          campaignType === "upsell" ? outcomeCase === "interested" : null,
+      };
+
+      const followupPatch = buildFollowupPatch(campaignType, followupAt);
+      const callPatch = { ...basePatch, ...followupPatch };
+
+      // upsert Call by callSid
+      const [affected] = await Call.update(callPatch, {
+        where: { callSid },
+        transaction: t,
+      });
+
+      let callRow;
+      if (affected === 0) {
+        callRow = await Call.create(callPatch, { transaction: t });
+      } else {
+        callRow = await Call.findOne({ where: { callSid }, transaction: t });
+      }
+
+      return {
+        user: await user.reload({ transaction: t }).then((u) => u.toJSON()),
+        ticket: ticket ? ticket.toJSON() : null,
+        call: callRow ? callRow.toJSON() : null,
+        outcome: {
+          campaignType,
+          case: outcomeCase,
+          followupAt: followupAt ? followupAt.toISOString() : null,
+        },
+      };
+    });
+
+    return result;
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (/unique constraint|duplicate key/i.test(msg))
+      return { error: "db_conflict", detail: msg };
+    return { error: "process_exception", detail: msg };
+  }
 }
 
 export default processCallOutcome;

@@ -1,8 +1,6 @@
 // inbound/twilioRoutes.js
 import { Router } from "express";
-
 const router = Router();
-
 
 router.all("/incoming-call", async (req, res) => {
   const WS_HOST =
@@ -11,14 +9,24 @@ router.all("/incoming-call", async (req, res) => {
     "customerservice-kabe.onrender.com";
   const wsUrl = `wss://${WS_HOST}/media-stream`;
 
+  // Twilio sends these in the webhook POST body
+  const from = req.body?.From || "";
+  const to = req.body?.To || "";
+  const callSid = req.body?.CallSid || "";
+
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Please wait while we connect your call to the AI assistant.</Say>
-  <Connect><Stream url="${wsUrl}" /></Connect>
+  <Connect>
+    <Stream url="${wsUrl}">
+      <Parameter name="from" value="${from}"/>
+      <Parameter name="to" value="${to}"/>
+      <Parameter name="callSid" value="${callSid}"/>
+    </Stream>
+  </Connect>
 </Response>`;
+
   res.type("text/xml").send(twiml);
-
-
 });
 
 export default router;

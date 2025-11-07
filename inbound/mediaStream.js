@@ -1,5 +1,5 @@
 import WebSocket, { WebSocketServer } from "ws";
-import { summarizer } from "./summery.js";
+import summarizer  from "./summery.js";
 import twilio from "twilio";
 import dotenv from "dotenv";
 import Call from "../models/Call.js";
@@ -163,7 +163,8 @@ export function attachMediaStreamServer(server) {
       let qaPairs = [];
       let pendingUserQ = null;
       let hasActiveResponse = false;
-
+      let callerFrom = null;   // <-- NEW
+      let calledTo = null; 
       const openAiWs = createOpenAIWebSocket();
 
       const initializeSession = () => {
@@ -368,6 +369,8 @@ export function attachMediaStreamServer(server) {
             case "start":
               streamSid = data.start.streamSid;
               callSid = data.start.callSid || null;
+              callerFrom = data.start?.customParameters?.from || callerFrom;
+              calledTo   = data.start?.customParameters?.to   || calledTo;
               await Call.findOrCreate({
                 where: { callSid },           // <-- IMPORTANT: must match your model
                 defaults: {
@@ -456,7 +459,8 @@ export function attachMediaStreamServer(server) {
             console.error("openai.close error", e);
           }
         }
-        const allData = await summarizer(qaPairs, callSid);
+        console.log("From", callerFrom, "To", calledTo);
+        const allData = await summarizer(qaPairs, callSid, callerFrom);
         console.log(JSON.stringify({ allData }));
         console.log("Call SID", callSid);
         console.log("Call streamSid", streamSid);
