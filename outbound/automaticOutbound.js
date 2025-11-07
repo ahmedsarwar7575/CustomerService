@@ -6,7 +6,7 @@ dotenv.config();
 import User from "../models/user.js";
 import { makeSystemMessage } from "./prompt.js";
 import Call from "../models/Call.js";
-import processCallOutcome from "./summerize.js";
+import processCallOutcome from "./processCallOutcome.js";
 const {
   OPENAI_API_KEY,
   REALTIME_VOICE = "alloy",

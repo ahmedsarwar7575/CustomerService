@@ -1,5 +1,5 @@
 import WebSocket, { WebSocketServer } from "ws";
-import summarizer  from "./summery.js";
+import { summarizer } from "./summery.js";
 import twilio from "twilio";
 import dotenv from "dotenv";
 import Call from "../models/Call.js";
