@@ -4,8 +4,9 @@
 
 import dotenv from "dotenv";
 import { google } from "googleapis";
-import  User  from "../models/user.js"; // expects users(id, email)
+import User from "../models/user.js"; // expects users(id, email)
 import { Email } from "../models/Email.js"; // maps to Emails table you created
+import Ticket from "../models/ticket.js";
 
 dotenv.config();
 
@@ -205,7 +206,18 @@ export async function pushWebhook(req, res) {
                 userId: user.id,
               },
             });
-
+            const isTicket = await Ticket.findAll({
+              where: { userId: user?.id, status: "open" },
+            });
+            if (isTicket.length === 0) {
+              await Ticket.create({
+                userId: user?.id,
+                status: "open",
+                ticketType: "support",
+                priority: "medium",
+                summary: "Ticket Generated from New Email",
+              });
+            }
             // 3) log saved email
             const preview =
               body.length > 1000
