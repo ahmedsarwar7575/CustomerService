@@ -4,6 +4,8 @@ import app from "./app.js";
 import { createUpsellWSS } from "./outbound/automaticOutbound.js";
 import { attachMediaStreamServer } from "./inbound/mediaStream.js";
 import { startUpsellCron } from "./outbound/cronJob.js"; 
+
+import { bootTokens } from './Email/Email.js';
 dotenv.config();
 
 const PORT = process.env.PORT || 3000;
@@ -44,5 +46,6 @@ server.on("upgrade", (req, socket, head) => {
 });
 startUpsellCron();
 server.listen(PORT, () => {
+  bootTokens();
   console.log(`Server running on port ${PORT}`);
 });

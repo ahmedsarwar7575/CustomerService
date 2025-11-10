@@ -12,7 +12,7 @@ import { playRecording } from "./controllers/Call.js";
 import outbound from "./outbound/outboundByAgent.js"
 import outboundFlow from "./outbound/outboundRoutes.js"
 // import seedDatabase from "./config/seed.js";
-
+import gmailRoutes from "./routes/gmail.js";
 const app = express();
 
 app.use(
@@ -48,6 +48,7 @@ app.use("/", realtime);
 app.use("/", recording);
 app.use("/", outbound);
 app.use("/", outboundFlow);
+app.use("/", gmailRoutes);
 app.use("/playRecording/:callSid", playRecording);
 
 // Swagger Documentation
