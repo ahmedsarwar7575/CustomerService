@@ -1,116 +1,148 @@
-// controllers/gmailController.js  (ESM)
-import fs from "fs";
-import path from "path";
+// controllers/gmailController.js  (ESM, no filesystem writes)
 import dotenv from "dotenv";
 import { google } from "googleapis";
-import { fileURLToPath } from "url";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// --- constants / files ---
-const TOKEN_PATH = path.join(__dirname, "..", "token.json"); // saved after first auth
-const STATE_PATH = path.join(__dirname, "..", "gmail_state.json"); // stores lastHistoryId
 const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
+const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
+const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const REFRESH_TOKEN = process.env.REFRESH_TOKEN; // <-- set this in Render's env
+const TOPIC = process.env.TOPIC; // projects/XYZ/topics/gmail-notify
 
-// --- OAuth client ---
-const oauth2 = new google.auth.OAuth2(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI
-);
+// In-memory cursor (ephemeral)
+let lastHistoryId = null;
+
+// OAuth client
+const oauth2 = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 const gmail = () => google.gmail({ version: "v1", auth: oauth2 });
 
-// --- helpers ---
-const save = (p, obj) => fs.writeFileSync(p, JSON.stringify(obj, null, 2));
-const load = (p, fallback) =>
-  fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : fallback;
-const b64urlToBuf = (s) => {
-  const pad = (n) => "=".repeat((4 - (n % 4)) % 4);
+// utils
+const b64urlToStr = (s) => {
+  if (!s) return "";
+  const pad = "=".repeat((4 - (s.length % 4)) % 4);
   return Buffer.from(
-    s.replace(/-/g, "+").replace(/_/g, "/") + pad(s.length),
+    s.replace(/-/g, "+").replace(/_/g, "/") + pad,
     "base64"
-  );
+  ).toString("utf8");
 };
-const header = (headers, name) =>
-  headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || "";
+const header = (hs, name) =>
+  hs?.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
 
-// --- public: initial token load (call once on server start) ---
+function extractText(payload) {
+  if (!payload) return "";
+  if (payload.mimeType === "text/plain" && payload.body?.data)
+    return b64urlToStr(payload.body.data);
+  if (payload.parts?.length) {
+    const plain = payload.parts.find(
+      (p) => p.mimeType === "text/plain" && p.body?.data
+    );
+    if (plain) return b64urlToStr(plain.body.data);
+    for (const part of payload.parts) {
+      const inner = extractText(part);
+      if (inner) return inner;
+    }
+  }
+  if (payload.mimeType === "text/html" && payload.body?.data) {
+    const html = b64urlToStr(payload.body.data);
+    return html.replace(/<[^>]+>/g, "").trim();
+  }
+  return "";
+}
+
+// Boot tokens on server start
 export function bootTokens() {
-  if (!fs.existsSync(TOKEN_PATH)) {
-    console.log("No tokens yet. Visit /auth once, then POST /setup-watch");
+  if (REFRESH_TOKEN) {
+    oauth2.setCredentials({ refresh_token: REFRESH_TOKEN });
+    console.log("✓ Using REFRESH_TOKEN from env (no files).");
   } else {
-    const tokens = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
-    oauth2.setCredentials(tokens);
-    console.log("Tokens loaded.");
+    console.warn(
+      "⚠ No REFRESH_TOKEN set. Run /auth locally to obtain one, then add to Render env."
+    );
   }
 }
 
-// --- public: GET /auth → start OAuth ---
-export function auth(req, res) {
+// OAuth routes (use locally to obtain REFRESH_TOKEN once)
+export function auth(_req, res) {
+  if (!REDIRECT_URI) return res.status(500).send("Missing GOOGLE_REDIRECT_URI");
   const url = oauth2.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
     scope: SCOPES,
+    redirect_uri: REDIRECT_URI,
   });
-  res.send(`Authorize this app: <a href="${url}">Google OAuth</a>`);
+  console.log("[auth] redirect_uri =", REDIRECT_URI);
+  res.redirect(url);
 }
 
-// --- public: GET /oauth2callback → finish OAuth, save token.json ---
 export async function oauth2callback(req, res) {
-  const { tokens } = await oauth2.getToken(req.query.code);
-  oauth2.setCredentials(tokens);
-  save(TOKEN_PATH, tokens);
-  res.send("Authorized. You can close this tab.");
+  try {
+    const code = req.query.code;
+    if (!code) return res.status(400).send("Missing code");
+    const { tokens } = await oauth2.getToken({
+      code,
+      redirect_uri: REDIRECT_URI,
+    });
+    // Show refresh_token one time so you can paste it into Render's env
+    // (Do this on your local machine, not on public Render.)
+    res.send(`
+      <h3>Copy your REFRESH_TOKEN</h3>
+      <pre style="white-space:pre-wrap">${
+        tokens.refresh_token ||
+        "(no refresh_token returned; try removing app access and re-consenting)"
+      }</pre>
+      <p>Set this in Render → Environment as REFRESH_TOKEN (keep Client ID/Secret too).</p>
+    `);
+  } catch (e) {
+    console.error("oauth2callback error:", e?.response?.data || e);
+    res.status(500).send("Auth error. Check logs.");
+  }
 }
 
-// --- internal: call Gmail watch on INBOX only ---
+// Watch (INBOX only)
 async function startWatch() {
   const resp = await gmail().users.watch({
     userId: "me",
     requestBody: {
-      topicName: process.env.TOPIC, // e.g. projects/PROJECT_ID/topics/gmail-notify
+      topicName: TOPIC, // projects/..../topics/gmail-notify
       labelIds: ["INBOX"],
-      labelFilterBehavior: "INCLUDE",
+      labelFilterAction: "include", // include ONLY INBOX events
     },
   });
-  const { historyId, expiration } = resp.data;
-  const state = load(STATE_PATH, {});
-  state.lastHistoryId = historyId;
-  state.expiration = expiration;
-  save(STATE_PATH, state);
+  lastHistoryId = resp.data.historyId || null;
   console.log(
     "[watch] armed. historyId=",
-    historyId,
+    lastHistoryId,
     "expires=",
-    new Date(Number(expiration)).toISOString()
+    new Date(Number(resp.data.expiration)).toISOString()
   );
 }
 
-// --- public: POST /setup-watch ---
 export async function setupWatch(_req, res) {
-  await startWatch();
-  res.json({ ok: true });
+  try {
+    await startWatch();
+    res.json({ ok: true, historyId: lastHistoryId });
+  } catch (e) {
+    console.error("setupWatch error:", e?.response?.data || e);
+    res.status(500).json({ error: "setup-watch failed" });
+  }
 }
 
-// --- public: POST /gmail/push (Pub/Sub push endpoint) ---
+// Pub/Sub push
 export async function pushWebhook(req, res) {
   try {
-    // In production: verify the OIDC JWT in request headers.
-
     const msg = req.body?.message;
     if (!msg?.data) return res.status(204).end();
 
-    const data = JSON.parse(b64urlToBuf(msg.data).toString("utf8")); // { emailAddress, historyId }
-    const incomingHistoryId = data.historyId;
+    const data = JSON.parse(b64urlToStr(msg.data)); // { emailAddress, historyId }
+    console.log("[push] received", data);
 
-    const state = load(STATE_PATH, {});
-    const startHistoryId = state.lastHistoryId || incomingHistoryId;
+    const incomingHistoryId = data.historyId;
+    const startHistoryId = lastHistoryId || incomingHistoryId;
 
     let pageToken;
-    let maxHistoryId = startHistoryId;
+    let found = 0;
 
     do {
       const h = await gmail().users.history.list({
@@ -121,43 +153,95 @@ export async function pushWebhook(req, res) {
         pageToken,
       });
 
-      (h.data.history || []).forEach((entry) => {
-        (entry.messagesAdded || []).forEach(async ({ message }) => {
+      for (const entry of h.data.history || []) {
+        for (const { message } of entry.messagesAdded || []) {
           const full = await gmail().users.messages.get({
             userId: "me",
             id: message.id,
-            format: "metadata",
-            metadataHeaders: ["From", "Subject", "Date"],
+            format: "full",
           });
           const hs = full.data.payload?.headers || [];
-          console.log(
-            "NEW MAIL:",
-            header(hs, "Subject") || "(no subject)",
-            "| From:",
-            header(hs, "From"),
-            "| Date:",
-            header(hs, "Date"),
-            "| id:",
-            full.data.id
-          );
-        });
-      });
+          const subject = header(hs, "Subject") || "(no subject)";
+          const from = header(hs, "From");
+          const date = header(hs, "Date");
+          const body = (
+            extractText(full.data.payload) ||
+            full.data.snippet ||
+            ""
+          ).trim();
+          const preview =
+            body.length > 4000 ? body.slice(0, 4000) + " ...[truncated]" : body;
 
-      if (h.data.history && h.data.history.length) {
-        const last = h.data.history[h.data.history.length - 1];
-        if (String(last.id) > String(maxHistoryId)) maxHistoryId = last.id;
+          console.log(
+            "\n===== NEW MAIL =====================================",
+            `\nSubject: ${subject}`,
+            `\nFrom   : ${from}`,
+            `\nDate   : ${date}`,
+            `\nID     : ${full.data.id}`,
+            `\n----- Body (decoded) -----\n${preview}`,
+            "\n====================================================\n"
+          );
+          found++;
+        }
       }
       pageToken = h.data.nextPageToken;
     } while (pageToken);
 
-    // move cursor forward to notification's historyId
-    state.lastHistoryId = incomingHistoryId;
-    save(STATE_PATH, state);
+    lastHistoryId = incomingHistoryId; // advance in-memory cursor
+
+    if (!found) console.log("[push] no messageAdded since", startHistoryId);
 
     res.status(200).end();
   } catch (err) {
-    console.error("push handler error:", err);
-    // Still return 200 so Pub/Sub doesn't retry forever while you debug.
-    res.status(200).end();
+    console.error("push handler error:", err?.response?.data || err);
+    res.status(200).end(); // ack anyway so Pub/Sub backs off
+  }
+}
+
+// tiny debug helpers
+export function debugState(_req, res) {
+  res.json({ lastHistoryId, hasRefreshToken: !!REFRESH_TOKEN });
+}
+export async function debugPullNow(_req, res) {
+  try {
+    if (!lastHistoryId)
+      return res
+        .status(400)
+        .json({ error: "No history cursor yet. POST /setup-watch first." });
+    let pageToken,
+      fetched = 0;
+    do {
+      const h = await gmail().users.history.list({
+        userId: "me",
+        startHistoryId: lastHistoryId,
+        historyTypes: ["messageAdded"],
+        maxResults: 500,
+        pageToken,
+      });
+      for (const entry of h.data.history || []) {
+        for (const { message } of entry.messagesAdded || []) {
+          fetched++;
+          const full = await gmail().users.messages.get({
+            userId: "me",
+            id: message.id,
+            format: "full",
+          });
+          const hs = full.data.payload?.headers || [];
+          console.log(
+            "PULL NOW →",
+            header(hs, "Subject") || "(no subject)",
+            "| From:",
+            header(hs, "From"),
+            "| id:",
+            full.data.id
+          );
+        }
+      }
+      pageToken = h.data.nextPageToken;
+    } while (pageToken);
+    res.json({ ok: true, fetched });
+  } catch (e) {
+    console.error("debugPullNow error:", e?.response?.data || e);
+    res.status(500).json({ error: "pull-now failed" });
   }
 }
