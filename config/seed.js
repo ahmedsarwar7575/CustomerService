@@ -39,43 +39,44 @@ export default async function seedDatabase() {
     // Create sample tickets
     const tickets = await Ticket.bulkCreate([
       {
-        id: 'Alpha-Bravo-Charlie-Delta',
+        id: 1,
         userId: users[0].id,
         ticketType: 'support',
-        description: 'Email not working'
+        description: 'Email not working',
+        
       },
       {
-        id: 'JKL',
+        id: 2,
         userId: users[0].id,
         ticketType: 'support',
         description: 'How can i add user?'
       },
       {
-        id: 'XYZ',
+        id: 3,
         userId: users[0].id,
         ticketType: 'support',
         description: 'Cannot login to my account'
       },
       {
-        id: 'MNO',
+        id: 4,
         userId: users[1].id,
         ticketType: 'sales',
         description: 'Cannot login to my dashboard'
       },
       {
-        id: 'DEF',
+        id: 5,
         userId: users[0].id,
         ticketType: 'support',
         description: 'signup failed'
       },
       {
-        id: 'ABC',
+        id: 6,
         userId: users[1].id,
         ticketType: 'support',
         description: 'How much for pro account?'
       },
       {
-        id: 'Echo-Foxtrot-Golf-Hotel',
+        id: 7,
         userId: users[1].id,
         agentId: agents[1].id,
         ticketType: 'sales',
@@ -100,3 +101,4 @@ export default async function seedDatabase() {
     console.error('Seeding error:', error);
   }
 }
+seedDatabase()

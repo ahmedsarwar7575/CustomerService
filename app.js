@@ -61,7 +61,7 @@ const syncDatabase = async () => {
     console.log("Database connection established");
 
     // Sync all models
-    await sequelize.sync();
+    await sequelize.sync({force: true});
     console.log("Database synchronized");
 
     // Seed initial data

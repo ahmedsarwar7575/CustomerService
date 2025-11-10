@@ -1,24 +1,30 @@
-// controllers/gmailController.js  (ESM, no filesystem writes)
+// controllers/gmailController.js
+// ESM + Render-friendly (no filesystem writes). Requires env REFRESH_TOKEN.
+// Saves new emails to MySQL via Sequelize only if sender exists in users table.
+
 import dotenv from "dotenv";
 import { google } from "googleapis";
+import  User  from "../models/user.js"; // expects users(id, email)
+import { Email } from "../models/Email.js"; // maps to Emails table you created
 
 dotenv.config();
 
+// ===== ENV =====
 const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
-const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const REFRESH_TOKEN = process.env.REFRESH_TOKEN; // <-- set this in Render's env
-const TOPIC = process.env.TOPIC; // projects/XYZ/topics/gmail-notify
+const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI; // used for local /auth flow only
+const REFRESH_TOKEN = process.env.REFRESH_TOKEN; // <-- set this in Render
+const TOPIC = process.env.TOPIC; // projects/<GCP_PROJECT>/topics/gmail-notify
 
-// In-memory cursor (ephemeral)
+// in-memory cursor (ephemeral on Render Free)
 let lastHistoryId = null;
 
-// OAuth client
+// ===== GOOGLE AUTH =====
 const oauth2 = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 const gmail = () => google.gmail({ version: "v1", auth: oauth2 });
 
-// utils
+// ===== UTILS =====
 const b64urlToStr = (s) => {
   if (!s) return "";
   const pad = "=".repeat((4 - (s.length % 4)) % 4);
@@ -29,7 +35,13 @@ const b64urlToStr = (s) => {
 };
 const header = (hs, name) =>
   hs?.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
+const parseAddress = (fromHeader = "") => {
+  const m = fromHeader.match(/<([^>]+)>/);
+  const addr = (m ? m[1] : fromHeader).trim().toLowerCase();
+  return addr.replace(/^"(.+)"$/, "$1");
+};
 
+// recursively pull the best text/plain, fall back to stripped HTML/snippet
 function extractText(payload) {
   if (!payload) return "";
   if (payload.mimeType === "text/plain" && payload.body?.data)
@@ -51,7 +63,7 @@ function extractText(payload) {
   return "";
 }
 
-// Boot tokens on server start
+// ===== BOOT =====
 export function bootTokens() {
   if (REFRESH_TOKEN) {
     oauth2.setCredentials({ refresh_token: REFRESH_TOKEN });
@@ -63,7 +75,7 @@ export function bootTokens() {
   }
 }
 
-// OAuth routes (use locally to obtain REFRESH_TOKEN once)
+// ===== OAUTH (use locally to obtain REFRESH_TOKEN once) =====
 export function auth(_req, res) {
   if (!REDIRECT_URI) return res.status(500).send("Missing GOOGLE_REDIRECT_URI");
   const url = oauth2.generateAuthUrl({
@@ -84,15 +96,13 @@ export async function oauth2callback(req, res) {
       code,
       redirect_uri: REDIRECT_URI,
     });
-    // Show refresh_token one time so you can paste it into Render's env
-    // (Do this on your local machine, not on public Render.)
     res.send(`
       <h3>Copy your REFRESH_TOKEN</h3>
       <pre style="white-space:pre-wrap">${
         tokens.refresh_token ||
-        "(no refresh_token returned; try removing app access and re-consenting)"
+        "(no refresh_token returned; remove app access and try again with prompt=consent)"
       }</pre>
-      <p>Set this in Render → Environment as REFRESH_TOKEN (keep Client ID/Secret too).</p>
+      <p>Set this as REFRESH_TOKEN in your Render Environment.</p>
     `);
   } catch (e) {
     console.error("oauth2callback error:", e?.response?.data || e);
@@ -100,14 +110,14 @@ export async function oauth2callback(req, res) {
   }
 }
 
-// Watch (INBOX only)
+// ===== WATCH (INBOX only) =====
 async function startWatch() {
   const resp = await gmail().users.watch({
     userId: "me",
     requestBody: {
-      topicName: TOPIC, // projects/..../topics/gmail-notify
+      topicName: TOPIC, // projects/<id>/topics/gmail-notify
       labelIds: ["INBOX"],
-      labelFilterAction: "include", // include ONLY INBOX events
+      labelFilterAction: "include",
     },
   });
   lastHistoryId = resp.data.historyId || null;
@@ -129,7 +139,7 @@ export async function setupWatch(_req, res) {
   }
 }
 
-// Pub/Sub push
+// ===== PUSH WEBHOOK (Pub/Sub) =====
 export async function pushWebhook(req, res) {
   try {
     const msg = req.body?.message;
@@ -139,7 +149,7 @@ export async function pushWebhook(req, res) {
     console.log("[push] received", data);
 
     const incomingHistoryId = data.historyId;
-    const startHistoryId = lastHistoryId || incomingHistoryId;
+    const startId = lastHistoryId || incomingHistoryId;
 
     let pageToken;
     let found = 0;
@@ -147,7 +157,7 @@ export async function pushWebhook(req, res) {
     do {
       const h = await gmail().users.history.list({
         userId: "me",
-        startHistoryId,
+        startHistoryId: startId,
         historyTypes: ["messageAdded"],
         maxResults: 500,
         pageToken,
@@ -155,53 +165,89 @@ export async function pushWebhook(req, res) {
 
       for (const entry of h.data.history || []) {
         for (const { message } of entry.messagesAdded || []) {
+          // fetch full to decode body
           const full = await gmail().users.messages.get({
             userId: "me",
             id: message.id,
             format: "full",
           });
+
           const hs = full.data.payload?.headers || [];
           const subject = header(hs, "Subject") || "(no subject)";
           const from = header(hs, "From");
-          const date = header(hs, "Date");
+          const dateHdr = header(hs, "Date");
           const body = (
             extractText(full.data.payload) ||
             full.data.snippet ||
             ""
           ).trim();
-          const preview =
-            body.length > 4000 ? body.slice(0, 4000) + " ...[truncated]" : body;
+          const sender = parseAddress(from);
 
-          console.log(
-            "\n===== NEW MAIL =====================================",
-            `\nSubject: ${subject}`,
-            `\nFrom   : ${from}`,
-            `\nDate   : ${date}`,
-            `\nID     : ${full.data.id}`,
-            `\n----- Body (decoded) -----\n${preview}`,
-            "\n====================================================\n"
-          );
+          // 1) check if sender exists in users table
+          const user = await User.findOne({ where: { email: sender } });
+
+          if (!user) {
+            console.log(
+              "[skip] sender not in users:",
+              sender,
+              "| subject:",
+              subject
+            );
+          } else {
+            // 2) save email (idempotent by Gmail message id)
+            await Email.findOrCreate({
+              where: { id: full.data.id },
+              defaults: {
+                subject,
+                from,
+                date: new Date(dateHdr),
+                body,
+                userId: user.id,
+              },
+            });
+
+            // 3) log saved email
+            const preview =
+              body.length > 1000
+                ? body.slice(0, 1000) + " ...[truncated]"
+                : body;
+            console.log(
+              "\n===== SAVED EMAIL ==================================",
+              `\nUserId : ${user.id} (${sender})`,
+              `\nId     : ${full.data.id}`,
+              `\nSubject: ${subject}`,
+              `\nFrom   : ${from}`,
+              `\nDate   : ${dateHdr}`,
+              `\n----- Body (first 1000 chars) -----\n${preview}`,
+              "\n====================================================\n"
+            );
+          }
+
           found++;
         }
       }
+
       pageToken = h.data.nextPageToken;
     } while (pageToken);
 
-    lastHistoryId = incomingHistoryId; // advance in-memory cursor
+    // advance in-memory cursor
+    lastHistoryId = incomingHistoryId;
 
-    if (!found) console.log("[push] no messageAdded since", startHistoryId);
+    if (!found) console.log("[push] no messageAdded since", startId);
 
     res.status(200).end();
   } catch (err) {
     console.error("push handler error:", err?.response?.data || err);
-    res.status(200).end(); // ack anyway so Pub/Sub backs off
+    // Ack anyway so Pub/Sub backs off; you can inspect logs.
+    res.status(200).end();
   }
 }
 
-// tiny debug helpers
+// ===== DEBUG =====
 export function debugState(_req, res) {
   res.json({ lastHistoryId, hasRefreshToken: !!REFRESH_TOKEN });
 }
+
 export async function debugPullNow(_req, res) {
   try {
     if (!lastHistoryId)
@@ -224,7 +270,8 @@ export async function debugPullNow(_req, res) {
           const full = await gmail().users.messages.get({
             userId: "me",
             id: message.id,
-            format: "full",
+            format: "metadata",
+            metadataHeaders: ["From", "Subject", "Date"],
           });
           const hs = full.data.payload?.headers || [];
           console.log(
@@ -232,6 +279,8 @@ export async function debugPullNow(_req, res) {
             header(hs, "Subject") || "(no subject)",
             "| From:",
             header(hs, "From"),
+            "| Date:",
+            header(hs, "Date"),
             "| id:",
             full.data.id
           );
