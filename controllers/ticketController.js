@@ -3,7 +3,7 @@ import Agent from "../models/agent.js";
 import User from "../models/user.js";
 import Call from "../models/Call.js";
 import { randomUUID } from 'node:crypto';
-
+import { Email } from "../models/Email.js";
 const nz = (arr) => (Array.isArray(arr) ? arr : []);
 // Create new ticket
 export const createTicket = async (req, res) => {
@@ -236,13 +236,7 @@ export const getticketById = async (req, res) => {
         { model: User, attributes: ["id", "name", "email"] },
         {
           model: Call,
-          attributes: [
-            "id",
-            "type",
-            "summary",
-            "createdAt",
-            "QuestionsAnswers",
-          ],
+          attributes: ["id", "type", "summary", "createdAt", "QuestionsAnswers"],
         },
       ],
     });
@@ -250,7 +244,32 @@ export const getticketById = async (req, res) => {
       return res.status(404).json({ error: "ticket not found." });
     }
 
-    res.json({ data: ticket });
+    let emails = [];
+    const userId = ticket?.User?.id ?? null;
+    if (userId) {
+      emails = await Email.findAll({
+        where: { userId },
+        attributes: [
+          "id",
+          "subject",
+          "from",
+          "date",
+          "body",
+          "userId",
+          "isRecieved",
+          "createdAt",
+          "updatedAt",
+        ],
+        order: [
+          ["date", "DESC"],
+          ["createdAt", "DESC"],
+        ],
+      });
+    }
+
+    const data = ticket.toJSON();
+    data.emails = emails.map((e) => e.toJSON());
+    res.json({ data });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch the ticket." });

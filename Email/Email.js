@@ -204,6 +204,8 @@ export async function pushWebhook(req, res) {
                 date: new Date(dateHdr),
                 body,
                 userId: user.id,
+                isRecieved: true,
+                to: "info@getpiepay.com",
               },
             });
             const isTicket = await Ticket.findAll({

@@ -32,7 +32,7 @@ const Ticket = sequelize.define(
     summary: {
       type: DataTypes.TEXT,
       allowNull: false,
-      defaultValue: ``
+      defaultValue: ``,
     },
     userId: {
       type: DataTypes.INTEGER, // ✅ INTEGER (not NUMBER)
