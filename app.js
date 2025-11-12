@@ -9,8 +9,8 @@ import twalioRoutes from "./inbound/twilioRoutes.js";
 import realtime from "./inbound/realtime.js";
 import recording from "./routes/recording.js";
 import { playRecording } from "./controllers/Call.js";
-import outbound from "./outbound/outboundByAgent.js"
-import outboundFlow from "./outbound/outboundRoutes.js"
+import outbound from "./outbound/outboundByAgent.js";
+import outboundFlow from "./outbound/outboundRoutes.js";
 // import seedDatabase from "./config/seed.js";
 import gmailRoutes from "./routes/gmail.js";
 const app = express();
