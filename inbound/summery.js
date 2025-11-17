@@ -173,7 +173,7 @@ ${JSON.stringify(pairs, null, 2)}
 `.trim();
 
       const ctrl = new AbortController();
-      const timeoutId = setTimeout(() => ctrl.abort(), 20000);
+      const timeoutId = setTimeout(() => ctrl.abort(), 60000);
 
       let r;
       let raw;
