@@ -45,7 +45,7 @@ export const getAgentRatings = async (req, res) => {
     const ratings = await Rating.findAll({
       where: { agentId },
       include: [
-        { model: Ticket, attributes: ["id", "description"] },
+        { model: Ticket, attributes: ["id", "status", "summary", "createdAt", "updatedAt"] },
         { model: Agent, attributes: ["firstName", "lastName"] },
       ],
       order: [["createdAt", "DESC"]],

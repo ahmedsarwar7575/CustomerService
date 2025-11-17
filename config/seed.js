@@ -1,61 +1,64 @@
-// seeder.js
+import bcrypt from "bcryptjs";
 import { Agent, User, Ticket, Rating, Call } from "../models/index.js";
 import { Email } from "../models/Email.js";
 
-// If you want to force re-seed, handle that at app level with sync({ force: true })
-// This file assumes tables already exist.
-
 export default async function seedDatabase() {
   try {
-    // ---------- AGENTS ----------
-    const agents = await Agent.bulkCreate(
-      [
-        {
-          firstName: "Get",
-          lastName: "Pie",
-          email: "info@getpiepay.com",
-          password: "password123",
-          ticketType: "support",
-          rating: 4.6,
-          role: "admin",
-        },
-        {
-          firstName: "Jane",
-          lastName: "Smith",
-          email: "jane1@example.com",
-          password: "password123",
-          ticketType: "sales",
-          rating: 4.9,
-        },
-        {
-          firstName: "Sam",
-          lastName: "Lee",
-          email: "sam.lee@example.com",
-          password: "password123",
-          ticketType: "billing",
-          rating: 4.1,
-        },
-        {
-          firstName: "Maya",
-          lastName: "Patel",
-          email: "maya.patel@example.com",
-          password: "password123",
-          ticketType: "support",
-          rating: 4.3,
-        },
-        {
-          firstName: "Carlos",
-          lastName: "Gomez",
-          email: "carlos.g@example.com",
-          password: "password123",
-          ticketType: "sales",
-          rating: 4.7,
-        },
-      ],
-      { returning: true }
+    const agentSeedData = [
+      {
+        firstName: "Get",
+        lastName: "Pie",
+        email: "info@getpiepay.com",
+        password: "password123",
+        ticketType: "support",
+        rating: 4.6,
+        role: "admin",
+      },
+      {
+        firstName: "Jane",
+        lastName: "Smith",
+        email: "jane1@example.com",
+        password: "password123",
+        ticketType: "sales",
+        rating: 4.9,
+      },
+      {
+        firstName: "Sam",
+        lastName: "Lee",
+        email: "sam.lee@example.com",
+        password: "password123",
+        ticketType: "billing",
+        rating: 4.1,
+      },
+      {
+        firstName: "Maya",
+        lastName: "Patel",
+        email: "maya.patel@example.com",
+        password: "password123",
+        ticketType: "support",
+        rating: 4.3,
+      },
+      {
+        firstName: "Carlos",
+        lastName: "Gomez",
+        email: "carlos.g@example.com",
+        password: "password123",
+        ticketType: "sales",
+        rating: 4.7,
+      },
+    ];
+
+    const agentsDataWithHashes = await Promise.all(
+      agentSeedData.map(async (agent) => {
+        const hashedPassword = await bcrypt.hash(agent.password, 10);
+        return { ...agent, password: hashedPassword };
+      })
     );
 
-    // ---------- USERS ----------
+    const agents = await Agent.bulkCreate(agentsDataWithHashes, {
+      returning: true,
+    });
+
     const users = await User.bulkCreate(
       [
         {
@@ -116,13 +119,6 @@ export default async function seedDatabase() {
       { returning: true }
     );
 
-    // Helper picks
-    const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-    const priorities = ["low", "medium", "high", "critical"];
-    const statuses = ["open", "in_progress", "resolved", "closed"];
-    const ticketTypes = ["support", "sales", "billing"];
-
-    // ---------- TICKETS (12) ----------
     const tickets = await Ticket.bulkCreate(
       [
         {
@@ -233,7 +229,6 @@ export default async function seedDatabase() {
       { returning: true }
     );
 
-    // ---------- CALLS (6) ----------
     const calls = await Call.bulkCreate(
       [
         {
@@ -306,7 +301,6 @@ export default async function seedDatabase() {
       { returning: true }
     );
 
-    // ---------- EMAILS (5) ----------
     const now = new Date();
     const emails = await Email.bulkCreate(
       [
@@ -364,31 +358,30 @@ export default async function seedDatabase() {
       { returning: true }
     );
 
-    // ---------- RATINGS (4) ----------
     await Rating.bulkCreate([
       {
-        ticketId: tickets[3].id, // sales quote resolved
+        ticketId: tickets[3].id,
         userId: users[1].id,
         agentId: agents[1].id,
         score: 5,
         comments: "Excellent sales experience.",
       },
       {
-        ticketId: tickets[8].id, // signup OAuth fixed
+        ticketId: tickets[8].id,
         userId: users[5].id,
         agentId: agents[0].id,
         score: 5,
         comments: "Quick fix, thanks!",
       },
       {
-        ticketId: tickets[6].id, // VAT invoice closed
+        ticketId: tickets[6].id,
         userId: users[3].id,
         agentId: agents[2].id,
         score: 4,
         comments: "Got what I needed.",
       },
       {
-        ticketId: tickets[0].id, // IMAP issue still open
+        ticketId: tickets[0].id,
         userId: users[0].id,
         agentId: agents[0].id,
         score: 3,
@@ -403,10 +396,10 @@ export default async function seedDatabase() {
     throw error;
   }
 }
-seedDatabase()
-// Run directly if executed as a script
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   seedDatabase()
     .then(() => process.exit(0))
     .catch(() => process.exit(1));
 }
+seedDatabase()

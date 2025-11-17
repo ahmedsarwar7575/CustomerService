@@ -1,28 +1,12 @@
-// outbound/processCallOutcome.v2.js
 import "dotenv/config";
 import { Op } from "sequelize";
 import User from "../models/user.js";
 import Agent from "../models/agent.js";
 import Call from "../models/Call.js";
 import Ticket from "../models/ticket.js";
+import Rating from "../models/rating.js";
+// import sendEmail from "../utils/Email.js";
 
-/**
- * CAMPAIGNS:
- *  - "satisfaction"
- *  - "upsell"
- *
- * OUTCOME CASES (strings we return in result.outcome.case):
- *  Satisfaction:
- *    - "satisfied"
- *    - "not_satisfied"
- *    - "no_response"   (prefer not to say / call cut / silence) → treat as not satisfied
- *  Upsell:
- *    - "interested"
- *    - "not_interested"
- *    - "no_response"   (prefer not to say / call cut / silence)
- */
-
-// ---------- helpers ----------
 const now = () => new Date();
 const addDays = (d, n) => new Date(d.getTime() + n * 24 * 60 * 60 * 1000);
 
@@ -95,7 +79,6 @@ function detectSatisfactionCase(qaPairs) {
   if (yesSatisfied) return "satisfied";
   if (explicitNo) return "not_satisfied";
   if (noResponseOrCut) return "no_response";
-  // default conservative → not satisfied if any issue keyword, else no_response
   const issue =
     /\b(refund|charge|error|bug|fail|declined|problem|issue|login|shipment|lost|delay)\b/.test(
       t
@@ -127,7 +110,6 @@ function detectUpsellCase(qaPairs) {
   if (interested) return "interested";
   if (notInterested) return "not_interested";
   if (noResponseOrCut) return "no_response";
-  // default conservative
   return "no_response";
 }
 
@@ -142,14 +124,6 @@ function computeFollowup(campaignType, outcomeCase) {
   return null;
 }
 
-/**
- * Safely write follow-up timestamps only if such columns exist.
- * Preferred columns:
- *  - satisfaction: Call.nextSatisfactionAt
- *  - upsell:       Call.nextUpsellAt
- * Fallback:
- *  - Call.followUpAt (generic)
- */
 function buildFollowupPatch(campaignType, followupAt) {
   if (!followupAt) return {};
   const hasNextSat = !!Call?.rawAttributes?.nextSatisfactionAt;
@@ -166,15 +140,153 @@ function buildFollowupPatch(campaignType, followupAt) {
   return {};
 }
 
-// ---------- MAIN ----------
-/**
- * @param {Object} params
- * @param {Array<{q:string,a:string}>} params.qaPairs
- * @param {number|string} params.userId
- * @param {string} params.callSid
- * @param {import('sequelize').Sequelize} params.sequelize
- * @param {"satisfaction"|"upsell"} params.campaignType
- */
+const cleanLanguages = (arr) => {
+  if (!Array.isArray(arr)) return [];
+  return Array.from(
+    new Set(
+      arr.map((v) => (v == null ? "" : String(v).trim())).filter((v) => v)
+    )
+  );
+};
+
+function mockOutcomeExtract(qaPairs, campaignType) {
+  const outcome_case =
+    campaignType === "satisfaction"
+      ? detectSatisfactionCase(qaPairs)
+      : detectUpsellCase(qaPairs);
+
+  const customerLine = (
+    qaPairs.find((p) => /customer/i.test(p.q || ""))?.a || ""
+  ).slice(0, 160);
+  const summary =
+    customerLine ||
+    (campaignType === "satisfaction"
+      ? outcome_case === "satisfied"
+        ? "Customer appears satisfied with the resolution."
+        : outcome_case === "not_satisfied"
+        ? "Customer appears not satisfied with the resolution."
+        : "No clear response from customer; call may have been cut or unclear."
+      : outcome_case === "interested"
+      ? "Customer appears interested in the upsell offer."
+      : outcome_case === "not_interested"
+      ? "Customer is not interested in the upsell offer."
+      : "No clear response to upsell offer; call may have been cut or unclear.");
+
+  return {
+    outcome_case,
+    summary,
+    non_english_detected: [],
+    clarifications_needed: [],
+    mishears_or_typos: [],
+    rating_score: null,
+    rating_comment: null,
+  };
+}
+
+async function extractOutcomeWithLLM(qaPairs, campaignType) {
+  const system = [
+    "You are an accurate, terse extractor for GETPIE outbound customer calls.",
+    "English only. Output ONLY JSON, no extra words.",
+    "If a value is unknown/unclear, set it to the string 'not_specified'.",
+    "Correct obvious misspellings when you summarize.",
+    "Do not invent facts. Prefer 'not_specified' over guessing.",
+    "Keep the summary <= 80 words.",
+    "Classify the outcome using fixed string values exactly as requested.",
+    "For satisfaction campaigns: outcome_case must be one of 'satisfied', 'not_satisfied', or 'no_response'.",
+    "For upsell campaigns: outcome_case must be one of 'interested', 'not_interested', or 'no_response'.",
+    "If this is a satisfaction campaign and the customer provides a rating for the agent, extract rating_score as an integer 1-5 and rating_comment as a short sentence.",
+    "If there is no clear rating, set rating_score to 'not_specified' and rating_comment to 'not_specified'.",
+    "For upsell campaigns, always set rating_score to 'not_specified' and rating_comment to 'not_specified'.",
+    "Languages list must be real-world names (e.g., English, Urdu, Punjabi).",
+  ].join(" ");
+
+  const userMsg = `
+You are analyzing an OUTBOUND "${campaignType}" campaign call.
+
+From these Q/A pairs, return ONLY this JSON:
+
+{
+  "qa_log": Array<{ "q": string, "a": string }>,
+  "summary": string,
+  "campaignType": "satisfaction" | "upsell",
+  "outcome_case": "satisfied" | "not_satisfied" | "no_response" | "interested" | "not_interested",
+  "rating_score": 1 | 2 | 3 | 4 | 5 | "not_specified",
+  "rating_comment": string | "not_specified",
+  "non_english_detected": string[],
+  "clarifications_needed": string[],
+  "mishears_or_typos": string[]
+}
+
+Rules:
+- If campaignType is "satisfaction", ONLY use: "satisfied", "not_satisfied", "no_response" for outcome_case.
+- If campaignType is "upsell", ONLY use: "interested", "not_interested", "no_response" for outcome_case.
+- rating_score must be an integer in [1,5] when provided.
+- Only infer a rating if the customer clearly states it (for example "5 out of 5", "4 stars", "I give 3").
+- The summary should briefly describe what happened in the call.
+
+Q/A PAIRS:
+${JSON.stringify(qaPairs, null, 2)}
+`.trim();
+
+  const ctrl = new AbortController();
+  const timeoutId = setTimeout(() => ctrl.abort(), 20000);
+
+  let r;
+  let raw;
+  try {
+    const payload = {
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      max_output_tokens: 600,
+      text: { format: { type: "json_object" } },
+      input: [
+        { role: "system", content: [{ type: "input_text", text: system }] },
+        { role: "user", content: [{ type: "input_text", text: userMsg }] },
+      ],
+    };
+
+    r = await fetch("https://api.openai.com/v1/responses", {
+      signal: ctrl.signal,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    raw = await r.text();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!r.ok) {
+    return { error: "openai", status: r.status, body: raw };
+  }
+
+  let outText = null;
+  try {
+    const data = JSON.parse(raw);
+    if (typeof data.output_text === "string") {
+      outText = data.output_text;
+    } else if (Array.isArray(data.output)) {
+      const msgItem = data.output.find((item) => item.type === "message");
+      const contentText = msgItem?.content?.find?.(
+        (c) => c.type === "output_text"
+      )?.text;
+      if (typeof contentText === "string") outText = contentText;
+    }
+  } catch (e) {}
+
+  if (!outText) return { error: "openai_no_text", body: raw };
+
+  try {
+    const parsed = JSON.parse(outText);
+    return parsed;
+  } catch (e) {
+    return { error: "parse", text: outText };
+  }
+}
+
 export async function processCallOutcome({
   qaPairs,
   userId,
@@ -193,41 +305,96 @@ export async function processCallOutcome({
     const user = await User.findByPk(userId);
     if (!user) return { error: "user_not_found", detail: { userId } };
 
-    // classify outcome per campaign (NO LLM)
-    let outcomeCase;
-    if (campaignType === "satisfaction") {
-      outcomeCase = detectSatisfactionCase(qaPairs);
+    const useMock = String(process.env.SUMMARIZER_MOCK || "").trim() === "1";
+    let parsed;
+    if (useMock) {
+      parsed = mockOutcomeExtract(qaPairs, campaignType);
     } else {
-      outcomeCase = detectUpsellCase(qaPairs);
+      const llmResult = await extractOutcomeWithLLM(qaPairs, campaignType);
+      if (llmResult && !llmResult.error) {
+        parsed = llmResult;
+      } else {
+        parsed = mockOutcomeExtract(qaPairs, campaignType);
+      }
     }
 
-    // decide actions
+    const allowedSatisfaction = ["satisfied", "not_satisfied", "no_response"];
+    const allowedUpsell = ["interested", "not_interested", "no_response"];
+
+    const rawOutcome = parsed?.outcome_case;
+    const normOutcome =
+      typeof rawOutcome === "string"
+        ? rawOutcome.trim().toLowerCase().replace(/\s+/g, "_")
+        : "";
+
+    let outcomeCase = null;
+    if (campaignType === "satisfaction") {
+      outcomeCase = allowedSatisfaction.includes(normOutcome)
+        ? normOutcome
+        : detectSatisfactionCase(qaPairs);
+    } else {
+      outcomeCase = allowedUpsell.includes(normOutcome)
+        ? normOutcome
+        : detectUpsellCase(qaPairs);
+    }
+
+    const summary =
+      typeof parsed?.summary === "string" && parsed.summary.trim().length
+        ? parsed.summary.trim()
+        : campaignType === "satisfaction"
+        ? outcomeCase === "satisfied"
+          ? "CSAT: satisfied."
+          : outcomeCase === "not_satisfied"
+          ? "CSAT: not satisfied."
+          : "CSAT: no response / call cut."
+        : outcomeCase === "interested"
+        ? "Upsell: interested."
+        : outcomeCase === "not_interested"
+        ? "Upsell: not interested."
+        : "Upsell: no response / call cut.";
+
+    const languages = cleanLanguages(parsed?.non_english_detected);
+
+    const rawScore = parsed?.rating_score;
+    let ratingScore = null;
+    if (campaignType === "satisfaction") {
+      if (typeof rawScore === "number") {
+        const s = Math.round(rawScore);
+        if (s >= 1 && s <= 5) ratingScore = s;
+      } else if (typeof rawScore === "string") {
+        const trimmed = rawScore.trim().toLowerCase();
+        if (trimmed !== "not_specified" && trimmed !== "not specified") {
+          const n = parseInt(trimmed, 10);
+          if (!Number.isNaN(n) && n >= 1 && n <= 5) ratingScore = n;
+        }
+      }
+    }
+
+    const rawComment = parsed?.rating_comment;
+    const ratingComment =
+      typeof rawComment === "string" &&
+      rawComment.trim().length &&
+      rawComment.trim().toLowerCase() !== "not_specified" &&
+      rawComment.trim().toLowerCase() !== "not specified"
+        ? rawComment.trim()
+        : null;
+
+    const followupAt = computeFollowup(campaignType, outcomeCase);
+
     let makeSupportTicket = false;
     let makeSalesTicket = false;
 
     if (campaignType === "satisfaction") {
-      // case map:
-      // 1 satisfied           → no ticket; schedule +7d
-      // 2 not satisfied       → SUPPORT ticket
-      // 3 no response         → treat as not satisfied → SUPPORT ticket
       if (outcomeCase === "not_satisfied" || outcomeCase === "no_response") {
         makeSupportTicket = true;
       }
     } else {
-      // upsell
-      // 4 interested          → SALES ticket; schedule +21d
-      // 5 not interested      → no ticket
-      // 6 no response         → no ticket
       if (outcomeCase === "interested") {
         makeSalesTicket = true;
       }
     }
 
-    const followupAt = computeFollowup(campaignType, outcomeCase);
-
-    // one transaction: optional ticket + call upsert + user flags
     const result = await sequelize.transaction(async (t) => {
-      // update user flag per campaign
       const userPatch = {};
       if (campaignType === "satisfaction") userPatch.isSatisfactionCall = true;
       if (campaignType === "upsell") userPatch.isUpSellCall = true;
@@ -235,10 +402,46 @@ export async function processCallOutcome({
         await user.update(userPatch, { transaction: t });
       }
 
-      // create ticket if needed
+      let ratingRecord = null;
+      if (campaignType === "satisfaction" && ratingScore != null) {
+        const latestTicket = await Ticket.findOne({
+          where: { userId },
+          order: [["createdAt", "DESC"]],
+          transaction: t,
+        });
+        if (latestTicket && latestTicket.id && latestTicket.agentId != null) {
+          ratingRecord = await Rating.create(
+            {
+              score: ratingScore,
+              comments: ratingComment,
+              userId,
+              ticketId: latestTicket.id,
+              agentId: latestTicket.agentId,
+            },
+            { transaction: t }
+          );
+          // sendEmail(
+          //   "info@getpiepay.com",
+          //   "New rating submitted",
+          //   `New rating: ${JSON.stringify({
+          //     score: ratingScore,
+          //     comments: ratingComment,
+          //     userId,
+          //     ticketId: latestTicket.id,
+          //     agentId: latestTicket.agentId,
+          //   })}`
+          // );
+        }
+      }
+
       let ticket = null;
       if (makeSupportTicket || makeSalesTicket) {
         const { agentId } = await getLeastLoadedAgentSafe();
+        const ticketSummary =
+          campaignType === "satisfaction"
+            ? `CSAT: ${summary}`
+            : `Upsell: ${summary}`;
+
         ticket = await Ticket.create(
           {
             status: "open",
@@ -246,42 +449,39 @@ export async function processCallOutcome({
             priority: "medium",
             proposedSolution: null,
             isSatisfied: makeSupportTicket ? false : null,
-            summary:
-              campaignType === "satisfaction"
-                ? outcomeCase === "no_response"
-                  ? "CSAT: no response / call cut; treating as not satisfied."
-                  : "CSAT: customer not satisfied."
-                : "Upsell: customer interested in offer.",
+            summary: ticketSummary,
             userId,
             agentId: agentId || null,
           },
           { transaction: t }
         );
+
+        // sendEmail(
+        //   "info@getpiepay.com",
+        //   "New outbound ticket created",
+        //   `New ticket created: ${JSON.stringify({
+        //     status: "open",
+        //     ticketType: makeSupportTicket ? "support" : "sales",
+        //     priority: "medium",
+        //     isSatisfied: makeSupportTicket ? false : null,
+        //     summary: ticketSummary,
+        //     userId,
+        //     agentId: agentId || null,
+        //   })}`
+        // );
       }
 
-      // prepare call patch
       const basePatch = {
         type: "outbound",
         userId,
         ticketId: ticket ? ticket.id : null,
         QuestionsAnswers: qaPairs.slice(0, 200),
-        languages: null, // not detecting here, could plug in later
+        languages,
         isResolvedByAi: null,
-        summary:
-          campaignType === "satisfaction"
-            ? outcomeCase === "satisfied"
-              ? "CSAT: satisfied."
-              : outcomeCase === "not_satisfied"
-              ? "CSAT: not satisfied."
-              : "CSAT: no response / call cut."
-            : outcomeCase === "interested"
-            ? "Upsell: interested."
-            : outcomeCase === "not_interested"
-            ? "Upsell: not interested."
-            : "Upsell: no response / call cut.",
+        summary,
         callSid,
         outboundDetails: null,
-        callCategory: campaignType, // keep simple: 'satisfaction' | 'upsell'
+        callCategory: campaignType,
         customerSatisfied:
           campaignType === "satisfaction" ? outcomeCase === "satisfied" : null,
         customerInterestedInUpsell:
@@ -291,7 +491,6 @@ export async function processCallOutcome({
       const followupPatch = buildFollowupPatch(campaignType, followupAt);
       const callPatch = { ...basePatch, ...followupPatch };
 
-      // upsert Call by callSid
       const [affected] = await Call.update(callPatch, {
         where: { callSid },
         transaction: t,
@@ -300,14 +499,22 @@ export async function processCallOutcome({
       let callRow;
       if (affected === 0) {
         callRow = await Call.create(callPatch, { transaction: t });
+        // sendEmail(
+        //   "info@getpiepay.com",
+        //   "New outbound call created",
+        //   `New outbound call created: ${JSON.stringify(callPatch)}`
+        // );
       } else {
         callRow = await Call.findOne({ where: { callSid }, transaction: t });
       }
 
+      const reloadedUser = await user.reload({ transaction: t });
+
       return {
-        user: await user.reload({ transaction: t }).then((u) => u.toJSON()),
+        user: reloadedUser.toJSON(),
         ticket: ticket ? ticket.toJSON() : null,
         call: callRow ? callRow.toJSON() : null,
+        rating: ratingRecord ? ratingRecord.toJSON() : null,
         outcome: {
           campaignType,
           case: outcomeCase,
@@ -319,6 +526,8 @@ export async function processCallOutcome({
     return result;
   } catch (e) {
     const msg = String(e?.message || e);
+    if (/aborted|The user aborted a request/i.test(msg))
+      return { error: "openai_timeout", detail: msg };
     if (/unique constraint|duplicate key/i.test(msg))
       return { error: "db_conflict", detail: msg };
     return { error: "process_exception", detail: msg };

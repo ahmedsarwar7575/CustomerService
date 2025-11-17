@@ -3,6 +3,7 @@ import "dotenv/config";
 import sequelize from "../config/db.js";
 import Agent from "../models/agent.js";
 import User from "../models/user.js";
+import Ticket from "../models/ticket.js";
 import processCallOutcome from "./summerize.js";
 
 async function ensureTestAgent() {
@@ -27,29 +28,33 @@ async function ensureTestAgent() {
   }
 }
 
-async function ensureUser({ name, email, phone }) {
-  const [user] = await User.findOrCreate({
-    where: email ? { email } : { phone },
-    defaults: {
-      name: name || null,
-      email: email || null,
-      phone: phone || null,
-      status: "active",
-    },
-  });
+async function getUserWithTicket() {
+  const ticket = await Ticket.findOne({ order: [["createdAt", "DESC"]] });
+  if (!ticket) {
+    throw new Error("No tickets found in DB. Run seeder first.");
+  }
+  const user = await User.findByPk(ticket.userId);
+  if (!user) {
+    throw new Error(`Ticket ${ticket.id} has no valid user`);
+  }
   return user;
 }
 
-// ----------- Cases you requested -------------
-// We will run these for BOTH campaigns separately to show separation.
-
 const SATISFACTION_CASES = [
   {
-    label: "1) satisfied",
-    callSid: "SAT-1-satisfied",
+    label: "1) satisfied + 5-star rating",
+    callSid: "SAT-1-satisfied-rating",
     qaPairs: [
       { q: "Agent", a: "Are you satisfied with the resolution?" },
-      { q: "Customer", a: "Yes, I'm satisfied. Works now." },
+      { q: "Customer", a: "Yes, I'm satisfied. Everything works now." },
+      {
+        q: "Agent",
+        a: "On a scale of 1 to 5, how would you rate your experience with the agent?",
+      },
+      {
+        q: "Customer",
+        a: "I would say 5 out of 5, great service.",
+      },
     ],
   },
   {
@@ -61,7 +66,7 @@ const SATISFACTION_CASES = [
     ],
   },
   {
-    label: "3) did not respond / prefer not to say / call cut",
+    label: "3) no response / call cut",
     callSid: "SAT-3-no-response",
     qaPairs: [
       { q: "Agent", a: "Can you confirm satisfaction?" },
@@ -88,7 +93,7 @@ const UPSELL_CASES = [
     ],
   },
   {
-    label: "6) did not respond / prefer not to say / call cut",
+    label: "6) no response / call cut",
     callSid: "UP-6-no-response",
     qaPairs: [
       { q: "Agent", a: "Can I share pricing details?" },
@@ -103,16 +108,14 @@ async function run() {
     console.log("✓ DB connected");
     await ensureTestAgent();
 
-    // Create one user for all runs to show idempotency
-    const user = await ensureUser({
-      name: "Outbound Test",
-      email: "outbound.tester@example.com",
-      phone: "+15550030001",
+    const user = await getUserWithTicket();
+    console.log("Using user with existing ticket:", {
+      id: user.id,
+      email: user.email,
     });
 
-    // --- Run satisfaction campaign cases ---
     for (const c of SATISFACTION_CASES) {
-      console.log(`\n=== SATISFACTION: ${c.label}`);
+      console.log(`\n=== SATISFACTION: ${c.label} ===`);
       const res = await processCallOutcome({
         qaPairs: c.qaPairs,
         userId: user.id,
@@ -123,8 +126,8 @@ async function run() {
 
       const out = {
         label: c.label,
-        error: res?.error,
-        outcome: res?.outcome,
+        error: res?.error || null,
+        outcome: res?.outcome || null,
         ticketType: res?.ticket?.ticketType || null,
         ticketId: res?.ticket?.id || null,
         agentId: res?.ticket?.agentId || null,
@@ -132,13 +135,17 @@ async function run() {
         nextFollowUpAt: res?.outcome?.followupAt || null,
         userId: res?.user?.id || null,
         summary: res?.call?.summary || null,
+        ratingId: res?.rating?.id || null,
+        ratingScore: res?.rating?.score || null,
+        ratingComments: res?.rating?.comments || null,
+        ratingTicketId: res?.rating?.ticketId || null,
+        ratingAgentId: res?.rating?.agentId || null,
       };
       console.dir(out, { depth: 5 });
     }
 
-    // --- Run upsell campaign cases ---
     for (const c of UPSELL_CASES) {
-      console.log(`\n=== UPSELL: ${c.label}`);
+      console.log(`\n=== UPSELL: ${c.label} ===`);
       const res = await processCallOutcome({
         qaPairs: c.qaPairs,
         userId: user.id,
@@ -149,8 +156,8 @@ async function run() {
 
       const out = {
         label: c.label,
-        error: res?.error,
-        outcome: res?.outcome,
+        error: res?.error || null,
+        outcome: res?.outcome || null,
         ticketType: res?.ticket?.ticketType || null,
         ticketId: res?.ticket?.id || null,
         agentId: res?.ticket?.agentId || null,
@@ -158,6 +165,11 @@ async function run() {
         nextFollowUpAt: res?.outcome?.followupAt || null,
         userId: res?.user?.id || null,
         summary: res?.call?.summary || null,
+        ratingId: res?.rating?.id || null,
+        ratingScore: res?.rating?.score || null,
+        ratingComments: res?.rating?.comments || null,
+        ratingTicketId: res?.rating?.ticketId || null,
+        ratingAgentId: res?.rating?.agentId || null,
       };
       console.dir(out, { depth: 5 });
     }

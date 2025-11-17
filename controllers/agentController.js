@@ -200,6 +200,7 @@ export const getAllAgents = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
 export const getAgentById = async (req, res) => {
   try {
     const agent = await Agent.findByPk(req.params.id, {
@@ -218,7 +219,6 @@ export const getAgentById = async (req, res) => {
       return res.status(404).json({ error: "Agent not found" });
     }
 
-    // Get all tickets for this agent
     const tickets = await Ticket.findAll({
       where: { agentId: agent.id },
       attributes: [
@@ -231,7 +231,6 @@ export const getAgentById = async (req, res) => {
       ],
     });
 
-    // Attach user to each ticket
     const ticketsWithUsers = await Promise.all(
       tickets.map(async (ticket) => {
         let userId = ticket.userId;
@@ -249,15 +248,73 @@ export const getAgentById = async (req, res) => {
       })
     );
 
+    const ratings = await Rating.findAll({
+      where: { agentId: agent.id },
+      attributes: [
+        "id",
+        "score",
+        "comments",
+        "ticketId",
+        "userId",
+        "createdAt",
+      ],
+    });
+
+    let averageRating = null;
+    if (ratings.length > 0) {
+      const total = ratings.reduce((sum, r) => sum + r.score, 0);
+      averageRating = Number((total / ratings.length).toFixed(2));
+    }
+
+    const ratingUserIds = Array.from(
+      new Set(ratings.map((r) => r.userId).filter(Boolean))
+    );
+    const ratingTicketIds = Array.from(
+      new Set(ratings.map((r) => r.ticketId).filter(Boolean))
+    );
+
+    const ratingUsers = ratingUserIds.length
+      ? await User.findAll({
+          where: { id: ratingUserIds },
+          attributes: ["id", "name", "email", "phone"],
+        })
+      : [];
+
+    const ratingTickets = ratingTicketIds.length
+      ? await Ticket.findAll({
+          where: { id: ratingTicketIds },
+          attributes: ["id", "summary", "status", "priority", "ticketType"],
+        })
+      : [];
+
+    const userMap = new Map(ratingUsers.map((u) => [u.id, u.toJSON()]));
+    const ticketMap = new Map(ratingTickets.map((t) => [t.id, t.toJSON()]));
+
+    const ratingsWithDetails = ratings.map((r) => {
+      const rJson = r.toJSON();
+      const tinyUser = rJson.userId ? userMap.get(rJson.userId) || null : null;
+      const tinyTicket = rJson.ticketId
+        ? ticketMap.get(rJson.ticketId) || null
+        : null;
+
+      return {
+        ...rJson,
+        userId: tinyUser,
+        ticketId: tinyTicket,
+      };
+    });
+
     res.json({
       ...agent.toJSON(),
       tickets: ticketsWithUsers,
+      ratings: ratingsWithDetails,
+      ratingsCount: ratings.length,
+      averageRating,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
-
 export const updateAgent = async (req, res) => {
   try {
     const agent = await Agent.findByPk(req.params.id);
@@ -343,7 +400,14 @@ export const getAllTicketsByAgentId = async (req, res) => {
           include: [
             {
               model: Call, // Include calls of the user
-              attributes: ["id", "type", "summary", "createdAt", "updatedAt", "QuestionsAnswers"],
+              attributes: [
+                "id",
+                "type",
+                "summary",
+                "createdAt",
+                "updatedAt",
+                "QuestionsAnswers",
+              ],
             },
           ],
         },
