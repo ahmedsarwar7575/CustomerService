@@ -153,7 +153,7 @@ export const summarizer = async (pairs, callSid, phone) => {
 
       const userMsg = `
 From these Q/A pairs, return ONLY this JSON:
-
+BRO if our agent said that i will escalate ticket then isSatisfied will be always false means if context is user and agent aggreed on creating ticket then isSatisfied will be false
 {
   "customer": { "name": string | "not specified", "name_raw": string | "not specified", "email": string | "not specified" },
   "ticket": { "ticketType": "support" | "sales" | "billing" | "not specified", "status": "open" | "resolved", "priority": "low" | "medium" | "high" | "critical", "proposedSolution": string | "not specified", "isSatisfied": true | false | "not specified" },
