@@ -4,9 +4,9 @@ import twilio from "twilio";
 import dotenv from "dotenv";
 import Call from "../models/Call.js";
 dotenv.config();
+
 const { OPENAI_API_KEY, REALTIME_VOICE = "alloy" } = process.env;
 const MODEL = "gpt-4o-realtime-preview-2024-12-17";
-
 const SYSTEM_MESSAGE = `Full AI Prompt for Get Pie Customer Support - John Smith
 
 You are John Smith, a calm, friendly, and professional customer support agent at Get Pie. Your role is to understand the caller’s issue, resolve it if possible, and collect necessary contact details for follow-up. You speak only English, and keep your responses short (1–2 sentences), natural, and confident—not robotic or overly formal.
@@ -357,6 +357,11 @@ If they persist, say:
 Professionalism and Tone:
 Maintain a professional, confident, and friendly tone throughout the conversation.`;
 
+// barge-in controls
+const ALLOW_BARGE_IN = false; // set true if you really want barge-in
+const BARGE_COOLDOWN_MS = 1200; // ignore VAD near start of TTS
+const DELAYED_BARGE_MS = 300; // require sustained speech to cancel
+
 function safeParse(s) {
   try {
     return JSON.parse((s || "").trim());
@@ -413,9 +418,9 @@ function buildSessionUpdate() {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.6,
-        prefix_padding_ms: 200,
-        silence_duration_ms: 300,
+        threshold: 0.85,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 700,
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
@@ -446,35 +451,20 @@ export function attachMediaStreamServer(server) {
       let qaPairs = [];
       let pendingUserQ = null;
       let hasActiveResponse = false;
-      let callerFrom = null; // <-- NEW
+      let callerFrom = null;
       let calledTo = null;
+
+      // debounced barge-in
+      let maybeBargeInTimer = null;
+      let userStillTalking = false;
+
       const openAiWs = createOpenAIWebSocket();
 
       const initializeSession = () => {
         try {
           openAiWs.send(JSON.stringify(buildSessionUpdate()));
-          // console.log("session.update sent");
         } catch (e) {
           console.error("session.update error", e);
-        }
-      };
-
-      const handleSpeechStartedEvent = () => {
-        if (markQueue.length > 0) {
-          try {
-            openAiWs.send(JSON.stringify({ type: "response.cancel" }));
-            // console.log("response.cancel sent");
-          } catch (e) {
-            console.error("response.cancel error", e);
-          }
-          try {
-            connection.send(JSON.stringify({ event: "clear", streamSid }));
-            // console.log("twilio.clear sent");
-          } catch (e) {
-            console.error("twilio.clear error", e);
-          }
-          markQueue = [];
-          responseStartTimestampTwilio = null;
         }
       };
 
@@ -494,23 +484,67 @@ export function attachMediaStreamServer(server) {
         }
       };
 
+      function cancelResponseNow() {
+        try {
+          openAiWs.send(JSON.stringify({ type: "response.cancel" }));
+        } catch (e) {
+          console.error("response.cancel error", e);
+        }
+        try {
+          connection.send(JSON.stringify({ event: "clear", streamSid }));
+        } catch (e) {
+          console.error("twilio.clear error", e);
+        }
+        markQueue = [];
+        responseStartTimestampTwilio = null;
+      }
+
+      function handleSpeechStartedEvent() {
+        const now = latestMediaTimestamp;
+        const withinCooldown =
+          responseStartTimestampTwilio &&
+          now - responseStartTimestampTwilio < BARGE_COOLDOWN_MS;
+
+        if (!hasActiveResponse) return; // user speaking while bot idle -> fine
+        if (!ALLOW_BARGE_IN) return; // half-duplex: ignore noise during TTS
+        if (withinCooldown) return; // ignore immediate echoes/noise
+
+        userStillTalking = true;
+        if (maybeBargeInTimer) return;
+        maybeBargeInTimer = setTimeout(() => {
+          maybeBargeInTimer = null;
+          if (!userStillTalking) return; // short blip
+          cancelResponseNow();
+        }, DELAYED_BARGE_MS);
+      }
+
+      function handleSpeechStoppedEvent() {
+        userStillTalking = false;
+        if (maybeBargeInTimer) {
+          clearTimeout(maybeBargeInTimer);
+          maybeBargeInTimer = null;
+        }
+        if (!hasActiveResponse) {
+          try {
+            openAiWs.send(JSON.stringify({ type: "response.create" }));
+          } catch (e) {
+            console.error("response.create error", e);
+          }
+        }
+      }
+
       openAiWs.on("open", () => {
-        // console.log("openai.ws open");
         setTimeout(initializeSession, 100);
       });
 
       openAiWs.on("message", (data) => {
         try {
           const msg = JSON.parse(data);
-          if (msg.type === "session.created" || msg.type === "session.updated")
-            console.log("openai.session", msg.type);
-          if (msg.type === "error") console.error("openai.error", msg);
+
           if (msg.type === "response.created") {
             hasActiveResponse = true;
-            console.log("openai.response created", {
-              id: msg.response?.id || null,
-            });
           }
+
           if (
             (msg.type === "response.audio.delta" ||
               msg.type === "response.output_audio.delta") &&
@@ -535,6 +569,7 @@ export function attachMediaStreamServer(server) {
               console.error("twilio.media send error", e);
             }
           }
+
           if (
             msg.type === "response.output_text.delta" &&
             typeof msg.delta === "string"
@@ -557,12 +592,14 @@ export function attachMediaStreamServer(server) {
                 finalJsonString = JSON.stringify(maybe);
             }
           }
+
           if (msg.type === "response.output_text.done" && !finalJsonString) {
             const maybe = safeParse(textBuffer);
             if (maybe && maybe.session && maybe.customer)
               finalJsonString = JSON.stringify(maybe);
             textBuffer = "";
           }
+
           if (
             msg.type === "conversation.item.input_audio_transcription.completed"
           ) {
@@ -574,21 +611,19 @@ export function attachMediaStreamServer(server) {
                 )?.transcript || ""
               ).trim();
             if (q) pendingUserQ = q;
-            // console.log("user.transcript", q || null);
           }
-          if (
-            msg.type === "input_audio_buffer.speech_stopped" &&
-            !hasActiveResponse
-          ) {
-            try {
-              openAiWs.send(JSON.stringify({ type: "response.create" }));
-              // console.log("response.create sent");
-            } catch (e) {
-              console.error("response.create error", e);
-            }
+
+          if (msg.type === "input_audio_buffer.speech_started") {
+            handleSpeechStartedEvent();
           }
+
+          if (msg.type === "input_audio_buffer.speech_stopped") {
+            handleSpeechStoppedEvent();
+          }
+
           if (msg.type === "response.done") {
             hasActiveResponse = false;
+            responseStartTimestampTwilio = null;
             const outputs = msg.response?.output || [];
             for (const out of outputs) {
               if (out?.role === "assistant") {
@@ -606,13 +641,10 @@ export function attachMediaStreamServer(server) {
                   } else {
                     qaPairs.push({ q: null, a });
                   }
-                  // console.log("assistant.transcript", a);
                 }
               }
             }
           }
-          if (msg.type === "input_audio_buffer.speech_started")
-            handleSpeechStartedEvent();
         } catch (e) {
           console.error(
             "openai.message parse error",
@@ -641,13 +673,14 @@ export function attachMediaStreamServer(server) {
         // console.log(JSON.stringify({ name, email, summary, isIssueResolved, issue, qaPairs: pairs }));
         printed = true;
       }
+
       const started = new Set();
+
       connection.on("message", async (message) => {
         try {
           const data = JSON.parse(message);
           switch (data.event) {
             case "connected":
-              console.log("twilio.event connected");
               break;
             case "start":
               streamSid = data.start.streamSid;
@@ -655,35 +688,34 @@ export function attachMediaStreamServer(server) {
               callerFrom = data.start?.customParameters?.from || callerFrom;
               calledTo = data.start?.customParameters?.to || calledTo;
               await Call.findOrCreate({
-                where: { callSid }, // <-- IMPORTANT: must match your model
-                defaults: {
-                  callSid,
-                },
+                where: { callSid },
+                defaults: { callSid },
               });
               if (!callSid || started.has(callSid)) return;
               started.add(callSid);
-              const base = process.env.PUBLIC_BASE_URL;
-              const accountSid = process.env.TWILIO_ACCOUNT_SID;
-              const authToken = process.env.TWILIO_AUTH_TOKEN;
-              const client = twilio(accountSid, authToken);
-              try {
-                const rec = await client.calls(callSid).recordings.create({
-                  recordingStatusCallback: `${base}/recording-status`, // MUST be a full https URL
-                  recordingStatusCallbackEvent: [
-                    "in-progress",
-                    "completed",
-                    "absent",
-                  ],
-                  recordingChannels: "dual",
-                  recordingTrack: "both",
-                });
-                console.log("▶️ recording started:", rec.sid);
-              } catch (e) {
-                console.error("start recording failed:", e.message);
+              {
+                const base = process.env.PUBLIC_BASE_URL;
+                const accountSid = process.env.TWILIO_ACCOUNT_SID;
+                const authToken = process.env.TWILIO_AUTH_TOKEN;
+                const client = twilio(accountSid, authToken);
+                try {
+                  const rec = await client.calls(callSid).recordings.create({
+                    recordingStatusCallback: `${base}/recording-status`,
+                    recordingStatusCallbackEvent: [
+                      "in-progress",
+                      "completed",
+                      "absent",
+                    ],
+                    recordingChannels: "dual",
+                    recordingTrack: "both",
+                  });
+                  console.log("▶️ recording started:", rec.sid);
+                } catch (e) {
+                  console.error("start recording failed:", e.message);
+                }
               }
               responseStartTimestampTwilio = null;
               latestMediaTimestamp = 0;
-              // console.log("twilio.start", { streamSid, callSid });
               break;
             case "media":
               latestMediaTimestamp =
@@ -722,7 +754,6 @@ export function attachMediaStreamServer(server) {
               emitFinalOnce();
               break;
             default:
-              // console.log("twilio.event", data.event);
               break;
           }
         } catch (e) {
