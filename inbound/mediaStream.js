@@ -114,7 +114,7 @@ CONTACT INFO (IF ASKED)
 `;
 
 // barge-in controls
-const ALLOW_BARGE_IN = false; // set true if you really want barge-in
+const ALLOW_BARGE_IN = false; 
 const BARGE_COOLDOWN_MS = 1000; // ignore VAD near start of TTS
 const DELAYED_BARGE_MS = 200; // require sustained speech to cancel
 
