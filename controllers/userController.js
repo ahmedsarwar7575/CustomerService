@@ -1,5 +1,9 @@
 import User from '../models/user.js';
 import Ticket from '../models/ticket.js';
+import Call from '../models/Call.js';
+import Rating from '../models/rating.js';
+import {Email} from '../models/Email.js';
+
 
 // Create new user
 export const createUser = async (req, res) => {
@@ -13,7 +17,6 @@ export const createUser = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
-
 // Get user with tickets
 export const getUserWithTickets = async (req, res) => {
   try {
@@ -33,6 +36,7 @@ export const getUserWithTickets = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
 export const getAllUsers = async (req, res) => {
   try {
     const user = await User.findAll();
@@ -90,12 +94,36 @@ export const getUsersByTicketType = async (req, res) => {
 export const deleteUser = async (req, res) => {
   try {
     const { id } = req.params;
-    if(!id) return res.status(400).json({ error: 'User id is required' });
+
+    if (!id) {
+      return res.status(400).json({ error: 'User id is required' });
+    }
+
+    const ticket = await Ticket.findOne({
+      where: { userId: id, status: 'open' },
+    });
+
+    if (ticket) {
+      return res
+        .status(400)
+        .json({ error: 'User has open tickets. Please delete them first' });
+    }
+
+    await Call.destroy({ where: { userId: id } });
+    await Email.destroy({ where: { userId: id } });
+    await Rating.destroy({ where: { userId: id } });
+
     const user = await User.findByPk(id);
-    if(!user) return res.status(404).json({ error: 'User not found' });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
     await user.destroy();
-    res.json({ message: 'User deleted successfully' });
+
+    return res.json({ message: 'User deleted successfully' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error deleting user:', error);
+    return res.status(500).json({ error: error.message });
   }
 };
