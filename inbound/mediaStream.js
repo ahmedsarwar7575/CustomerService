@@ -46,13 +46,14 @@ CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
 For this call:
 - Treat the caller as a returning customer.
 - In your first reply, greet them warmly using their name "${
-      userProfile.name || ""
-    }" and ask how you can help today.
+        userProfile.name || ""
+      }" and ask how you can help today.
 - Do NOT ask "What is your name?" as if you do not know it.
 - You already know their email on file: "${userProfile.email || ""}".
 - At a natural moment early in the conversation, say something like:
-  "We have your email as ${userProfile.email ||
-    ""}. Do you want to keep this email or change it?"
+  "We have your email as ${
+    userProfile.email || ""
+  }. Do you want to keep this email or change it?"
 - If they say it is correct / they want to keep it:
   - Politely ask them to SPELL it letter by letter to confirm.
   - Then repeat it back and confirm it is correct.
@@ -81,6 +82,8 @@ For this call:
         prefix_padding_ms: 300,
         silence_duration_ms: 700,
         create_response: true,
+        interrupt_response: false, // 🔥 disable server barge-in
+        idle_timeout_ms: 8000, // 🔥 optional: still answer if VAD gets weird
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
@@ -328,9 +331,7 @@ export function attachMediaStreamServer(server) {
                 callerFrom;
 
               calledTo =
-                data.start?.customParameters?.to ||
-                data.start?.to ||
-                calledTo;
+                data.start?.customParameters?.to || data.start?.to || calledTo;
 
               await Call.findOrCreate({
                 where: { callSid },
