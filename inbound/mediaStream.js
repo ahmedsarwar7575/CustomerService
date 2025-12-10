@@ -2,6 +2,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
 import Call from "../models/Call.js";
+import User from "../models/user.js"; // 👈 adjust path/model name as needed
 import { SYSTEM_MESSAGE } from "./prompt.js";
 import { summarizer } from "./summery.js";
 
@@ -32,7 +33,45 @@ function createOpenAIWebSocket() {
   });
 }
 
-function buildSessionUpdate() {
+function buildSessionUpdate(userProfile = null) {
+  // Dynamic instructions depending on whether the caller exists in DB
+  const dynamicContext = userProfile
+    ? `
+==================================================
+CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
+==================================================
+- Name on file: ${userProfile.name || "Unknown"}
+- Email on file: ${userProfile.email || "Unknown"}
+
+For this call:
+- Treat the caller as a returning customer.
+- In your first reply, greet them warmly using their name "${
+      userProfile.name || ""
+    }" and ask how you can help today.
+- Do NOT ask "What is your name?" as if you do not know it.
+- You already know their email on file: "${userProfile.email || ""}".
+- At a natural moment early in the conversation, say something like:
+  "We have your email as ${userProfile.email ||
+    ""}. Do you want to keep this email or change it?"
+- If they say it is correct / they want to keep it:
+  - Politely ask them to SPELL it letter by letter to confirm.
+  - Then repeat it back and confirm it is correct.
+- If they want to change it:
+  - Collect a NEW email using the normal spell-and-confirm flow.
+- You do NOT need to re-collect their name unless they say it is wrong or want to change it. 
+`
+    : `
+==================================================
+CALLER PROFILE FROM DATABASE (NEW CUSTOMER)
+==================================================
+- No existing customer record was found for this phone number.
+
+For this call:
+- Follow your normal flow to:
+  - Ask for and confirm their NAME.
+  - Ask for and confirm their EMAIL with spelling, repeat, and confirmation.
+`;
+
   return {
     type: "session.update",
     session: {
@@ -46,7 +85,7 @@ function buildSessionUpdate() {
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
-      instructions: SYSTEM_MESSAGE,
+      instructions: SYSTEM_MESSAGE + dynamicContext,
       modalities: ["text", "audio"],
       temperature: 0.7,
       input_audio_transcription: {
@@ -92,6 +131,12 @@ export function attachMediaStreamServer(server) {
       let greetingSent = false;
       let hangupScheduled = false;
 
+      // returning-customer info
+      let knownUser = null;
+      let openAiReady = false;
+      let userLookupDone = false;
+      let twilioStarted = false;
+
       // For summarizer
       let qaPairs = [];
       let pendingUserQ = null;
@@ -101,13 +146,19 @@ export function attachMediaStreamServer(server) {
 
       const initializeSession = () => {
         try {
-          openAiWs.send(JSON.stringify(buildSessionUpdate()));
+          openAiWs.send(JSON.stringify(buildSessionUpdate(knownUser)));
           sessionInitialized = true;
           maybeSendGreeting();
         } catch (e) {
           console.error("session.update error", e);
         }
       };
+
+      function maybeInitializeSession() {
+        if (sessionInitialized) return;
+        if (!openAiReady || !twilioStarted || !userLookupDone) return;
+        initializeSession();
+      }
 
       function maybeSendGreeting() {
         // only greet once, after session + call are ready
@@ -120,13 +171,23 @@ export function attachMediaStreamServer(server) {
           return;
 
         greetingSent = true;
+
+        let greetingInstruction;
+        if (knownUser && knownUser.name) {
+          greetingInstruction =
+            `In this first reply, greet the caller warmly in English using their name "${knownUser.name}", and ask how you can help today. ` +
+            `Keep it to one or two short sentences. Do NOT ask for their name or email yet.`;
+        } else {
+          greetingInstruction =
+            "In this first reply, greet the caller warmly in English and ask how you can help today. Keep it to one or two short sentences, and do not ask for their name or email yet. Wait for their answer first.";
+        }
+
         try {
           openAiWs.send(
             JSON.stringify({
               type: "response.create",
               response: {
-                instructions:
-                  "Start by greeting the caller in English. Keep it to one or two short sentences and then wait for their question.",
+                instructions: greetingInstruction,
               },
             })
           );
@@ -154,8 +215,8 @@ export function attachMediaStreamServer(server) {
 
       // OpenAI WS events
       openAiWs.on("open", () => {
-        // tiny delay to let Twilio send "start"
-        setTimeout(initializeSession, 100);
+        openAiReady = true;
+        maybeInitializeSession();
       });
 
       openAiWs.on("message", (data) => {
@@ -176,7 +237,6 @@ export function attachMediaStreamServer(server) {
 
             if (q) {
               pendingUserQ = q;
-              // console.log("User question:", q);
             }
           }
 
@@ -259,8 +319,18 @@ export function attachMediaStreamServer(server) {
             case "start":
               streamSid = data.start.streamSid;
               callSid = data.start.callSid || null;
-              callerFrom = data.start?.customParameters?.from || callerFrom;
-              calledTo = data.start?.customParameters?.to || calledTo;
+
+              // try multiple places to get the caller's phone (adapt as needed)
+              callerFrom =
+                data.start?.customParameters?.from ||
+                data.start?.callFrom ||
+                data.start?.from ||
+                callerFrom;
+
+              calledTo =
+                data.start?.customParameters?.to ||
+                data.start?.to ||
+                calledTo;
 
               await Call.findOrCreate({
                 where: { callSid },
@@ -270,7 +340,7 @@ export function attachMediaStreamServer(server) {
               if (!callSid || started.has(callSid)) return;
               started.add(callSid);
 
-              // Start Twilio dual-channel recording (optional but kept)
+              // Start Twilio dual-channel recording (optional)
               if (PUBLIC_BASE_URL && TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
                 try {
                   const rec = await twilioClient
@@ -292,7 +362,37 @@ export function attachMediaStreamServer(server) {
               }
 
               callStarted = true;
-              maybeSendGreeting();
+              twilioStarted = true;
+
+              // --- Look up user by phone BEFORE initializing session ---
+              try {
+                if (callerFrom) {
+                  knownUser = await User.findOne({
+                    where: { phone: callerFrom },
+                  });
+                  if (knownUser) {
+                    console.log(
+                      "Returning user found for phone:",
+                      callerFrom,
+                      "->",
+                      knownUser.name,
+                      knownUser.email
+                    );
+                  } else {
+                    console.log(
+                      "No existing user found for phone:",
+                      callerFrom
+                    );
+                  }
+                } else {
+                  console.log("No callerFrom phone number available");
+                }
+              } catch (e) {
+                console.error("User lookup error:", e?.message || e);
+              }
+
+              userLookupDone = true;
+              maybeInitializeSession();
               break;
 
             case "media":
