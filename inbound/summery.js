@@ -37,9 +37,13 @@ function mockExtract(pairs) {
   const text = pairs.map((p) => `${p.q ?? ""} ${p.a ?? ""}`).join(" ");
   const lower = text.toLowerCase();
 
-  const email = (text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i) || [
-    null,
-  ])[0];
+  // ★ Prefer the LAST email in the conversation, since that is most likely the final agreed one
+  const emailMatches =
+    text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  const email = emailMatches.length
+    ? emailMatches[emailMatches.length - 1]
+    : null;
+
   const nameMatch = text.match(
     /\b(?:my name is|it's|i am)\s+([A-Za-z][A-Za-z\s'-]{1,40})/i
   );
@@ -145,6 +149,11 @@ export const summarizer = async (pairs, callSid, phone) => {
         "Normalize and fix customer name and language names when possible.",
         "Do not invent facts. Prefer 'not specified' over guessing.",
         "Validate email as something@something.tld (basic).",
+        // ★ EMAIL RULES:
+        "If the conversation mentions multiple email addresses, always choose the ONE FINAL email address that both the agent and customer agree is correct at the end of the call.",
+        "If the agent reads an email from the system (like an old email) and the customer says it is correct, that is the final email.",
+        "If the customer corrects the email or gives a new email and they confirm it, use the NEW email and ignore the old one.",
+        "If there is no clear final agreed email, set customer.email to 'not specified'.",
         "Derive is_satisfied from the conversation (true/false) if explicit; else 'not specified'.",
         "Keep the summary <= 80 words.",
         "Also output flags: has_meaningful_conversation (boolean), contact_info_only (boolean).",
@@ -153,7 +162,9 @@ export const summarizer = async (pairs, callSid, phone) => {
 
       const userMsg = `
 From these Q/A pairs, return ONLY this JSON:
-BRO if our agent said that i will escalate ticket then isSatisfied will be always false means if context is user and agent aggreed on creating ticket then isSatisfied will be false
+BRO if our agent said that i will escalate ticket then isSatisfied will be always false means if context is user and agent aggreed on creating ticket then isSatisfied will be false.
+BRO about email: conversation can include an old email already on file and a new email if the user changes it. Always set "customer.email" to the FINAL email address that both the agent and the user confirm as correct at the end of the call. If the user keeps the existing email, use that one. If the user changes the email and confirms the new one, use the NEW email and ignore the old one. If there is any doubt which email is correct, set "customer.email" to "not specified".
+
 {
   "customer": { "name": string | "not specified", "name_raw": string | "not specified", "email": string | "not specified" },
   "ticket": { "ticketType"(Always return tikcet type): "support" | "sales" | "billing"  | "not specified", "status": "open" | "resolved", "priority": "low" | "medium" | "high" | "critical", "proposedSolution": string | "not specified", "isSatisfied": true | false | "not specified" },
@@ -287,6 +298,7 @@ ${JSON.stringify(pairs, null, 2)}
       return { skipped: "no_conversation", extracted: { summary, qaLog } };
     }
 
+    // CONTACT INFO ONLY FLOW
     if (contactInfoOnly) {
       const userResult = await sequelize.transaction(async (t) => {
         let userRecord = null;
@@ -311,19 +323,12 @@ ${JSON.stringify(pairs, null, 2)}
             },
             { transaction: t }
           );
-          // sendEmail(
-          //   safeEmail,
-          //   "New User",
-          //   `New user created: ${JSON.stringify({
-          //     name: safeName,
-          //     email: safeEmail,
-          //     phone: safePhone,
-          //   })}`
-          // );
         } else {
           const patch = {};
           if (safeName && userRecord.name !== safeName) patch.name = safeName;
-          if (safeEmail && !userRecord.email) patch.email = safeEmail;
+          // ★ If user and agent agreed on a final email, update it even if one already exists
+          if (safeEmail && userRecord.email !== safeEmail)
+            patch.email = safeEmail;
           if (safePhone && !userRecord.phone) patch.phone = safePhone;
           if (userRecord.status !== "active") patch.status = "active";
           if (Object.keys(patch).length)
@@ -372,19 +377,12 @@ ${JSON.stringify(pairs, null, 2)}
           },
           { transaction: t }
         );
-        // sendEmail(
-        //   "info@getpiepay.com",
-        //   "New user created",
-        //   `New user created: ${JSON.stringify({
-        //     name: safeName,
-        //     email: safeEmail,
-        //     phone: safePhone,
-        //   })}`
-        // );
       } else {
         const patch = {};
         if (safeName && userRecord.name !== safeName) patch.name = safeName;
-        if (safeEmail && !userRecord.email) patch.email = safeEmail;
+        // ★ Same here: update email if a new final confirmed email was extracted
+        if (safeEmail && userRecord.email !== safeEmail)
+          patch.email = safeEmail;
         if (safePhone && !userRecord.phone) patch.phone = safePhone;
         if (userRecord.status !== "active") patch.status = "active";
         if (Object.keys(patch).length)
@@ -455,20 +453,6 @@ ${JSON.stringify(pairs, null, 2)}
           },
           { transaction: t }
         );
-        // sendEmail(
-        //   "info@getpiepay.com",
-        //   "New ticket created",
-        //   `New ticket created: ${JSON.stringify({
-        //     status: "open",
-        //     isSatisfied: false,
-        //     priority: ticketPriority,
-        //     proposedSolution,
-        //     ticketType,
-        //     summary,
-        //     userId: userRecord.id,
-        //     agentId: assignedAgentId ?? null,
-        //   })}`
-        // );
       }
 
       const callPatch = {
@@ -491,14 +475,6 @@ ${JSON.stringify(pairs, null, 2)}
           { callSid, ...callPatch },
           { transaction: t }
         );
-        // sendEmail(
-        //   "info@getpiepay.com",
-        //   "New call created",
-        //   `New call created: ${JSON.stringify({
-        //     callSid,
-        //     ...callPatch,
-        //   })}`
-        // );
       } else {
         callRecord = await Call.findOne({ where: { callSid }, transaction: t });
       }
