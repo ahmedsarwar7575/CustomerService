@@ -46,14 +46,13 @@ CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
 For this call:
 - Treat the caller as a returning customer.
 - In your first reply, greet them warmly using their name "${
-        userProfile.name || ""
-      }" and ask how you can help today.
+      userProfile.name || ""
+    }" and ask how you can help today.
 - Do NOT ask "What is your name?" as if you do not know it.
 - You already know their email on file: "${userProfile.email || ""}".
 - At a natural moment early in the conversation, say something like:
-  "We have your email as ${
-    userProfile.email || ""
-  }. Do you want to keep this email or change it?"
+  "We have your email as ${userProfile.email ||
+    ""}. Do you want to keep this email or change it?"
 - If they say it is correct / they want to keep it:
   - Politely ask them to SPELL it letter by letter to confirm.
   - Then repeat it back and confirm it is correct.
@@ -81,9 +80,8 @@ For this call:
         threshold: 0.85,
         prefix_padding_ms: 300,
         silence_duration_ms: 700,
-        create_response: true,
-        interrupt_response: false, // 🔥 disable server barge-in
-        idle_timeout_ms: 8000, // 🔥 optional: still answer if VAD gets weird
+        create_response: false,     // ❌ let US call response.create
+        interrupt_response: false,  // ❌ no server barge-in
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
@@ -143,6 +141,9 @@ export function attachMediaStreamServer(server) {
       // For summarizer
       let qaPairs = [];
       let pendingUserQ = null;
+
+      // response state
+      let hasActiveResponse = false;
 
       const started = new Set();
       const openAiWs = createOpenAIWebSocket();
@@ -226,6 +227,11 @@ export function attachMediaStreamServer(server) {
         try {
           const msg = JSON.parse(data);
 
+          // track response state
+          if (msg.type === "response.created") {
+            hasActiveResponse = true;
+          }
+
           // --- 1) Capture user questions from transcription for summarizer ---
           if (
             msg.type === "conversation.item.input_audio_transcription.completed"
@@ -240,6 +246,18 @@ export function attachMediaStreamServer(server) {
 
             if (q) {
               pendingUserQ = q;
+            }
+          }
+
+          // --- 1b) Manual turn handling: when user stops talking, trigger response ---
+          if (msg.type === "input_audio_buffer.speech_stopped") {
+            // Only create a new response if none is currently active
+            if (!hasActiveResponse && openAiWs.readyState === WebSocket.OPEN) {
+              try {
+                openAiWs.send(JSON.stringify({ type: "response.create" }));
+              } catch (e) {
+                console.error("manual response.create error", e);
+              }
             }
           }
 
@@ -268,6 +286,8 @@ export function attachMediaStreamServer(server) {
 
           // --- 3) On completed assistant response: build QA pairs + detect goodbye ---
           if (msg.type === "response.done") {
+            hasActiveResponse = false; // response finished
+
             const outputs = msg.response?.output || [];
             for (const out of outputs) {
               if (out?.role !== "assistant") continue;
@@ -331,7 +351,9 @@ export function attachMediaStreamServer(server) {
                 callerFrom;
 
               calledTo =
-                data.start?.customParameters?.to || data.start?.to || calledTo;
+                data.start?.customParameters?.to ||
+                data.start?.to ||
+                calledTo;
 
               await Call.findOrCreate({
                 where: { callSid },
