@@ -2,7 +2,9 @@ import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
 import Call from "../models/Call.js";
-import {SYSTEM_MESSAGE} from "./prompt.js";
+import { SYSTEM_MESSAGE } from "./prompt.js";
+import { summarizer } from "./summery.js";
+
 dotenv.config();
 
 const {
@@ -14,8 +16,6 @@ const {
 } = process.env;
 
 const MODEL = "gpt-4o-realtime-preview-2024-12-17";
-
-
 
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
@@ -92,6 +92,10 @@ export function attachMediaStreamServer(server) {
       let greetingSent = false;
       let hangupScheduled = false;
 
+      // For summarizer
+      let qaPairs = [];
+      let pendingUserQ = null;
+
       const started = new Set();
       const openAiWs = createOpenAIWebSocket();
 
@@ -158,7 +162,25 @@ export function attachMediaStreamServer(server) {
         try {
           const msg = JSON.parse(data);
 
-          // Stream assistant audio back to Twilio
+          // --- 1) Capture user questions from transcription for summarizer ---
+          if (
+            msg.type === "conversation.item.input_audio_transcription.completed"
+          ) {
+            const q =
+              (typeof msg.transcript === "string" && msg.transcript.trim()) ||
+              (
+                msg.item?.content?.find?.(
+                  (c) => typeof c?.transcript === "string"
+                )?.transcript || ""
+              ).trim();
+
+            if (q) {
+              pendingUserQ = q;
+              // console.log("User question:", q);
+            }
+          }
+
+          // --- 2) Stream assistant audio back to Twilio ---
           if (
             (msg.type === "response.audio.delta" ||
               msg.type === "response.output_audio.delta") &&
@@ -181,11 +203,12 @@ export function attachMediaStreamServer(server) {
             }
           }
 
-          // Detect goodbye in completed assistant turns
+          // --- 3) On completed assistant response: build QA pairs + detect goodbye ---
           if (msg.type === "response.done") {
             const outputs = msg.response?.output || [];
             for (const out of outputs) {
               if (out?.role !== "assistant") continue;
+
               const part = Array.isArray(out.content)
                 ? out.content.find(
                     (c) =>
@@ -193,7 +216,20 @@ export function attachMediaStreamServer(server) {
                   )
                 : null;
               const a = (part?.transcript || "").trim();
-              if (a && isGoodbye(a)) {
+
+              if (!a) continue;
+
+              // build Q/A pairs for summarizer
+              if (pendingUserQ) {
+                qaPairs.push({ q: pendingUserQ, a });
+                pendingUserQ = null;
+              } else {
+                // no explicit question (could be greeting, follow-ups)
+                qaPairs.push({ q: null, a });
+              }
+
+              // goodbye detection
+              if (isGoodbye(a)) {
                 scheduleHangup();
               }
             }
@@ -298,7 +334,8 @@ export function attachMediaStreamServer(server) {
 
       connection.on("message", onTwilioMessage);
 
-      connection.on("close", () => {
+      connection.on("close", async () => {
+        // close OpenAI WS if still open
         if (openAiWs.readyState === WebSocket.OPEN) {
           try {
             openAiWs.close();
@@ -306,6 +343,7 @@ export function attachMediaStreamServer(server) {
             console.error("openai.close error", e);
           }
         }
+
         console.log(
           "Call closed. From",
           callerFrom,
@@ -316,6 +354,14 @@ export function attachMediaStreamServer(server) {
           "Stream SID",
           streamSid
         );
+
+        // --- Call your summarizer with all Q/A pairs ---
+        try {
+          const allData = await summarizer(qaPairs, callSid, callerFrom);
+          console.log("📄 Summarizer result:", JSON.stringify({ allData }));
+        } catch (e) {
+          console.error("summarizer error:", e?.message || e);
+        }
       });
     });
 
