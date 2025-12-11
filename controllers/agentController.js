@@ -154,10 +154,10 @@ export const getAllAgents = async (req, res) => {
       ],
       order: [["rating", "DESC"]],
     });
-
+    console.log(JSON.stringify(agents));
     const result = await Promise.all(
       agents.map(async (agent) => {
-        // Get all tickets for this agent
+        // --- Get all tickets for this agent ---
         const tickets = await Ticket.findAll({
           where: { agentId: agent.id },
           attributes: [
@@ -173,30 +173,56 @@ export const getAllAgents = async (req, res) => {
         // Attach user to each ticket
         const ticketsWithUsers = await Promise.all(
           tickets.map(async (ticket) => {
-            let userId = ticket.userId;
+            let userData = null;
+
             if (ticket.userId) {
               const user = await User.findOne({
                 where: { id: ticket.userId },
                 attributes: ["id", "name", "email", "phone"],
               });
-              userId = user;
+              userData = user;
             }
+
             return {
               ...ticket.toJSON(),
-              userId,
+              user: userData, // changed key so it's clearer than 'userId'
             };
           })
         );
 
+        // --- Get all ratings for this agent ---
+        const ratings = await Rating.findAll({
+          where: { agentId: agent.id },
+          attributes: [
+            "id",
+            "score",
+            "comments",
+            "userId",
+            "ticketId",
+            "createdAt",
+          ],
+        });
+
+        // --- Calculate average rating ---
+        let averageRating = null;
+        if (ratings.length > 0) {
+          const total = ratings.reduce((sum, r) => sum + r.score, 0);
+          averageRating = total / ratings.length;
+        }
+
         return {
           ...agent.toJSON(),
           tickets: ticketsWithUsers,
+          ratings, // all rating records for this agent
+          averageRating, // computed average (null if no ratings)
+          ratingsCount: ratings.length,
         };
       })
     );
 
     res.json(result);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: error.message });
   }
 };

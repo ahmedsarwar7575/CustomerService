@@ -46,16 +46,17 @@ CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
 For this call:
 - Treat the caller as a returning customer.
 - In your first reply, greet them warmly using their name "${
-      userProfile.name || ""
-    }" and ask how you can help today.
+        userProfile.name || ""
+      }" and ask how you can help today.
 - Do NOT ask "What is your name?" as if you do not know it.
 - You already know their email on file: "${userProfile.email || ""}".
 - At a natural moment early in the conversation, say something like:
-  "We have your email as ${userProfile.email ||
-    ""}. Do you want to keep this email or change it?"
+  "We have your email as ${
+    userProfile.email || ""
+  }. Do you want to keep this email or change it?"
+    But always ask for email confirmation at end that we have your email do you want to keep it or not.
 - If they say it is correct / they want to keep it:
-  - Politely ask them to SPELL it letter by letter to confirm.
-  - Then repeat it back and confirm it is correct.
+Say something like: "Great! I’ll keep that email."
 - If they want to change it:
   - Collect a NEW email using the normal spell-and-confirm flow.
 - You do NOT need to re-collect their name unless they say it is wrong or want to change it. 
@@ -80,8 +81,8 @@ For this call:
         threshold: 0.85,
         prefix_padding_ms: 300,
         silence_duration_ms: 700,
-        create_response: false,     // ❌ let US call response.create
-        interrupt_response: false,  // ❌ no server barge-in
+        create_response: false, // ❌ let US call response.create
+        interrupt_response: false, // ❌ no server barge-in
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
@@ -104,13 +105,7 @@ function isGoodbye(text = "") {
   const t = text.toLowerCase();
   return (
     t.includes("goodbye") ||
-    t.includes("bye-bye") ||
-    /\bbye\b/.test(t) ||
-    t.includes("talk to you soon") ||
-    t.includes("see you") ||
-    t.includes("thanks for calling") ||
-    t.includes("have a nice day") ||
-    t.includes("have a great day")
+    /\bbye\b/.test(t)
   );
 }
 
@@ -351,9 +346,7 @@ export function attachMediaStreamServer(server) {
                 callerFrom;
 
               calledTo =
-                data.start?.customParameters?.to ||
-                data.start?.to ||
-                calledTo;
+                data.start?.customParameters?.to || data.start?.to || calledTo;
 
               await Call.findOrCreate({
                 where: { callSid },
