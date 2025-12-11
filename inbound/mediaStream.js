@@ -10,7 +10,7 @@ dotenv.config();
 
 const {
   OPENAI_API_KEY,
-  REALTIME_VOICE = "alloy",
+  REALTIME_VOICE = "fable",
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   PUBLIC_BASE_URL,
@@ -72,7 +72,15 @@ For this call:
   - Ask for and confirm their NAME.
   - Ask for and confirm their EMAIL with spelling, repeat, and confirmation.
 `;
-
+const calmVoiceStyle = `
+==================================================
+VOICE STYLE
+==================================================
+- You are using the Fable voice.
+- Speak in a calm, soft, relaxed tone.
+- Talk slightly slower than normal, but not robotic.
+- Avoid sounding overly excited or dramatic.
+`;
   return {
     type: "session.update",
     session: {
@@ -87,7 +95,7 @@ For this call:
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
-      instructions: SYSTEM_MESSAGE + dynamicContext,
+      instructions: SYSTEM_MESSAGE + dynamicContext + calmVoiceStyle,
       modalities: ["text", "audio"],
       temperature: 0.7,
       input_audio_transcription: {
