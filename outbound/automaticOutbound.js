@@ -3,6 +3,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
 dotenv.config();
+
 import User from "../models/user.js";
 import { makeSystemMessage } from "./prompt.js";
 import Call from "../models/Call.js";
@@ -89,7 +90,7 @@ function buildSessionUpdate(instructions) {
   };
 }
 
-// small helper to detect goodbye and end call
+// detect when assistant is saying goodbye
 function isGoodbye(text = "") {
   const t = text.toLowerCase();
   return (
@@ -106,6 +107,7 @@ function isGoodbye(text = "") {
 // returns true if kickoff sent
 function kickoff(openAiWs, instructions) {
   try {
+    // configure session + send first greeting turn
     openAiWs.send(JSON.stringify(buildSessionUpdate(instructions)));
     openAiWs.send(
       JSON.stringify({
@@ -113,7 +115,7 @@ function kickoff(openAiWs, instructions) {
         response: {
           modalities: ["audio"],
           instructions:
-            "Call has just connected. Greet them by name if known. Ask in one short sentence if this is a good moment to talk. Then give a very short value pitch about why you are calling. Keep tone calm and friendly.",
+            "Call has just connected. You must speak first. Greet the customer by name if known, in English, with 1–2 short sentences, and briefly say why you are calling. Then ask one short question to start the conversation, and wait for their reply.",
         },
       })
     );
@@ -129,8 +131,6 @@ export function createUpsellWSS() {
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
   wss.on("connection", async (connection, req) => {
-    console.log(`[WS] Twilio connected ${req?.url || ""}`);
-
     let userId = null;
     let kind = null;
     let user = null;
@@ -145,6 +145,7 @@ export function createUpsellWSS() {
     let commitTimer = null;
     let metricsTimer = null;
     let hangupScheduled = false;
+    let twilioStarted = false; // 👈 so AI only starts after Twilio start
 
     let mediaQueue = [];
 
@@ -168,9 +169,10 @@ export function createUpsellWSS() {
     const startMetrics = () => {
       if (metricsTimer) return;
       metricsTimer = setInterval(() => {
-        console.log(
-          `[METRICS] in=${framesIn}/${bytesIn}B out=${framesOut}/${bytesOut}B active=${hasActiveResponse} openai=${openaiReady} marks=${markQueue.length}`
-        );
+        // Uncomment if you want metrics spam:
+        // console.log(
+        //   `[METRICS] in=${framesIn}/${bytesIn}B out=${framesOut}/${bytesOut}B active=${hasActiveResponse} openai=${openaiReady} marks=${markQueue.length}`
+        // );
       }, 3000);
     };
 
@@ -231,20 +233,17 @@ export function createUpsellWSS() {
       }
     }
 
-    console.log("[WS] userID", userId);
-    console.log("[WS] kind", kind);
-    console.log("[WS] user", user);
-
     // will run once to configure OpenAI session / greet caller / start commit loop / flush queued audio
     const configureSessionIfNeeded = async () => {
       if (sessionConfigured) return;
       if (!openaiReady) return;
+      if (!twilioStarted) return; // 👈 wait until Twilio "start" event
 
       try {
         let pickedKind = inferKind() || "upsell";
 
         const instr = await makeSystemMessage(userId, pickedKind);
-        console.log("[OPENAI] FINAL SYSTEM MESSAGE >>>", instr);
+        // console.log("[OPENAI] FINAL SYSTEM MESSAGE >>>", instr);
 
         sessionConfigured = kickoff(openAiWs, instr);
 
@@ -313,8 +312,8 @@ export function createUpsellWSS() {
       try {
         const msg = JSON.parse(buf);
 
-        // NOTE: we no longer cancel on speech_started -> avoids tiny-noise barge-in
-        // if (msg.type === "input_audio_buffer.speech_started") { ... }  <-- removed
+        // We do NOT cancel on speech_started (no noisy barge-in)
+        // if (msg.type === "input_audio_buffer.speech_started") { ... }
 
         if (msg.type === "input_audio_buffer.speech_stopped") {
           console.log("[OPENAI] speech_stopped");
@@ -388,7 +387,7 @@ export function createUpsellWSS() {
                 } else {
                   qaPairs.push({ q: null, a });
                 }
-                console.log("[Q/A]", qaPairs[qaPairs.length - 1]);
+                // console.log("[Q/A]", qaPairs[qaPairs.length - 1]);
 
                 // goodbye detection -> hang up after 5s
                 if (isGoodbye(a)) {
@@ -417,10 +416,11 @@ export function createUpsellWSS() {
               `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
             );
 
+            twilioStarted = true; // 👈 Twilio started; now we allow kickoff
+
             const cp = (data.start && data.start.customParameters) || {};
             if (!kind && typeof cp.kind === "string") kind = cp.kind;
             if (!userId && typeof cp.userId === "string") userId = cp.userId;
-            console.log("[TWILIO] start customParameters", cp);
 
             if (!user || String(user.id) !== String(userId)) {
               try {
