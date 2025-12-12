@@ -536,14 +536,22 @@ export function createUpsellWSS() {
       try {
         if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
       } catch {}
+    
       console.log("[SUMMARY] qaPairs", qaPairs.length);
-
+    
       try {
-        await processCallOutcome(qaPairs, userId, callSid);
+        const result = await processCallOutcome({
+          qaPairs,
+          userId,
+          callSid,
+          campaignType: kind || "upsell", // or "satisfaction" depending on call
+        });
+        console.log("[SUMMARY] outcome", result?.outcome);
       } catch (e) {
         console.error("[SUMMARY] summarize error", e?.message || e);
       }
     });
+    
 
     connection.on("error", (e) => console.error("[WS] error", e?.message || e));
   });
