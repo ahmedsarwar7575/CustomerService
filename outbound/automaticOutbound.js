@@ -7,10 +7,13 @@ import User from "../models/user.js";
 import { makeSystemMessage } from "./prompt.js";
 import Call from "../models/Call.js";
 import processCallOutcome from "./summerize.js";
+
 const {
   OPENAI_API_KEY,
   REALTIME_VOICE = "alloy",
   REALTIME_MODEL,
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
 } = process.env;
 
 const RT_MODEL = REALTIME_MODEL || "gpt-4o-realtime-preview";
@@ -18,6 +21,11 @@ const RT_MODEL = REALTIME_MODEL || "gpt-4o-realtime-preview";
 if (!OPENAI_API_KEY) {
   console.error("[OPENAI] ERROR: Missing OPENAI_API_KEY in environment");
 }
+
+const twilioClient =
+  TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
+    ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    : null;
 
 function createOpenAIWs() {
   const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
@@ -64,9 +72,11 @@ function buildSessionUpdate(instructions) {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.6,
-        prefix_padding_ms: 200,
-        silence_duration_ms: 300,
+        threshold: 0.85, // less sensitive to tiny noise
+        prefix_padding_ms: 300,
+        silence_duration_ms: 700,
+        create_response: false, // we call response.create manually
+        interrupt_response: false, // no server barge-in
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
@@ -79,6 +89,20 @@ function buildSessionUpdate(instructions) {
   };
 }
 
+// small helper to detect goodbye and end call
+function isGoodbye(text = "") {
+  const t = text.toLowerCase();
+  return (
+    t.includes("goodbye") ||
+    /\bbye\b/.test(t) ||
+    t.includes("talk to you soon") ||
+    t.includes("see you") ||
+    t.includes("thanks for your time") ||
+    t.includes("have a nice day") ||
+    t.includes("have a great day")
+  );
+}
+
 // returns true if kickoff sent
 function kickoff(openAiWs, instructions) {
   try {
@@ -89,7 +113,7 @@ function kickoff(openAiWs, instructions) {
         response: {
           modalities: ["audio"],
           instructions:
-            "Greet them by name if known. Ask if this is a good moment in one sentence. Then give a short value pitch.",
+            "Call has just connected. Greet them by name if known. Ask in one short sentence if this is a good moment to talk. Then give a very short value pitch about why you are calling. Keep tone calm and friendly.",
         },
       })
     );
@@ -120,6 +144,7 @@ export function createUpsellWSS() {
     let sessionConfigured = false;
     let commitTimer = null;
     let metricsTimer = null;
+    let hangupScheduled = false;
 
     let mediaQueue = [];
 
@@ -163,7 +188,25 @@ export function createUpsellWSS() {
       } catch {}
     };
 
-    // parse userId/kind off ws URL (Twilio did not send kind in your log, but we still try)
+    function scheduleHangup() {
+      if (hangupScheduled || !callSid || !twilioClient) return;
+      hangupScheduled = true;
+      setTimeout(() => {
+        twilioClient
+          .calls(callSid)
+          .update({ status: "completed" })
+          .then(() => {
+            console.log(
+              `[TWILIO] Hung up outbound call ${callSid} 5s after goodbye.`
+            );
+          })
+          .catch((err) => {
+            console.error("[TWILIO] hangup error", err?.message || err);
+          });
+      }, 5000);
+    }
+
+    // parse userId/kind off ws URL
     try {
       const url = new URL(req?.url || "", "http://localhost");
       const parts = url.pathname.split("/").filter(Boolean);
@@ -270,25 +313,17 @@ export function createUpsellWSS() {
       try {
         const msg = JSON.parse(buf);
 
-        if (msg.type === "input_audio_buffer.speech_started") {
-          console.log("[OPENAI] speech_started");
-          if (markQueue.length) {
-            try {
-              openAiWs.send(JSON.stringify({ type: "response.cancel" }));
-            } catch {}
-            try {
-              connection.send(JSON.stringify({ event: "clear", streamSid }));
-            } catch {}
-            markQueue = [];
-          }
-        }
+        // NOTE: we no longer cancel on speech_started -> avoids tiny-noise barge-in
+        // if (msg.type === "input_audio_buffer.speech_started") { ... }  <-- removed
 
         if (msg.type === "input_audio_buffer.speech_stopped") {
           console.log("[OPENAI] speech_stopped");
           if (!hasActiveResponse) {
             try {
               openAiWs.send(JSON.stringify({ type: "response.create" }));
-            } catch {}
+            } catch (e) {
+              console.error("manual response.create error", e);
+            }
           }
         }
 
@@ -354,6 +389,11 @@ export function createUpsellWSS() {
                   qaPairs.push({ q: null, a });
                 }
                 console.log("[Q/A]", qaPairs[qaPairs.length - 1]);
+
+                // goodbye detection -> hang up after 5s
+                if (isGoodbye(a)) {
+                  scheduleHangup();
+                }
               }
             }
           }
@@ -395,20 +435,18 @@ export function createUpsellWSS() {
             await configureSessionIfNeeded();
 
             try {
-              if (callSid) {
+              if (callSid && twilioClient) {
                 await Call.findOrCreate({
-                  where: { callSid }, // <-- IMPORTANT: must match your model
+                  where: { callSid },
                   defaults: {
                     callSid,
                   },
                 });
-                const client = twilio(
-                  process.env.TWILIO_ACCOUNT_SID,
-                  process.env.TWILIO_AUTH_TOKEN
-                );
+
                 const base =
                   process.env.PUBLIC_BASE_URL || "https://example.com";
-                await client.calls(callSid).recordings.create({
+
+                await twilioClient.calls(callSid).recordings.create({
                   recordingStatusCallback: `${base}/recording-status`,
                   recordingStatusCallbackEvent: [
                     "in-progress",
