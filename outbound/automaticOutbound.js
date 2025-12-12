@@ -11,7 +11,7 @@ import processCallOutcome from "./summerize.js";
 
 const {
   OPENAI_API_KEY,
-  REALTIME_VOICE = "alloy",
+  REALTIME_VOICE = "echo", // you can set Fable/Fable-v2/etc via env if you want
   REALTIME_MODEL,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
@@ -27,6 +27,9 @@ const twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
     ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
+
+// Wait a bit longer after goodbye so last words are not cut
+const GOODBYE_HANGUP_DELAY_MS = 8000; // 8 seconds
 
 function createOpenAIWs() {
   const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
@@ -82,10 +85,17 @@ function buildSessionUpdate(instructions) {
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
-      instructions,
+      instructions:
+        instructions +
+        "\n\nIMPORTANT: Always speak ONLY in English. Use a calm, clear, natural tone, not rushed. Never switch to any other language even if the user does.",
       modalities: ["text", "audio"],
       temperature: 0.7,
-      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+      input_audio_transcription: {
+        model: "gpt-4o-mini-transcribe",
+        language: "en", // strict English transcription
+        prompt:
+          "The caller and assistant speak ONLY English. Even with an accent or background noise, always transcribe as clear English.",
+      },
     },
   };
 }
@@ -115,7 +125,7 @@ function kickoff(openAiWs, instructions) {
         response: {
           modalities: ["audio"],
           instructions:
-            "Call has just connected. You must speak first. Greet the customer by name if known, in English, with 1–2 short sentences, and briefly say why you are calling. Then ask one short question to start the conversation, and wait for their reply.",
+            "The call has just connected. You must speak first. In English, greet the customer by name if known, in a calm and friendly tone, using 1–2 short sentences. Briefly explain why you are calling, then ask one short question to start the conversation, and wait for their reply. Always end the call with a short polite goodbye like 'Thank you for your time, have a great day, goodbye.'",
         },
       })
     );
@@ -132,7 +142,7 @@ export function createUpsellWSS() {
 
   wss.on("connection", async (connection, req) => {
     let userId = null;
-    let kind = null;
+    let kind = null; // "satisfaction" | "upsell"
     let user = null;
 
     let streamSid = null;
@@ -142,10 +152,11 @@ export function createUpsellWSS() {
     let pendingUserQ = null;
     let openaiReady = false;
     let sessionConfigured = false;
+    let sessionConfigInProgress = false;
     let commitTimer = null;
     let metricsTimer = null;
     let hangupScheduled = false;
-    let twilioStarted = false; // 👈 so AI only starts after Twilio start
+    let twilioStarted = false; // AI only starts after Twilio "start"
 
     let mediaQueue = [];
 
@@ -160,6 +171,7 @@ export function createUpsellWSS() {
     function inferKind() {
       if (kind) return kind;
       if (user) {
+        // fallback only; your cron passes kind explicitly
         if (user.isSatisfactionCall === false) return "satisfaction";
         if (user.isUpSellCall === false) return "upsell";
       }
@@ -169,7 +181,7 @@ export function createUpsellWSS() {
     const startMetrics = () => {
       if (metricsTimer) return;
       metricsTimer = setInterval(() => {
-        // Uncomment if you want metrics spam:
+        // Uncomment to debug media stats:
         // console.log(
         //   `[METRICS] in=${framesIn}/${bytesIn}B out=${framesOut}/${bytesOut}B active=${hasActiveResponse} openai=${openaiReady} marks=${markQueue.length}`
         // );
@@ -199,13 +211,13 @@ export function createUpsellWSS() {
           .update({ status: "completed" })
           .then(() => {
             console.log(
-              `[TWILIO] Hung up outbound call ${callSid} 5s after goodbye.`
+              `[TWILIO] Hung up outbound call ${callSid} ${GOODBYE_HANGUP_DELAY_MS}ms after goodbye.`
             );
           })
           .catch((err) => {
             console.error("[TWILIO] hangup error", err?.message || err);
           });
-      }, 5000);
+      }, GOODBYE_HANGUP_DELAY_MS);
     }
 
     // parse userId/kind off ws URL
@@ -225,6 +237,13 @@ export function createUpsellWSS() {
       } catch {}
     }
 
+    // normalize kind a bit
+    if (typeof kind === "string") {
+      const k = kind.toLowerCase();
+      if (k === "satisfaction" || k === "sat") kind = "satisfaction";
+      else if (k === "upsell" || k === "up") kind = "upsell";
+    }
+
     if (userId) {
       try {
         user = await User.findOne({ where: { id: userId } });
@@ -233,14 +252,15 @@ export function createUpsellWSS() {
       }
     }
 
-    // will run once to configure OpenAI session / greet caller / start commit loop / flush queued audio
+    // Configure OpenAI session / greet / start commit loop / flush queued audio
     const configureSessionIfNeeded = async () => {
-      if (sessionConfigured) return;
+      if (sessionConfigured || sessionConfigInProgress) return;
       if (!openaiReady) return;
-      if (!twilioStarted) return; // 👈 wait until Twilio "start" event
+      if (!twilioStarted) return; // wait until Twilio "start"
 
+      sessionConfigInProgress = true;
       try {
-        let pickedKind = inferKind() || "upsell";
+        const pickedKind = inferKind() || "upsell";
 
         const instr = await makeSystemMessage(userId, pickedKind);
         // console.log("[OPENAI] FINAL SYSTEM MESSAGE >>>", instr);
@@ -286,6 +306,8 @@ export function createUpsellWSS() {
           "[OPENAI] configureSessionIfNeeded error",
           e?.message || e
         );
+      } finally {
+        sessionConfigInProgress = false;
       }
     };
 
@@ -312,7 +334,7 @@ export function createUpsellWSS() {
       try {
         const msg = JSON.parse(buf);
 
-        // We do NOT cancel on speech_started (no noisy barge-in)
+        // We do NOT cancel on speech_started (so tiny noise doesn't kill TTS)
         // if (msg.type === "input_audio_buffer.speech_started") { ... }
 
         if (msg.type === "input_audio_buffer.speech_stopped") {
@@ -389,7 +411,7 @@ export function createUpsellWSS() {
                 }
                 // console.log("[Q/A]", qaPairs[qaPairs.length - 1]);
 
-                // goodbye detection -> hang up after 5s
+                // goodbye detection -> hang up after delay
                 if (isGoodbye(a)) {
                   scheduleHangup();
                 }
@@ -416,7 +438,7 @@ export function createUpsellWSS() {
               `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
             );
 
-            twilioStarted = true; // 👈 Twilio started; now we allow kickoff
+            twilioStarted = true; // Twilio started; now we allow kickoff
 
             const cp = (data.start && data.start.customParameters) || {};
             if (!kind && typeof cp.kind === "string") kind = cp.kind;
@@ -536,22 +558,21 @@ export function createUpsellWSS() {
       try {
         if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
       } catch {}
-    
+
       console.log("[SUMMARY] qaPairs", qaPairs.length);
-    
+
       try {
         const result = await processCallOutcome({
           qaPairs,
           userId,
           callSid,
-          campaignType: kind || "upsell", // or "satisfaction" depending on call
+          campaignType: kind || "upsell", // or "satisfaction" from query
         });
         console.log("[SUMMARY] outcome", result?.outcome);
       } catch (e) {
         console.error("[SUMMARY] summarize error", e?.message || e);
       }
     });
-    
 
     connection.on("error", (e) => console.error("[WS] error", e?.message || e));
   });
