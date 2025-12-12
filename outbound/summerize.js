@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { Op } from "sequelize";
+import sequelize from "../config/db.js"; // 👈 use your shared DB instance
 import User from "../models/user.js";
 import Agent from "../models/agent.js";
 import Call from "../models/Call.js";
@@ -10,6 +11,7 @@ import Rating from "../models/rating.js";
 const now = () => new Date();
 const addDays = (d, n) => new Date(d.getTime() + n * 24 * 60 * 60 * 1000);
 
+/** ---------------- AGENT LOAD BALANCING ---------------- */
 async function getLeastLoadedAgentSafe() {
   try {
     const hasRole = !!Agent?.rawAttributes?.role;
@@ -51,12 +53,50 @@ async function getLeastLoadedAgentSafe() {
   }
 }
 
+/** ---------------- TEXT HELPERS ---------------- */
 const textOfPairs = (pairs) =>
   (Array.isArray(pairs) ? pairs : [])
     .map((p) => `${p.q ?? ""} ${p.a ?? ""}`)
     .join(" ")
     .toLowerCase();
 
+/**
+ * Try to pull a 1–5 rating from the Q/A text (fallback if LLM misses it).
+ * Looks for patterns like "4", "4/5", "4 out of 5", "4 stars".
+ */
+function extractRatingFromPairs(qaPairs) {
+  if (!Array.isArray(qaPairs)) {
+    return { rating: null, comment: null };
+  }
+
+  const RATING_REGEX =
+    /\b([1-5])\b\s*(?:stars?|star|out of 5|\/5)?/i;
+
+  // search from last pair backwards (most recent answer first)
+  for (let i = qaPairs.length - 1; i >= 0; i--) {
+    const p = qaPairs[i] || {};
+    const candidates = [
+      p.q != null ? String(p.q) : "",
+      p.a != null ? String(p.a) : "",
+    ];
+    for (const txt of candidates) {
+      const m = txt.match(RATING_REGEX);
+      if (m) {
+        const rating = parseInt(m[1], 10);
+        if (!Number.isNaN(rating) && rating >= 1 && rating <= 5) {
+          return {
+            rating,
+            comment: txt.trim() || null,
+          };
+        }
+      }
+    }
+  }
+
+  return { rating: null, comment: null };
+}
+
+/** ---------------- OUTCOME DETECTORS (RULE-BASED FALLBACK) ---------------- */
 function detectSatisfactionCase(qaPairs) {
   const t = textOfPairs(qaPairs);
 
@@ -79,6 +119,7 @@ function detectSatisfactionCase(qaPairs) {
   if (yesSatisfied) return "satisfied";
   if (explicitNo) return "not_satisfied";
   if (noResponseOrCut) return "no_response";
+
   const issue =
     /\b(refund|charge|error|bug|fail|declined|problem|issue|login|shipment|lost|delay)\b/.test(
       t
@@ -113,6 +154,7 @@ function detectUpsellCase(qaPairs) {
   return "no_response";
 }
 
+/** ---------------- FOLLOW-UP LOGIC ---------------- */
 function computeFollowup(campaignType, outcomeCase) {
   const nowDate = now();
   if (campaignType === "satisfaction" && outcomeCase === "satisfied") {
@@ -140,6 +182,7 @@ function buildFollowupPatch(campaignType, followupAt) {
   return {};
 }
 
+/** ---------------- MISC HELPERS ---------------- */
 const cleanLanguages = (arr) => {
   if (!Array.isArray(arr)) return [];
   return Array.from(
@@ -149,6 +192,7 @@ const cleanLanguages = (arr) => {
   );
 };
 
+/** ---------------- MOCK OUTCOME (NO LLM) ---------------- */
 function mockOutcomeExtract(qaPairs, campaignType) {
   const outcome_case =
     campaignType === "satisfaction"
@@ -158,6 +202,7 @@ function mockOutcomeExtract(qaPairs, campaignType) {
   const customerLine = (
     qaPairs.find((p) => /customer/i.test(p.q || ""))?.a || ""
   ).slice(0, 160);
+
   const summary =
     customerLine ||
     (campaignType === "satisfaction"
@@ -172,17 +217,29 @@ function mockOutcomeExtract(qaPairs, campaignType) {
       ? "Customer is not interested in the upsell offer."
       : "No clear response to upsell offer; call may have been cut or unclear.");
 
+  // rating fallback in mock mode (only for satisfaction)
+  let rating_score = "not_specified";
+  let rating_comment = "not_specified";
+  if (campaignType === "satisfaction") {
+    const { rating, comment } = extractRatingFromPairs(qaPairs);
+    if (rating != null) {
+      rating_score = rating;
+      rating_comment = comment || "not_specified";
+    }
+  }
+
   return {
     outcome_case,
     summary,
     non_english_detected: [],
     clarifications_needed: [],
     mishears_or_typos: [],
-    rating_score: null,
-    rating_comment: null,
+    rating_score,
+    rating_comment,
   };
 }
 
+/** ---------------- LLM OUTCOME EXTRACTOR ---------------- */
 async function extractOutcomeWithLLM(qaPairs, campaignType) {
   const system = [
     "You are an accurate, terse extractor for GETPIE outbound customer calls.",
@@ -287,11 +344,11 @@ ${JSON.stringify(qaPairs, null, 2)}
   }
 }
 
+/** ---------------- MAIN ENTRY ---------------- */
 export async function processCallOutcome({
   qaPairs,
   userId,
   callSid,
-  sequelize,
   campaignType,
 }) {
   if (!Array.isArray(qaPairs) || !qaPairs.length)
@@ -355,6 +412,7 @@ export async function processCallOutcome({
 
     const languages = cleanLanguages(parsed?.non_english_detected);
 
+    /** ---- Rating parsing (primary LLM, fallback regex) ---- */
     const rawScore = parsed?.rating_score;
     let ratingScore = null;
     if (campaignType === "satisfaction") {
@@ -366,6 +424,17 @@ export async function processCallOutcome({
         if (trimmed !== "not_specified" && trimmed !== "not specified") {
           const n = parseInt(trimmed, 10);
           if (!Number.isNaN(n) && n >= 1 && n <= 5) ratingScore = n;
+        }
+      }
+
+      // fallback: regex on raw conversation if LLM didn't give rating
+      if (ratingScore == null) {
+        const { rating, comment } = extractRatingFromPairs(qaPairs);
+        if (rating != null) {
+          ratingScore = rating;
+          if (!parsed.rating_comment && comment) {
+            parsed.rating_comment = comment;
+          }
         }
       }
     }
@@ -381,6 +450,25 @@ export async function processCallOutcome({
 
     const followupAt = computeFollowup(campaignType, outcomeCase);
 
+    // Normalized booleans for satisfaction / upsell
+    const customerSatisfied =
+      campaignType === "satisfaction"
+        ? outcomeCase === "satisfied"
+          ? true
+          : outcomeCase === "not_satisfied"
+          ? false
+          : null
+        : null;
+
+    const customerInterestedInUpsell =
+      campaignType === "upsell"
+        ? outcomeCase === "interested"
+          ? true
+          : outcomeCase === "not_interested"
+          ? false
+          : null
+        : null;
+
     let makeSupportTicket = false;
     let makeSalesTicket = false;
 
@@ -395,6 +483,7 @@ export async function processCallOutcome({
     }
 
     const result = await sequelize.transaction(async (t) => {
+      // update user flags for campaign
       const userPatch = {};
       if (campaignType === "satisfaction") userPatch.isSatisfactionCall = true;
       if (campaignType === "upsell") userPatch.isUpSellCall = true;
@@ -402,6 +491,7 @@ export async function processCallOutcome({
         await user.update(userPatch, { transaction: t });
       }
 
+      // create Rating row if we have a rating (satisfaction only)
       let ratingRecord = null;
       if (campaignType === "satisfaction" && ratingScore != null) {
         const latestTicket = await Ticket.findOne({
@@ -420,20 +510,11 @@ export async function processCallOutcome({
             },
             { transaction: t }
           );
-          // sendEmail(
-          //   "info@getpiepay.com",
-          //   "New rating submitted",
-          //   `New rating: ${JSON.stringify({
-          //     score: ratingScore,
-          //     comments: ratingComment,
-          //     userId,
-          //     ticketId: latestTicket.id,
-          //     agentId: latestTicket.agentId,
-          //   })}`
-          // );
+          // sendEmail(...)
         }
       }
 
+      // create ticket for follow-up if needed
       let ticket = null;
       if (makeSupportTicket || makeSalesTicket) {
         const { agentId } = await getLeastLoadedAgentSafe();
@@ -455,20 +536,7 @@ export async function processCallOutcome({
           },
           { transaction: t }
         );
-
-        // sendEmail(
-        //   "info@getpiepay.com",
-        //   "New outbound ticket created",
-        //   `New ticket created: ${JSON.stringify({
-        //     status: "open",
-        //     ticketType: makeSupportTicket ? "support" : "sales",
-        //     priority: "medium",
-        //     isSatisfied: makeSupportTicket ? false : null,
-        //     summary: ticketSummary,
-        //     userId,
-        //     agentId: agentId || null,
-        //   })}`
-        // );
+        // sendEmail(...)
       }
 
       const basePatch = {
@@ -482,10 +550,8 @@ export async function processCallOutcome({
         callSid,
         outboundDetails: null,
         callCategory: campaignType,
-        customerSatisfied:
-          campaignType === "satisfaction" ? outcomeCase === "satisfied" : null,
-        customerInterestedInUpsell:
-          campaignType === "upsell" ? outcomeCase === "interested" : null,
+        customerSatisfied,
+        customerInterestedInUpsell,
       };
 
       const followupPatch = buildFollowupPatch(campaignType, followupAt);
@@ -499,11 +565,7 @@ export async function processCallOutcome({
       let callRow;
       if (affected === 0) {
         callRow = await Call.create(callPatch, { transaction: t });
-        // sendEmail(
-        //   "info@getpiepay.com",
-        //   "New outbound call created",
-        //   `New outbound call created: ${JSON.stringify(callPatch)}`
-        // );
+        // sendEmail(...)
       } else {
         callRow = await Call.findOne({ where: { callSid }, transaction: t });
       }
@@ -519,6 +581,10 @@ export async function processCallOutcome({
           campaignType,
           case: outcomeCase,
           followupAt: followupAt ? followupAt.toISOString() : null,
+          customerSatisfied,
+          customerInterestedInUpsell,
+          ratingScore: ratingScore ?? null,
+          ratingComment,
         },
       };
     });
