@@ -46,20 +46,40 @@ async function getLatestInboundMap() {
     if (r.userId && r.lastInboundAt) m.set(r.userId, new Date(r.lastInboundAt));
   return m;
 }
-
 async function fetchUsersDueByInbound(daysAgo, kind) {
   const { startUtc, endUtc } = dayWindowUtc(daysAgo);
   const latestInboundMap = await getLatestInboundMap();
   const userIds = Array.from(latestInboundMap.keys());
   if (!userIds.length) return [];
 
+  // 🔥 Only pick users we have NOT already called for this campaign
+  const userWhere = {
+    id: { [Op.in]: userIds },
+    phone: { [Op.ne]: null },
+  };
+
+  if (kind === "satisfaction" && User.rawAttributes?.isSatisfactionCall) {
+    // only users where isSatisfactionCall is NULL or FALSE
+    userWhere[Op.or] = [
+      { isSatisfactionCall: null },
+      { isSatisfactionCall: false },
+    ];
+  } else if (kind === "upsell" && User.rawAttributes?.isUpSellCall) {
+    // only users where isUpSellCall is NULL or FALSE
+    userWhere[Op.or] = [
+      { isUpSellCall: null },
+      { isUpSellCall: false },
+    ];
+  }
+
   const users = await User.findAll({
-    where: { id: { [Op.in]: userIds }, phone: { [Op.ne]: null } },
+    where: userWhere,
     order: [["createdAt", "ASC"]],
   });
 
   const markerField =
     kind === "satisfaction" ? "satisfactionForInboundAt" : "upsellForInboundAt";
+
   const entries = [];
 
   for (const u of users) {
@@ -76,15 +96,12 @@ async function fetchUsersDueByInbound(daysAgo, kind) {
       entries.push({ user: u, lastInboundAt });
     } else if (lastInboundAt > startUtc) {
       const nextAt = addDays(lastInboundAt, daysAgo);
-      // console.log(
-      //   `[CRON] ${kind} defer userId=${
-      //     u.id
-      //   } lastInbound=${lastInboundAt.toISOString()} next=${nextAt.toISOString()}`
-      // );
+      // you can log nextAt if you like
     }
   }
   return entries;
 }
+
 
 function makeUrl(userId, kind) {
   const base = PUBLIC_BASE_URL || "https://customerservice-kabe.onrender.com";

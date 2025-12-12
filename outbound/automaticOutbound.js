@@ -11,7 +11,7 @@ import processCallOutcome from "./summerize.js";
 
 const {
   OPENAI_API_KEY,
-  REALTIME_VOICE = "echo", // you can set Fable/Fable-v2/etc via env if you want
+  REALTIME_VOICE = "alloy",
   REALTIME_MODEL,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
@@ -28,9 +28,7 @@ const twilioClient =
     ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
 
-// Wait a bit longer after goodbye so last words are not cut
-const GOODBYE_HANGUP_DELAY_MS = 8000; // 8 seconds
-
+/** ---------------- OPENAI WS FACTORY ---------------- */
 function createOpenAIWs() {
   const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
     RT_MODEL
@@ -70,6 +68,7 @@ function createOpenAIWs() {
   return ws;
 }
 
+/** ---------------- SESSION CONFIG ---------------- */
 function buildSessionUpdate(instructions) {
   return {
     type: "session.update",
@@ -85,22 +84,21 @@ function buildSessionUpdate(instructions) {
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
-      instructions:
-        instructions +
-        "\n\nIMPORTANT: Always speak ONLY in English. Use a calm, clear, natural tone, not rushed. Never switch to any other language even if the user does.",
+      instructions,
       modalities: ["text", "audio"],
       temperature: 0.7,
       input_audio_transcription: {
-        model: "gpt-4o-mini-transcribe",
-        language: "en", // strict English transcription
+        // 🔥 better model + hard English
+        model: "gpt-4o-transcribe-preview",
+        language: "en",
         prompt:
-          "The caller and assistant speak ONLY English. Even with an accent or background noise, always transcribe as clear English.",
+          "Agent and caller must speak ONLY English. If the caller uses any other language, transcribe it as English meaning only.",
       },
     },
   };
 }
 
-// detect when assistant is saying goodbye
+/** ---------------- GOODBYE DETECTION ---------------- */
 function isGoodbye(text = "") {
   const t = text.toLowerCase();
   return (
@@ -114,27 +112,10 @@ function isGoodbye(text = "") {
   );
 }
 
-// returns true if kickoff sent
-function kickoff(openAiWs, instructions) {
-  try {
-    // configure session + send first greeting turn
-    openAiWs.send(JSON.stringify(buildSessionUpdate(instructions)));
-    openAiWs.send(
-      JSON.stringify({
-        type: "response.create",
-        response: {
-          modalities: ["audio"],
-          instructions:
-            "The call has just connected. You must speak first. In English, greet the customer by name if known, in a calm and friendly tone, using 1–2 short sentences. Briefly explain why you are calling, then ask one short question to start the conversation, and wait for their reply. Always end the call with a short polite goodbye like 'Thank you for your time, have a great day, goodbye.'",
-        },
-      })
-    );
-    console.log("[OPENAI] kickoff sent");
-    return true;
-  } catch (e) {
-    console.error("[OPENAI] kickoff error", e?.message || e);
-    return false;
-  }
+/** Simple helper to get a nice display name */
+function getDisplayName(user) {
+  if (!user) return "there";
+  return user.name || user.firstName || "there";
 }
 
 export function createUpsellWSS() {
@@ -152,11 +133,12 @@ export function createUpsellWSS() {
     let pendingUserQ = null;
     let openaiReady = false;
     let sessionConfigured = false;
-    let sessionConfigInProgress = false;
     let commitTimer = null;
     let metricsTimer = null;
     let hangupScheduled = false;
-    let twilioStarted = false; // AI only starts after Twilio "start"
+    let twilioStarted = false;
+    let callStarted = false;
+    let greetingSent = false;
 
     let mediaQueue = [];
 
@@ -171,7 +153,6 @@ export function createUpsellWSS() {
     function inferKind() {
       if (kind) return kind;
       if (user) {
-        // fallback only; your cron passes kind explicitly
         if (user.isSatisfactionCall === false) return "satisfaction";
         if (user.isUpSellCall === false) return "upsell";
       }
@@ -181,7 +162,7 @@ export function createUpsellWSS() {
     const startMetrics = () => {
       if (metricsTimer) return;
       metricsTimer = setInterval(() => {
-        // Uncomment to debug media stats:
+        // Uncomment to debug metrics:
         // console.log(
         //   `[METRICS] in=${framesIn}/${bytesIn}B out=${framesOut}/${bytesOut}B active=${hasActiveResponse} openai=${openaiReady} marks=${markQueue.length}`
         // );
@@ -205,69 +186,108 @@ export function createUpsellWSS() {
     function scheduleHangup() {
       if (hangupScheduled || !callSid || !twilioClient) return;
       hangupScheduled = true;
+      // ⏳ wait longer so closing sentence is NOT cut off
       setTimeout(() => {
         twilioClient
           .calls(callSid)
           .update({ status: "completed" })
           .then(() => {
             console.log(
-              `[TWILIO] Hung up outbound call ${callSid} ${GOODBYE_HANGUP_DELAY_MS}ms after goodbye.`
+              `[TWILIO] Hung up outbound call ${callSid} ~7s after goodbye.`
             );
           })
           .catch((err) => {
             console.error("[TWILIO] hangup error", err?.message || err);
           });
-      }, GOODBYE_HANGUP_DELAY_MS);
+      }, 7000);
     }
 
-    // parse userId/kind off ws URL
-    try {
-      const url = new URL(req?.url || "", "http://localhost");
-      const parts = url.pathname.split("/").filter(Boolean);
-      if (parts[0] === "upsell-stream" && parts[1]) userId = parts[1];
-      kind = url.searchParams.get("kind") || null;
-    } catch {}
-    if (!userId || !kind) {
+    /** --------------- GREETING LOGIC (AGENT SPEAKS FIRST) --------------- */
+    function maybeSendGreeting() {
+      if (greetingSent) return;
+      if (!sessionConfigured) return;
+      if (!callStarted) return;
+      if (openAiWs.readyState !== WebSocket.OPEN) return;
+
+      greetingSent = true;
+
+      const displayName = getDisplayName(user);
+      const k = String(kind || "").toLowerCase();
+
+      let greetingInstruction;
+
+      if (k === "satisfaction") {
+        // Satisfaction campaign greeting
+        greetingInstruction = `
+In this FIRST reply, speak in English only, with a calm, natural tone.
+
+1. Greet the customer by name "${displayName}" if it sounds natural.
+2. Briefly say this is a quick follow-up about their recent support call.
+3. Then clearly ask: "Are you satisfied with the assistance you received?"
+4. After asking, STOP and wait for their answer.
+You must speak first. Keep it to 1–2 short sentences plus the question.
+`.trim();
+      } else {
+        // Upsell campaign greeting
+        greetingInstruction = `
+In this FIRST reply, speak in English only, with a calm, natural tone.
+
+1. Greet the customer by name "${displayName}" if it sounds natural.
+2. Say this is a quick call to share one simple way to help their business grow using their existing payment processing.
+3. Then ask a single short question like: "Is now a good moment to talk for less than a minute?"
+4. After asking, STOP and wait for their answer.
+You must speak first. Keep it brief and friendly.
+`.trim();
+      }
+
       try {
-        const raw = req?.url || "";
-        const qs = raw.includes("?") ? raw.split("?")[1] : "";
-        const sp = new URLSearchParams(qs);
-        userId = userId || sp.get("userId") || null;
-        kind = kind || sp.get("kind") || null;
-      } catch {}
-    }
-
-    // normalize kind a bit
-    if (typeof kind === "string") {
-      const k = kind.toLowerCase();
-      if (k === "satisfaction" || k === "sat") kind = "satisfaction";
-      else if (k === "upsell" || k === "up") kind = "upsell";
-    }
-
-    if (userId) {
-      try {
-        user = await User.findOne({ where: { id: userId } });
+        openAiWs.send(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio"],
+              instructions: greetingInstruction,
+            },
+          })
+        );
+        console.log("[OPENAI] greeting sent (agent spoke first)");
       } catch (e) {
-        console.error("[WS] user load error", e?.message || e);
+        console.error("greeting response.create error", e);
       }
     }
 
-    // Configure OpenAI session / greet / start commit loop / flush queued audio
+    /** --------------- SESSION CONFIG WHEN READY --------------- */
     const configureSessionIfNeeded = async () => {
-      if (sessionConfigured || sessionConfigInProgress) return;
+      if (sessionConfigured) return;
       if (!openaiReady) return;
-      if (!twilioStarted) return; // wait until Twilio "start"
+      if (!twilioStarted) return;
 
-      sessionConfigInProgress = true;
       try {
         const pickedKind = inferKind() || "upsell";
 
-        const instr = await makeSystemMessage(userId, pickedKind);
-        // console.log("[OPENAI] FINAL SYSTEM MESSAGE >>>", instr);
+        let instrBase = await makeSystemMessage(userId, pickedKind);
 
-        sessionConfigured = kickoff(openAiWs, instr);
+        // Global behavior: English only + calm tone
+        const instr =
+          instrBase +
+          `
+          
+GLOBAL BEHAVIOR (VERY IMPORTANT):
+- Always speak ONLY in English, even if the caller uses another language.
+- Use a calm, friendly, human tone. Short sentences, no robotic style.
+- Always end the call with a natural goodbye line before hanging up.
+`.trim();
 
-        if (sessionConfigured && !commitTimer) {
+        // Only send session.update here (no greeting yet)
+        openAiWs.send(JSON.stringify(buildSessionUpdate(instr)));
+        sessionConfigured = true;
+        console.log("[OPENAI] session.update sent (configured)");
+
+        // Now that session is configured, send the first greeting
+        maybeSendGreeting();
+
+        // Start periodic commit loop so VAD can segment audio
+        if (!commitTimer) {
           commitTimer = setInterval(() => {
             if (
               openAiWs.readyState === WebSocket.OPEN &&
@@ -283,7 +303,8 @@ export function createUpsellWSS() {
           }, 300);
         }
 
-        if (sessionConfigured && mediaQueue.length) {
+        // Flush any queued Twilio audio
+        if (mediaQueue.length) {
           try {
             for (const payload of mediaQueue) {
               openAiWs.send(
@@ -306,12 +327,35 @@ export function createUpsellWSS() {
           "[OPENAI] configureSessionIfNeeded error",
           e?.message || e
         );
-      } finally {
-        sessionConfigInProgress = false;
       }
     };
 
-    // OpenAI WS lifecycle
+    /** --------------- PARSE userId / kind FROM URL --------------- */
+    try {
+      const url = new URL(req?.url || "", "http://localhost");
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (parts[0] === "upsell-stream" && parts[1]) userId = parts[1];
+      kind = url.searchParams.get("kind") || null;
+    } catch {}
+    if (!userId || !kind) {
+      try {
+        const raw = req?.url || "";
+        const qs = raw.includes("?") ? raw.split("?")[1] : "";
+        const sp = new URLSearchParams(qs);
+        userId = userId || sp.get("userId") || null;
+        kind = kind || sp.get("kind") || null;
+      } catch {}
+    }
+
+    if (userId) {
+      try {
+        user = await User.findOne({ where: { id: userId } });
+      } catch (e) {
+        console.error("[WS] user load error", e?.message || e);
+      }
+    }
+
+    /** --------------- OPENAI WS LIFECYCLE --------------- */
     openAiWs.on("open", async () => {
       openaiReady = true;
       console.log("[OPENAI] socket opened (model:", RT_MODEL, ")");
@@ -334,8 +378,7 @@ export function createUpsellWSS() {
       try {
         const msg = JSON.parse(buf);
 
-        // We do NOT cancel on speech_started (so tiny noise doesn't kill TTS)
-        // if (msg.type === "input_audio_buffer.speech_started") { ... }
+        // We do NOT cancel on speech_started -> avoids tiny-noise barge-in
 
         if (msg.type === "input_audio_buffer.speech_stopped") {
           console.log("[OPENAI] speech_stopped");
@@ -409,9 +452,8 @@ export function createUpsellWSS() {
                 } else {
                   qaPairs.push({ q: null, a });
                 }
-                // console.log("[Q/A]", qaPairs[qaPairs.length - 1]);
 
-                // goodbye detection -> hang up after delay
+                // goodbye detection -> hang up ~7s later
                 if (isGoodbye(a)) {
                   scheduleHangup();
                 }
@@ -424,7 +466,7 @@ export function createUpsellWSS() {
       }
     });
 
-    // Twilio <-> WS bridge
+    /** --------------- TWILIO <-> WS BRIDGE --------------- */
     connection.on("message", async (raw) => {
       try {
         const data = JSON.parse(raw);
@@ -438,7 +480,8 @@ export function createUpsellWSS() {
               `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
             );
 
-            twilioStarted = true; // Twilio started; now we allow kickoff
+            twilioStarted = true;
+            callStarted = true;
 
             const cp = (data.start && data.start.customParameters) || {};
             if (!kind && typeof cp.kind === "string") kind = cp.kind;
@@ -566,7 +609,7 @@ export function createUpsellWSS() {
           qaPairs,
           userId,
           callSid,
-          campaignType: kind || "upsell", // or "satisfaction" from query
+          campaignType: kind || "upsell",
         });
         console.log("[SUMMARY] outcome", result?.outcome);
       } catch (e) {
