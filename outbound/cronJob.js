@@ -1,10 +1,10 @@
-// outbound/cronJob.js (corrected)
+// outbound/cronJob.js
 import cron from "node-cron";
-import { Op, fn, col, literal } from "sequelize";
+import { Op, fn, col } from "sequelize";
 import twilio from "twilio";
 import User from "../models/user.js";
 import Call from "../models/Call.js";
-import { subDays, startOfDay, endOfDay } from "date-fns";
+import { subDays, startOfDay, endOfDay, addDays } from "date-fns";
 import { fromZonedTime } from "date-fns-tz";
 import dotenv from "dotenv";
 dotenv.config();
@@ -27,84 +27,39 @@ const U_DAYS = parseInt(UPSELL_DAYS, 10) || 21;
 const POLL = parseInt(CALL_STATUS_POLL_SEC, 10) || 5;
 const TIMEOUT = parseInt(CALL_STATUS_TIMEOUT_SEC, 10) || 1200;
 
-function getDateWindowUtc(daysAgo) {
-  const targetDate = subDays(new Date(), daysAgo);
-  const startUtc = fromZonedTime(startOfDay(targetDate), TZ);
-  const endUtc = fromZonedTime(endOfDay(targetDate), TZ);
+// ✅ lock so cron does NOT overlap (your biggest issue)
+let cronRunning = false;
+
+function dayWindowUtc(daysAgo) {
+  const dayLocal = subDays(new Date(), daysAgo);
+  const startUtc = fromZonedTime(startOfDay(dayLocal), TZ);
+  const endUtc = fromZonedTime(endOfDay(dayLocal), TZ);
   return { startUtc, endUtc };
 }
 
-async function getUsersForOutbound(daysAgo, kind) {
-  const { startUtc, endUtc } = getDateWindowUtc(daysAgo);
+// ✅ retry grace: allow 7 OR 8 days (and 21 OR 22 days)
+function dueWindowsUtc(daysAgo, retryExtraDays = 1) {
+  const w1 = dayWindowUtc(daysAgo);
+  const w2 = dayWindowUtc(daysAgo + retryExtraDays);
+  return [w1, w2];
+}
 
-  // STEP 1 & 2: Find users with inbound calls exactly 7/21 days ago
-  // and ensure it's their LAST inbound call
-  const usersWithCalls = await User.findAll({
-    attributes: ["id", "phone", "isSatisfactionCall", "isUpSellCall"],
-    include: [
-      {
-        model: Call,
-        as: "calls",
-        where: {
-          type: "inbound",
-          createdAt: {
-            [Op.between]: [startUtc, endUtc],
-          },
-        },
-        required: true,
-      },
-    ],
-    where: {
-      phone: { [Op.ne]: null },
-    },
+// ✅ latest inbound per user (this already solves: "if user called 2 days ago, exclude 7 days")
+async function getLatestInboundMap() {
+  const rows = await Call.findAll({
+    attributes: ["userId", [fn("MAX", col("createdAt")), "lastInboundAt"]],
+    where: { type: "inbound" },
+    group: ["userId"],
     raw: true,
-    nest: true,
   });
 
-  // Filter users to ensure this is their LAST inbound call
-  const eligibleUsers = [];
-
-  for (const user of usersWithCalls) {
-    // Check if this is the user's last inbound call
-    const lastInboundCall = await Call.findOne({
-      where: {
-        userId: user.id,
-        type: "inbound",
-      },
-      order: [["createdAt", "DESC"]],
-      limit: 1,
-    });
-
-    // If the last inbound call is NOT from 7/21 days ago, skip this user
-    if (
-      !lastInboundCall ||
-      lastInboundCall.createdAt < startUtc ||
-      lastInboundCall.createdAt > endUtc
-    ) {
-      continue;
+  const m = new Map();
+  for (const r of rows) {
+    if (r.userId && r.lastInboundAt) {
+      m.set(r.userId, new Date(r.lastInboundAt));
     }
-
-    // STEP 3: Check if we already made this type of call
-    if (kind === "satisfaction" && user.isSatisfactionCall) {
-      continue;
-    }
-    if (kind === "upsell" && user.isUpSellCall) {
-      continue;
-    }
-
-    eligibleUsers.push({
-      user: {
-        id: user.id,
-        phone: user.phone,
-        isSatisfactionCall: user.isSatisfactionCall,
-        isUpSellCall: user.isUpSellCall,
-      },
-      callId: lastInboundCall.id,
-      lastInboundAt: lastInboundCall.createdAt,
-    });
   }
-
-  return eligibleUsers;
+  return m;
 }
 
 function makeUrl(userId, kind) {
@@ -116,6 +71,81 @@ function makeUrl(userId, kind) {
   return u.toString();
 }
 
+// ✅ prevent spam: if we already attempted today for that user+campaign, skip
+async function getAttemptedTodayUserIdSet(userIds, kind) {
+  if (!userIds.length) return new Set();
+
+  const { startUtc, endUtc } = dayWindowUtc(0);
+
+  const rows = await Call.findAll({
+    attributes: ["userId"],
+    where: {
+      type: "outbound",
+      callCategory: kind,
+      userId: { [Op.in]: userIds },
+      createdAt: { [Op.between]: [startUtc, endUtc] },
+    },
+    group: ["userId"],
+    raw: true,
+  });
+
+  return new Set(rows.map((r) => String(r.userId)));
+}
+
+function inAnyWindow(date, windows) {
+  for (const w of windows) {
+    if (date >= w.startUtc && date <= w.endUtc) return true;
+  }
+  return false;
+}
+
+// ✅ main selector: latest inbound must be due AND user flags must be false/null AND not attempted today
+async function fetchUsersDueByInbound(daysAgo, kind) {
+  const latestInboundMap = await getLatestInboundMap();
+  const userIds = Array.from(latestInboundMap.keys());
+  if (!userIds.length) return [];
+
+  const userWhere = {
+    id: { [Op.in]: userIds },
+    phone: { [Op.ne]: null },
+  };
+
+  // ✅ rule #3 (don’t call already-contacted users)
+  if (kind === "satisfaction" && User.rawAttributes?.isSatisfactionCall) {
+    userWhere[Op.or] = [{ isSatisfactionCall: null }, { isSatisfactionCall: false }];
+  }
+  if (kind === "upsell" && User.rawAttributes?.isUpSellCall) {
+    userWhere[Op.or] = [{ isUpSellCall: null }, { isUpSellCall: false }];
+  }
+
+  const users = await User.findAll({
+    where: userWhere,
+    order: [["createdAt", "ASC"]],
+  });
+
+  // ✅ rule #4 retry support (7 OR 8) / (21 OR 22)
+  const windows = dueWindowsUtc(daysAgo, 1);
+
+  // ✅ spam blocker (only 1 attempt per day)
+  const attemptedToday = await getAttemptedTodayUserIdSet(
+    users.map((u) => u.id),
+    kind
+  );
+
+  const entries = [];
+  for (const u of users) {
+    const lastInboundAt = latestInboundMap.get(u.id);
+    if (!lastInboundAt) continue;
+
+    if (attemptedToday.has(String(u.id))) continue;
+    if (!inAnyWindow(lastInboundAt, windows)) continue;
+
+    entries.push({ user: u, lastInboundAt });
+  }
+
+  return entries;
+}
+
 async function waitForCompletion(callSid) {
   const endStatuses = new Set([
     "completed",
@@ -124,160 +154,127 @@ async function waitForCompletion(callSid) {
     "no-answer",
     "canceled",
   ]);
+
   const start = Date.now();
   while (Date.now() - start < TIMEOUT * 1000) {
-    try {
-      const c = await client.calls(callSid).fetch();
-      if (endStatuses.has(c.status)) return c.status;
-      await new Promise((r) => setTimeout(r, POLL * 1000));
-    } catch (error) {
-      console.error(`Error polling call status: ${error.message}`);
-      return "failed";
-    }
+    const c = await client.calls(callSid).fetch();
+    if (endStatuses.has(c.status)) return c.status;
+    await new Promise((r) => setTimeout(r, POLL * 1000));
   }
   return "timeout";
 }
 
-async function processOutboundCall(userData, kind) {
-  const { user, callId, lastInboundAt } = userData;
+async function dialSequential(entries, kind) {
+  for (const { user: u, lastInboundAt } of entries) {
+    try {
+      const url = makeUrl(u.id, kind);
+      console.log("[CRON] placing call", { kind, userId: u.id, url });
 
-  try {
-    console.log(
-      `[CRON] Placing ${kind} call to user ${user.id} at ${user.phone}`
-    );
+      const call = await client.calls.create({
+        to: u.phone,
+        from: TWILIO_FROM_NUMBER,
+        url,
+      });
 
-    const url = makeUrl(user.id, kind);
-    const call = await client.calls.create({
-      to: user.phone,
-      from: TWILIO_FROM_NUMBER,
-      url,
-      statusCallback: `${PUBLIC_BASE_URL}/outbound-callback`,
-      statusCallbackEvent: ["completed", "failed", "busy", "no-answer"],
-      statusCallbackMethod: "POST",
-    });
+      // ✅ create a Call row even if user NEVER answers (fixes spam + tracking)
+      await Call.findOrCreate({
+        where: { callSid: call.sid },
+        defaults: {
+          callSid: call.sid,
+          type: "outbound",
+          userId: u.id,
+          callCategory: kind,
+          summary: "",
+        },
+      });
 
-    const finalStatus = await waitForCompletion(call.sid);
+      const final = await waitForCompletion(call.sid);
 
-    // STEP 4 & 5: Handle call attendance
-    if (finalStatus === "completed") {
-      // User attended the call
-      const updateData =
-        kind === "satisfaction"
-          ? { isSatisfactionCall: true }
-          : { isUpSellCall: true };
+      // ✅ if user attended => set TRUE
+      if (final === "completed") {
+        if (kind === "satisfaction" && User.rawAttributes?.isSatisfactionCall) {
+          await u.update({ isSatisfactionCall: true });
+        }
+        if (kind === "upsell" && User.rawAttributes?.isUpSellCall) {
+          await u.update({ isUpSellCall: true });
+        }
+      } else {
+        // ✅ if user did NOT attend => keep FALSE so we can retry (and do not spam same day)
+        if (kind === "satisfaction" && User.rawAttributes?.isSatisfactionCall) {
+          await u.update({ isSatisfactionCall: false });
+        }
+        if (kind === "upsell" && User.rawAttributes?.isUpSellCall) {
+          await u.update({ isUpSellCall: false });
+        }
+      }
 
-      await User.update(updateData, { where: { id: user.id } });
-      console.log(`[CRON] ${kind} call attended for user ${user.id}`);
-    } else {
-      // User did NOT attend the call
-      // Reset the call date to one day before so it gets picked up tomorrow
-      const newCallDate = subDays(lastInboundAt, 1);
-
-      await Call.update({ createdAt: newCallDate }, { where: { id: callId } });
-
-      // Reset the call flag to false so we try again
-      const resetData =
-        kind === "satisfaction"
-          ? { isSatisfactionCall: false }
-          : { isUpSellCall: false };
-
-      await User.update(resetData, { where: { id: user.id } });
-      console.log(
-        `[CRON] ${kind} call not attended for user ${user.id}, resetting for tomorrow`
+      // ✅ store result in Call row (optional but helpful)
+      await Call.update(
+        {
+          type: "outbound",
+          userId: u.id,
+          callCategory: kind,
+          outboundDetails: {
+            twilioFinalStatus: final,
+            lastInboundAtUsed: lastInboundAt?.toISOString?.() || null,
+          },
+        },
+        { where: { callSid: call.sid } }
       );
-    }
 
-    return { success: true, status: finalStatus };
-  } catch (error) {
-    console.error(
-      `[CRON] Error processing ${kind} call for user ${user.id}:`,
-      error.message
-    );
-    return { success: false, error: error.message };
+      console.log(`[CRON] ${kind} ended status=${final} userId=${u.id} sid=${call.sid}`);
+    } catch (e) {
+      console.error(`[CRON] ${kind} FAIL userId=${u.id}`, e?.message || e);
+    }
   }
 }
 
 export async function runSatisfactionOnce() {
-  console.log(`[CRON] Running satisfaction check for ${S_DAYS} days ago`);
-
-  const eligibleUsers = await getUsersForOutbound(S_DAYS, "satisfaction");
-
-  if (eligibleUsers.length === 0) {
-    console.log("[CRON] No users eligible for satisfaction calls");
+  const entries = await fetchUsersDueByInbound(S_DAYS, "satisfaction");
+  if (!entries.length) {
+    console.log("[CRON] no users due for 7-day satisfaction (latest-inbound-based)");
     return;
   }
-
-  console.log(
-    `[CRON] Found ${eligibleUsers.length} users for satisfaction calls`
-  );
-
-  // Process calls sequentially
-  for (const userData of eligibleUsers) {
-    await processOutboundCall(userData, "satisfaction");
-    // Add a small delay between calls to avoid rate limits
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
+  await dialSequential(entries, "satisfaction");
 }
 
 export async function runUpsellJobOnce() {
-  console.log(`[CRON] Running upsell check for ${U_DAYS} days ago`);
-
-  const eligibleUsers = await getUsersForOutbound(U_DAYS, "upsell");
-
-  if (eligibleUsers.length === 0) {
-    console.log("[CRON] No users eligible for upsell calls");
+  const entries = await fetchUsersDueByInbound(U_DAYS, "upsell");
+  if (!entries.length) {
+    console.log("[CRON] no users due for 21-day upsell (latest-inbound-based)");
     return;
   }
-
-  console.log(`[CRON] Found ${eligibleUsers.length} users for upsell calls`);
-
-  // Process calls sequentially
-  for (const userData of eligibleUsers) {
-    await processOutboundCall(userData, "upsell");
-    // Add a small delay between calls to avoid rate limits
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
+  await dialSequential(entries, "upsell");
 }
 
 export function startUpsellCron() {
-  // Run every 5 minutes instead of every minute to avoid overlapping executions
   cron.schedule(
-    "*/5 * * * *",
+    "*/1 * * * *",
     async () => {
-      console.log("[CRON] Starting outbound call process");
+      if (cronRunning) {
+        console.log("[CRON] skip tick (previous run still running)");
+        return;
+      }
+
+      cronRunning = true;
+      console.log("[CRON] tick 1m");
 
       try {
         await runSatisfactionOnce();
-      } catch (error) {
-        console.error("[CRON] Error in satisfaction job:", error);
+      } catch (e) {
+        console.error("[CRON] sat error", e);
       }
 
       try {
         await runUpsellJobOnce();
-      } catch (error) {
-        console.error("[CRON] Error in upsell job:", error);
+      } catch (e) {
+        console.error("[CRON] upsell error", e);
       }
 
-      console.log("[CRON] Outbound call process completed");
+      cronRunning = false;
     },
-    {
-      timezone: TZ,
-      scheduled: true,
-      runOnInit: false,
-    }
+    { timezone: TZ }
   );
 
-  console.log("[CRON] Scheduled outbound calls every 5 minutes");
-}
-
-// Also add a callback handler for Twilio status updates
-export async function handleCallStatusCallback(req, res) {
-  const { CallSid, CallStatus } = req.body;
-
-  console.log(`[Twilio Callback] Call ${CallSid} status: ${CallStatus}`);
-
-  // You might want to update your database here based on the callback
-  // This provides more reliable status updates than polling
-
-  res.status(200).send("OK");
+  console.log("[CRON] scheduled every 1m Asia/Karachi (no overlap)");
 }
