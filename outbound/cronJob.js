@@ -1,10 +1,10 @@
-// outbound/cronJob.js (revised, lean)
+// outbound/cronJob.js (corrected)
 import cron from "node-cron";
-import { Op, fn, col } from "sequelize";
+import { Op, fn, col, literal } from "sequelize";
 import twilio from "twilio";
 import User from "../models/user.js";
 import Call from "../models/Call.js";
-import { subDays, startOfDay, endOfDay, addDays } from "date-fns";
+import { subDays, startOfDay, endOfDay } from "date-fns";
 import { fromZonedTime } from "date-fns-tz";
 import dotenv from "dotenv";
 dotenv.config();
@@ -27,81 +27,85 @@ const U_DAYS = parseInt(UPSELL_DAYS, 10) || 21;
 const POLL = parseInt(CALL_STATUS_POLL_SEC, 10) || 5;
 const TIMEOUT = parseInt(CALL_STATUS_TIMEOUT_SEC, 10) || 1200;
 
-function dayWindowUtc(daysAgo) {
-  const dayLocal = subDays(new Date(), daysAgo);
-  const startUtc = fromZonedTime(startOfDay(dayLocal), TZ);
-  const endUtc = fromZonedTime(endOfDay(dayLocal), TZ);
+function getDateWindowUtc(daysAgo) {
+  const targetDate = subDays(new Date(), daysAgo);
+  const startUtc = fromZonedTime(startOfDay(targetDate), TZ);
+  const endUtc = fromZonedTime(endOfDay(targetDate), TZ);
   return { startUtc, endUtc };
 }
 
-async function getLatestInboundMap() {
-  const rows = await Call.findAll({
-    attributes: ["userId", [fn("MAX", col("createdAt")), "lastInboundAt"]],
-    where: { type: "inbound" },
-    group: ["userId"],
+async function getUsersForOutbound(daysAgo, kind) {
+  const { startUtc, endUtc } = getDateWindowUtc(daysAgo);
+
+  // STEP 1 & 2: Find users with inbound calls exactly 7/21 days ago
+  // and ensure it's their LAST inbound call
+  const usersWithCalls = await User.findAll({
+    attributes: ["id", "phone", "isSatisfactionCall", "isUpSellCall"],
+    include: [
+      {
+        model: Call,
+        as: "calls",
+        where: {
+          type: "inbound",
+          createdAt: {
+            [Op.between]: [startUtc, endUtc],
+          },
+        },
+        required: true,
+      },
+    ],
+    where: {
+      phone: { [Op.ne]: null },
+    },
     raw: true,
-  });
-  const m = new Map();
-  for (const r of rows)
-    if (r.userId && r.lastInboundAt) m.set(r.userId, new Date(r.lastInboundAt));
-  return m;
-}
-async function fetchUsersDueByInbound(daysAgo, kind) {
-  const { startUtc, endUtc } = dayWindowUtc(daysAgo);
-  const latestInboundMap = await getLatestInboundMap();
-  const userIds = Array.from(latestInboundMap.keys());
-  if (!userIds.length) return [];
-
-  // 🔥 Only pick users we have NOT already called for this campaign
-  const userWhere = {
-    id: { [Op.in]: userIds },
-    phone: { [Op.ne]: null },
-  };
-
-  if (kind === "satisfaction" && User.rawAttributes?.isSatisfactionCall) {
-    // only users where isSatisfactionCall is NULL or FALSE
-    userWhere[Op.or] = [
-      { isSatisfactionCall: null },
-      { isSatisfactionCall: false },
-    ];
-  } else if (kind === "upsell" && User.rawAttributes?.isUpSellCall) {
-    // only users where isUpSellCall is NULL or FALSE
-    userWhere[Op.or] = [
-      { isUpSellCall: null },
-      { isUpSellCall: false },
-    ];
-  }
-
-  const users = await User.findAll({
-    where: userWhere,
-    order: [["createdAt", "ASC"]],
+    nest: true,
   });
 
-  const markerField =
-    kind === "satisfaction" ? "satisfactionForInboundAt" : "upsellForInboundAt";
+  // Filter users to ensure this is their LAST inbound call
+  const eligibleUsers = [];
 
-  const entries = [];
+  for (const user of usersWithCalls) {
+    // Check if this is the user's last inbound call
+    const lastInboundCall = await Call.findOne({
+      where: {
+        userId: user.id,
+        type: "inbound",
+      },
+      order: [["createdAt", "DESC"]],
+      limit: 1,
+    });
 
-  for (const u of users) {
-    const lastInboundAt = latestInboundMap.get(u.id);
-    if (!lastInboundAt) continue;
-
-    const alreadyForThisInbound =
-      Object.prototype.hasOwnProperty.call(u.dataValues || u, markerField) &&
-      u[markerField] &&
-      new Date(u[markerField]).getTime() === lastInboundAt.getTime();
-    if (alreadyForThisInbound) continue;
-
-    if (lastInboundAt >= startUtc && lastInboundAt <= endUtc) {
-      entries.push({ user: u, lastInboundAt });
-    } else if (lastInboundAt > startUtc) {
-      const nextAt = addDays(lastInboundAt, daysAgo);
-      // you can log nextAt if you like
+    // If the last inbound call is NOT from 7/21 days ago, skip this user
+    if (
+      !lastInboundCall ||
+      lastInboundCall.createdAt < startUtc ||
+      lastInboundCall.createdAt > endUtc
+    ) {
+      continue;
     }
-  }
-  return entries;
-}
 
+    // STEP 3: Check if we already made this type of call
+    if (kind === "satisfaction" && user.isSatisfactionCall) {
+      continue;
+    }
+    if (kind === "upsell" && user.isUpSellCall) {
+      continue;
+    }
+
+    eligibleUsers.push({
+      user: {
+        id: user.id,
+        phone: user.phone,
+        isSatisfactionCall: user.isSatisfactionCall,
+        isUpSellCall: user.isUpSellCall,
+      },
+      callId: lastInboundCall.id,
+      lastInboundAt: lastInboundCall.createdAt,
+    });
+  }
+
+  return eligibleUsers;
+}
 
 function makeUrl(userId, kind) {
   const base = PUBLIC_BASE_URL || "https://customerservice-kabe.onrender.com";
@@ -122,81 +126,158 @@ async function waitForCompletion(callSid) {
   ]);
   const start = Date.now();
   while (Date.now() - start < TIMEOUT * 1000) {
-    const c = await client.calls(callSid).fetch();
-    if (endStatuses.has(c.status)) return c.status;
-    await new Promise((r) => setTimeout(r, POLL * 1000));
+    try {
+      const c = await client.calls(callSid).fetch();
+      if (endStatuses.has(c.status)) return c.status;
+      await new Promise((r) => setTimeout(r, POLL * 1000));
+    } catch (error) {
+      console.error(`Error polling call status: ${error.message}`);
+      return "failed";
+    }
   }
   return "timeout";
 }
 
-async function dialSequential(entries, kind) {
-  for (const { user: u, lastInboundAt } of entries) {
-    try {
-      const url = makeUrl(u.id, kind);
-      console.log("[CRON] placing call", { kind, userId: u.id, url });
-      const call = await client.calls.create({
-        to: u.phone,
-        from: TWILIO_FROM_NUMBER,
-        url,
-      });
-      const final = await waitForCompletion(call.sid);
-      if (final === "completed") {
-        const markerField =
-          kind === "satisfaction"
-            ? "satisfactionForInboundAt"
-            : "upsellForInboundAt";
-        if (
-          Object.prototype.hasOwnProperty.call(u.dataValues || u, markerField)
-        )
-          await u.update({ [markerField]: lastInboundAt });
-        else {
-          if (kind === "satisfaction")
-            await u.update({ isSatisfactionCall: true });
-          if (kind === "upsell") await u.update({ isUpSellCall: true });
-        }
-        console.log(`[CRON] ${kind} OK userId=${u.id} sid=${call.sid}`);
-      } else {
-        console.log(`[CRON] ${kind} ended status=${final} userId=${u.id}`);
-      }
-    } catch (e) {
-      console.error(`[CRON] ${kind} FAIL userId=${u.id}`, e?.message || e);
+async function processOutboundCall(userData, kind) {
+  const { user, callId, lastInboundAt } = userData;
+
+  try {
+    console.log(
+      `[CRON] Placing ${kind} call to user ${user.id} at ${user.phone}`
+    );
+
+    const url = makeUrl(user.id, kind);
+    const call = await client.calls.create({
+      to: user.phone,
+      from: TWILIO_FROM_NUMBER,
+      url,
+      statusCallback: `${PUBLIC_BASE_URL}/outbound-callback`,
+      statusCallbackEvent: ["completed", "failed", "busy", "no-answer"],
+      statusCallbackMethod: "POST",
+    });
+
+    const finalStatus = await waitForCompletion(call.sid);
+
+    // STEP 4 & 5: Handle call attendance
+    if (finalStatus === "completed") {
+      // User attended the call
+      const updateData =
+        kind === "satisfaction"
+          ? { isSatisfactionCall: true }
+          : { isUpSellCall: true };
+
+      await User.update(updateData, { where: { id: user.id } });
+      console.log(`[CRON] ${kind} call attended for user ${user.id}`);
+    } else {
+      // User did NOT attend the call
+      // Reset the call date to one day before so it gets picked up tomorrow
+      const newCallDate = subDays(lastInboundAt, 1);
+
+      await Call.update({ createdAt: newCallDate }, { where: { id: callId } });
+
+      // Reset the call flag to false so we try again
+      const resetData =
+        kind === "satisfaction"
+          ? { isSatisfactionCall: false }
+          : { isUpSellCall: false };
+
+      await User.update(resetData, { where: { id: user.id } });
+      console.log(
+        `[CRON] ${kind} call not attended for user ${user.id}, resetting for tomorrow`
+      );
     }
+
+    return { success: true, status: finalStatus };
+  } catch (error) {
+    console.error(
+      `[CRON] Error processing ${kind} call for user ${user.id}:`,
+      error.message
+    );
+    return { success: false, error: error.message };
   }
 }
 
 export async function runSatisfactionOnce() {
-  const entries = await fetchUsersDueByInbound(S_DAYS, "satisfaction");
-  if (!entries.length)
-    return console.log(
-      "[CRON] no users due for 7-day satisfaction (inbound-based)"
-    );
-  await dialSequential(entries, "satisfaction");
+  console.log(`[CRON] Running satisfaction check for ${S_DAYS} days ago`);
+
+  const eligibleUsers = await getUsersForOutbound(S_DAYS, "satisfaction");
+
+  if (eligibleUsers.length === 0) {
+    console.log("[CRON] No users eligible for satisfaction calls");
+    return;
+  }
+
+  console.log(
+    `[CRON] Found ${eligibleUsers.length} users for satisfaction calls`
+  );
+
+  // Process calls sequentially
+  for (const userData of eligibleUsers) {
+    await processOutboundCall(userData, "satisfaction");
+    // Add a small delay between calls to avoid rate limits
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 }
 
 export async function runUpsellJobOnce() {
-  const entries = await fetchUsersDueByInbound(U_DAYS, "upsell");
-  if (!entries.length)
-    return console.log("[CRON] no users due for 21-day upsell (inbound-based)");
-  await dialSequential(entries, "upsell");
+  console.log(`[CRON] Running upsell check for ${U_DAYS} days ago`);
+
+  const eligibleUsers = await getUsersForOutbound(U_DAYS, "upsell");
+
+  if (eligibleUsers.length === 0) {
+    console.log("[CRON] No users eligible for upsell calls");
+    return;
+  }
+
+  console.log(`[CRON] Found ${eligibleUsers.length} users for upsell calls`);
+
+  // Process calls sequentially
+  for (const userData of eligibleUsers) {
+    await processOutboundCall(userData, "upsell");
+    // Add a small delay between calls to avoid rate limits
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 }
 
 export function startUpsellCron() {
+  // Run every 5 minutes instead of every minute to avoid overlapping executions
   cron.schedule(
-    "*/1 * * * *",
+    "*/5 * * * *",
     async () => {
-      console.log("[CRON] tick 1m");
+      console.log("[CRON] Starting outbound call process");
+
       try {
         await runSatisfactionOnce();
-      } catch (e) {
-        console.error("[CRON] sat error", e);
+      } catch (error) {
+        console.error("[CRON] Error in satisfaction job:", error);
       }
+
       try {
         await runUpsellJobOnce();
-      } catch (e) {
-        console.error("[CRON] upsell error", e);
+      } catch (error) {
+        console.error("[CRON] Error in upsell job:", error);
       }
+
+      console.log("[CRON] Outbound call process completed");
     },
-    { timezone: TZ }
+    {
+      timezone: TZ,
+      scheduled: true,
+      runOnInit: false,
+    }
   );
-  console.log("[CRON] scheduled every 1m Asia/Karachi");
+
+  console.log("[CRON] Scheduled outbound calls every 5 minutes");
+}
+
+// Also add a callback handler for Twilio status updates
+export async function handleCallStatusCallback(req, res) {
+  const { CallSid, CallStatus } = req.body;
+
+  console.log(`[Twilio Callback] Call ${CallSid} status: ${CallStatus}`);
+
+  // You might want to update your database here based on the callback
+  // This provides more reliable status updates than polling
+
+  res.status(200).send("OK");
 }
