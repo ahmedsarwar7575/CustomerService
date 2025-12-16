@@ -4,6 +4,7 @@ import User from "../models/user.js";
 import Call from "../models/Call.js";
 import { randomUUID } from 'node:crypto';
 import { Email } from "../models/Email.js";
+import Rating from "../models/rating.js";
 const nz = (arr) => (Array.isArray(arr) ? arr : []);
 // Create new ticket
 export const createTicket = async (req, res) => {
@@ -281,6 +282,7 @@ export const deleteTicket = async (req, res) => {
     if (!id) return res.status(400).json({ error: "Ticket id is required" });
     const ticket = await Ticket.findByPk(id);
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+    await Rating.destroy({ where: { ticketId: id } });
     await ticket.destroy();
     res.json({ message: "Ticket deleted successfully" });
   } catch (error) {

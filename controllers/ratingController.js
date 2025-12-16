@@ -1,7 +1,7 @@
 import Rating from "../models/rating.js";
 import Ticket from "../models/ticket.js";
 import Agent from "../models/agent.js";
-
+import User from "../models/user.js";
 // Create rating for a ticket
 export const createRating = async (req, res) => {
   try {
@@ -42,16 +42,47 @@ export const createRating = async (req, res) => {
 export const getAgentRatings = async (req, res) => {
   try {
     const { agentId } = req.params;
+
     const ratings = await Rating.findAll({
       where: { agentId },
       include: [
-        { model: Ticket, attributes: ["id", "status", "summary", "createdAt", "updatedAt"] },
+        {
+          model: Ticket,
+          attributes: ["id", "status", "summary", "createdAt", "updatedAt"],
+        },
         { model: Agent, attributes: ["firstName", "lastName"] },
+        { model: User, attributes: ["name", "email", "phone"] },
       ],
       order: [["createdAt", "DESC"]],
     });
 
-    res.json(ratings);
+    const tickets = await Ticket.findAll({
+      where: { agentId },
+      attributes: ["status"],
+    });
+
+    const statusCounts = {
+      open: 0,
+      in_progress: 0,
+      resolved: 0,
+      closed: 0,
+    };
+
+    tickets.forEach((ticket) => {
+      if (statusCounts.hasOwnProperty(ticket.status)) {
+        statusCounts[ticket.status]++;
+      }
+    });
+
+    const totalTickets = tickets.length;
+
+    res.json({
+      ratings,
+      ticketStats: {
+        totalTickets,
+        statusCounts,
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
