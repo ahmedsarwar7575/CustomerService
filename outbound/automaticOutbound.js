@@ -19,8 +19,6 @@ const {
 
 const RT_MODEL = REALTIME_MODEL || "gpt-4o-realtime-preview";
 const GOODBYE_WAIT_MS = 3000;
-const EARLY_VAD_IGNORE_MS = 1200;
-const MIN_MEDIA_CHUNKS_FOR_TURN = 4;
 
 const twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
@@ -66,9 +64,9 @@ function buildSessionUpdate(instructions) {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.85,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 700,
+        threshold: 0.75,
+        prefix_padding_ms: 250,
+        silence_duration_ms: 650,
         create_response: false,
         interrupt_response: false,
       },
@@ -77,37 +75,30 @@ function buildSessionUpdate(instructions) {
       voice: REALTIME_VOICE,
       instructions,
       modalities: ["text", "audio"],
-      temperature: 0.6,
+      temperature: 0.55,
       input_audio_transcription: {
         model: "gpt-4o-mini-transcribe",
         language: "en",
-        prompt: "English only. If non-English, translate to English meaning.",
+        prompt:
+          "Transcribe spoken audio to English. If the caller speaks another language, translate to English meaning. If silence/noise, output nothing.",
       },
     },
   };
 }
 
-function isGoodbye(text = "") {
-  const t = text.toLowerCase();
-  return (
-    t.includes("goodbye") ||
-    /\bbye\b/.test(t) ||
-    t.includes("talk to you soon") ||
-    t.includes("see you") ||
-    t.includes("thanks for your time") ||
-    t.includes("have a nice day") ||
-    t.includes("have a great day")
-  );
+function getDisplayName(user) {
+  return user?.name || user?.firstName || "there";
 }
 
-function looksLikeInstructionLeak(s = "") {
+function looksLikeJunkTranscript(s = "") {
   const t = String(s).trim().toLowerCase();
   if (!t) return true;
+  if (t === "english only" || t === "english only.") return true;
   if (t.includes("transcribe only english")) return true;
   if (t.includes("do not output non-english")) return true;
   if (t.includes("additional context/instructions")) return true;
-  if (t.includes("###")) return true;
   if (t.includes("delimiters")) return true;
+  if (t.includes("###")) return true;
   if (t.startsWith("you will receive")) return true;
   return false;
 }
@@ -115,13 +106,20 @@ function looksLikeInstructionLeak(s = "") {
 function cleanUserTranscript(t) {
   const s = String(t || "").trim();
   if (!s) return null;
-  if (looksLikeInstructionLeak(s)) return null;
+  if (looksLikeJunkTranscript(s)) return null;
   return s;
 }
 
-function getDisplayName(user) {
-  if (!user) return "there";
-  return user.name || user.firstName || "there";
+function isFinalGoodbye(text = "") {
+  const s = String(text || "").trim();
+  if (!s) return false;
+  const last = s
+    .replace(/\s+/g, " ")
+    .replace(/[^\w\s]+$/g, "")
+    .split(" ")
+    .pop();
+  const w = String(last || "").toLowerCase();
+  return w === "goodbye" || w === "bye";
 }
 
 export function createUpsellWSS() {
@@ -137,8 +135,11 @@ export function createUpsellWSS() {
 
     let openaiReady = false;
     let twilioStarted = false;
+    let gotFirstMedia = false;
 
-    let sessionInitialized = false;
+    let sessionSent = false;
+    let sessionUpdated = false;
+
     let greetingSent = false;
     let hasActiveResponse = false;
 
@@ -148,13 +149,11 @@ export function createUpsellWSS() {
     const qaPairs = [];
 
     let mediaQueue = [];
-    let mediaChunksSinceLastTurn = 0;
 
     let hangupArmed = false;
     let hangupTimer = null;
 
     const openAiWs = createOpenAIWs();
-    const wsConnectedAt = Date.now();
 
     function inferKind() {
       if (kind) return kind;
@@ -171,18 +170,22 @@ export function createUpsellWSS() {
       hangupTimer = null;
     }
 
-    function armHangup() {
+    async function hangupNow() {
       if (!callSid || !twilioClient) return;
+      try {
+        await twilioClient.calls(callSid).update({ status: "completed" });
+        console.log(`[TWILIO] hung up ${callSid}`);
+      } catch (e) {
+        console.error("[TWILIO] hangup error", e?.message || e);
+      }
+    }
+
+    function armHangupWaitWindow() {
       cancelHangup();
       hangupArmed = true;
       hangupTimer = setTimeout(async () => {
         if (!hangupArmed) return;
-        try {
-          await twilioClient.calls(callSid).update({ status: "completed" });
-          console.log(`[TWILIO] hung up ${callSid} after goodbye wait`);
-        } catch (e) {
-          console.error("[TWILIO] hangup error", e?.message || e);
-        }
+        await hangupNow();
       }, GOODBYE_WAIT_MS);
     }
 
@@ -195,12 +198,53 @@ export function createUpsellWSS() {
       }
     }
 
-    async function initializeSessionIfReady() {
-      if (sessionInitialized) return;
-      if (!openaiReady || !twilioStarted) return;
-      await ensureUserLoaded();
+    function maybeSendGreeting() {
+      if (greetingSent) return;
+      if (!sessionUpdated) return;
+      if (!twilioStarted || !streamSid) return;
+      if (!gotFirstMedia) return;
+      if (openAiWs.readyState !== WebSocket.OPEN) return;
 
+      greetingSent = true;
+
+      const displayName = getDisplayName(user);
+      const k = String(inferKind()).toLowerCase();
+
+      const greetingInstruction =
+        k === "satisfaction"
+          ? `You must speak first. English only. Calm tone.
+Say: "Hi ${displayName}, this is a quick follow-up from our customer success team."
+Then ask: "Are you satisfied with the assistance you received?"
+After the question, STOP and wait.
+Important: When you are ending the call, make the LAST word exactly: "Goodbye."`
+          : `You must speak first. English only. Calm tone.
+Say: "Hi ${displayName}, this is a quick call from our customer success team."
+Then ask: "Is now a good moment for a quick 30-second chat?"
+After the question, STOP and wait.
+Important: When you are ending the call, make the LAST word exactly: "Goodbye."`;
+
+      try {
+        openAiWs.send(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio"],
+              instructions: greetingInstruction,
+            },
+          })
+        );
+      } catch (e) {
+        console.error("[OPENAI] greeting error", e?.message || e);
+      }
+    }
+
+    async function maybeInitSession() {
+      if (sessionSent) return;
+      if (!openaiReady || !twilioStarted) return;
+
+      await ensureUserLoaded();
       const pickedKind = inferKind();
+
       let baseInstr = await makeSystemMessage(userId, pickedKind);
 
       const instr =
@@ -209,13 +253,14 @@ export function createUpsellWSS() {
 
 GLOBAL RULES:
 - Speak ONLY English.
-- Calm, friendly, slightly slower pace.
-- End your final message with a clear goodbye (e.g., "Thanks for your time. Goodbye.").
+- Calm, friendly tone. Short sentences.
+- Do NOT end the call unless you are done.
+- When you end, the LAST word must be exactly: "Goodbye."
 `.trim();
 
       try {
         openAiWs.send(JSON.stringify(buildSessionUpdate(instr)));
-        sessionInitialized = true;
+        sessionSent = true;
 
         if (!commitTimer) {
           commitTimer = setInterval(() => {
@@ -229,7 +274,7 @@ GLOBAL RULES:
           }, 300);
         }
 
-        if (mediaQueue.length) {
+        if (mediaQueue.length && openAiWs.readyState === WebSocket.OPEN) {
           try {
             for (const payload of mediaQueue) {
               openAiWs.send(
@@ -243,56 +288,10 @@ GLOBAL RULES:
             openAiWs.send(
               JSON.stringify({ type: "input_audio_buffer.commit" })
             );
-          } catch (e) {
-            console.error("[OPENAI] flush queued media error", e?.message || e);
-          }
+          } catch {}
         }
-
-        maybeSendGreeting();
       } catch (e) {
         console.error("[OPENAI] session.update error", e?.message || e);
-      }
-    }
-
-    function maybeSendGreeting() {
-      if (greetingSent) return;
-      if (!sessionInitialized) return;
-      if (!streamSid) return;
-      if (openAiWs.readyState !== WebSocket.OPEN) return;
-
-      greetingSent = true;
-
-      const displayName = getDisplayName(user);
-      const k = String(inferKind()).toLowerCase();
-
-      const greetingInstruction =
-        k === "satisfaction"
-          ? `You must speak first. English only. Calm tone.
-Greet the customer by name "${displayName}".
-Say it's a quick follow-up about their recent support call.
-Ask: "Are you satisfied with the assistance you received?"
-Then STOP and wait.`
-          : `You must speak first. English only. Calm tone.
-Greet the customer by name "${displayName}".
-Say it's a quick call to share one simple way to help their business grow.
-Ask: "Is now a good moment for a quick 30-second chat?"
-Then STOP and wait.`;
-
-      try {
-        openAiWs.send(
-          JSON.stringify({
-            type: "response.create",
-            response: {
-              modalities: ["audio"],
-              instructions: greetingInstruction,
-            },
-          })
-        );
-      } catch (e) {
-        console.error(
-          "[OPENAI] greeting response.create error",
-          e?.message || e
-        );
       }
     }
 
@@ -305,12 +304,17 @@ Then STOP and wait.`;
 
     openAiWs.on("open", async () => {
       openaiReady = true;
-      await initializeSessionIfReady();
+      await maybeInitSession();
     });
 
     openAiWs.on("message", (buf) => {
       try {
         const msg = JSON.parse(buf);
+
+        if (msg.type === "session.updated") {
+          sessionUpdated = true;
+          maybeSendGreeting();
+        }
 
         if (msg.type === "input_audio_buffer.speech_started") {
           if (hangupArmed) cancelHangup();
@@ -318,11 +322,7 @@ Then STOP and wait.`;
 
         if (msg.type === "input_audio_buffer.speech_stopped") {
           if (!greetingSent) return;
-          if (Date.now() - wsConnectedAt < EARLY_VAD_IGNORE_MS) return;
           if (hasActiveResponse) return;
-          if (mediaChunksSinceLastTurn < MIN_MEDIA_CHUNKS_FOR_TURN) return;
-
-          mediaChunksSinceLastTurn = 0;
           try {
             openAiWs.send(JSON.stringify({ type: "response.create" }));
           } catch {}
@@ -390,8 +390,8 @@ Then STOP and wait.`;
               qaPairs.push({ q: null, a });
             }
 
-            if (isGoodbye(a)) {
-              armHangup();
+            if (isFinalGoodbye(a)) {
+              armHangupWaitWindow();
             }
           }
         }
@@ -407,7 +407,6 @@ Then STOP and wait.`;
         if (data.event === "start") {
           streamSid = data.start?.streamSid || streamSid || null;
           callSid = data.start?.callSid || callSid || null;
-
           twilioStarted = true;
 
           const cp = (data.start && data.start.customParameters) || {};
@@ -415,8 +414,7 @@ Then STOP and wait.`;
           if (!userId && typeof cp.userId === "string") userId = cp.userId;
 
           await ensureUserLoaded();
-          await initializeSessionIfReady();
-          maybeSendGreeting();
+          await maybeInitSession();
 
           try {
             if (callSid && twilioClient) {
@@ -424,7 +422,6 @@ Then STOP and wait.`;
                 where: { callSid },
                 defaults: { callSid },
               });
-
               const base = process.env.PUBLIC_BASE_URL || "https://example.com";
               await twilioClient.calls(callSid).recordings.create({
                 recordingStatusCallback: `${base}/recording-status`,
@@ -441,6 +438,7 @@ Then STOP and wait.`;
             console.error("[TWILIO] recording error", e?.message || e);
           }
 
+          maybeSendGreeting();
           return;
         }
 
@@ -448,11 +446,14 @@ Then STOP and wait.`;
           const payload = data.media?.payload || "";
           if (!payload) return;
 
-          mediaChunksSinceLastTurn++;
+          gotFirstMedia = true;
+          maybeSendGreeting();
 
-          await initializeSessionIfReady();
+          if (hangupArmed) {
+            // user might be speaking; OpenAI VAD will confirm, but we also keep this conservative
+          }
 
-          if (openAiWs.readyState === WebSocket.OPEN && sessionInitialized) {
+          if (openAiWs.readyState === WebSocket.OPEN && sessionSent) {
             try {
               openAiWs.send(
                 JSON.stringify({
@@ -479,7 +480,6 @@ Then STOP and wait.`;
               openAiWs.close();
             }
           } catch {}
-          return;
         }
       } catch (e) {
         console.error("[WS] parse error", e?.message || e);
