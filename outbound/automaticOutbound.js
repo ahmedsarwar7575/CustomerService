@@ -1,3 +1,4 @@
+// automaticOutbound.js
 import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -11,33 +12,48 @@ import processCallOutcome from "./summerize.js";
 const {
   OPENAI_API_KEY,
   REALTIME_VOICE = "echo",
-  REALTIME_MODEL,
+  REALTIME_MODEL = "gpt-4o-realtime-preview",
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   PUBLIC_BASE_URL,
 } = process.env;
-
-const MODEL = REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
-const GOODBYE_WAIT_MS = 3000;
-const REPROMPT_MS = 8000;
-const MIN_SPEECH_MS = 350;
 
 const twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
     ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
 
-function createOpenAIWebSocket() {
+function createOpenAIWs() {
   const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
-    MODEL
+    REALTIME_MODEL
   )}`;
-  return new WebSocket(url, {
+
+  const ws = new WebSocket(url, {
     headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      Authorization: `Bearer ${OPENAI_API_KEY || "MISSING"}`,
       "OpenAI-Beta": "realtime=v1",
+      Origin: "https://server.local",
     },
     perMessageDeflate: false,
   });
+
+  ws.on("unexpected-response", async (_req, res) => {
+    let body = "";
+    try {
+      body = await new Promise((resolve) => {
+        let data = "";
+        res.on("data", (c) => (data += c.toString("utf8")));
+        res.on("end", () => resolve(data));
+        res.on("error", () => resolve("(read error)"));
+      });
+    } catch {}
+    console.error("[OPENAI] unexpected-response", res.statusCode, body);
+  });
+
+  ws.on("error", (e) =>
+    console.error("[OPENAI] socket error:", e?.message || e)
+  );
+  return ws;
 }
 
 function buildSessionUpdate(instructions) {
@@ -46,7 +62,7 @@ function buildSessionUpdate(instructions) {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.9,
+        threshold: 0.85,
         prefix_padding_ms: 300,
         silence_duration_ms: 700,
         create_response: false,
@@ -57,26 +73,18 @@ function buildSessionUpdate(instructions) {
       voice: REALTIME_VOICE,
       instructions,
       modalities: ["text", "audio"],
-      temperature: 0.6,
+      temperature: 0.7,
       input_audio_transcription: {
         model: "gpt-4o-mini-transcribe",
         language: "en",
-        prompt:
-          "Transcribe ONLY spoken audio to English. If non-English is spoken, translate meaning to English. If unclear/noise/silence, output nothing.",
+        prompt: "The caller is speaking English. Always transcribe to English.",
       },
     },
   };
 }
 
-function isJunkTranscript(s = "") {
-  const t = String(s).trim().toLowerCase();
-  if (!t) return true;
-  if (t === "english only" || t === "english only.") return true;
-  if (t.includes("transcribe only")) return true;
-  if (t.includes("do not output")) return true;
-  if (t.includes("additional context/instructions")) return true;
-  if (t.includes("###") || t.startsWith("you will receive")) return true;
-  return false;
+function getDisplayName(user) {
+  return (user && (user.name || user.firstName)) || "there";
 }
 
 function endsWithGoodbye(a = "") {
@@ -84,8 +92,13 @@ function endsWithGoodbye(a = "") {
   return t.endsWith("Goodbye.") || t.endsWith("Goodbye");
 }
 
-function getDisplayName(user) {
-  return user?.name || user?.firstName || "there";
+function shouldIgnoreTranscript(t = "") {
+  const s = String(t).trim();
+  if (!s) return true;
+  if (/^transcribe\s+only\s+english/i.test(s)) return true;
+  if (s.includes("You will receive additional context/instructions"))
+    return true;
+  return false;
 }
 
 export function createUpsellWSS() {
@@ -93,7 +106,7 @@ export function createUpsellWSS() {
 
   wss.on("connection", async (connection, req) => {
     let userId = null;
-    let kind = null;
+    let kind = null; // "satisfaction" | "upsell"
     let user = null;
 
     let streamSid = null;
@@ -101,171 +114,92 @@ export function createUpsellWSS() {
 
     let openAiReady = false;
     let twilioStarted = false;
-    let userLookupDone = false;
+    let callStarted = false;
+    let userLoaded = false;
 
     let sessionInitialized = false;
-    let callStarted = false;
+    let sessionInitializing = false;
     let greetingSent = false;
 
     let hasActiveResponse = false;
-
     let pendingUserQ = null;
+    const qaPairs = [];
 
-    let hangupArmed = false;
     let hangupTimer = null;
 
-    let repromptTimer = null;
+    const openAiWs = createOpenAIWs();
 
-    let lastSpeechStartAt = 0;
-
-    const qaPairs = [];
-    const openAiWs = createOpenAIWebSocket();
-
-    function inferKind() {
-      if (kind) return kind;
-      if (user) {
-        if (user.isSatisfactionCall === false) return "satisfaction";
-        if (user.isUpSellCall === false) return "upsell";
-      }
-      return "upsell";
-    }
-
-    function cancelHangup() {
-      hangupArmed = false;
-      if (hangupTimer) clearTimeout(hangupTimer);
-      hangupTimer = null;
-    }
-
-    function cancelReprompt() {
-      if (repromptTimer) clearTimeout(repromptTimer);
-      repromptTimer = null;
-    }
-
-    async function hangupNow() {
-      if (!callSid || !twilioClient) return;
-      try {
-        await twilioClient.calls(callSid).update({ status: "completed" });
-      } catch (e) {
-        console.error("[TWILIO] hangup error", e?.message || e);
-      }
-    }
-
-    function armHangupWindow() {
-      cancelHangup();
-      cancelReprompt();
-      hangupArmed = true;
+    function scheduleHangupFixed() {
+      if (hangupTimer || !callSid || !twilioClient) return;
       hangupTimer = setTimeout(async () => {
-        if (!hangupArmed) return;
-        await hangupNow();
-      }, GOODBYE_WAIT_MS);
-    }
-
-    function armReprompt() {
-      cancelReprompt();
-      repromptTimer = setTimeout(() => {
-        if (!openAiWs || openAiWs.readyState !== WebSocket.OPEN) return;
-        if (hasActiveResponse) return;
-        if (hangupArmed) return;
-
-        const k = String(inferKind()).toLowerCase();
-        const nudge =
-          k === "satisfaction"
-            ? "English only. Please answer yes or no: are you satisfied with the assistance you received?"
-            : "English only. Just a quick yes or no: are you interested in this solution for your business?";
-
         try {
-          openAiWs.send(
-            JSON.stringify({
-              type: "response.create",
-              response: { instructions: nudge },
-            })
+          await twilioClient.calls(callSid).update({ status: "completed" });
+          console.log(
+            `[TWILIO] Hung up outbound call ${callSid} after 2s goodbye.`
           );
-        } catch {}
-      }, REPROMPT_MS);
-    }
-
-    async function loadUser() {
-      try {
-        if (!userId) return;
-        user = await User.findOne({ where: { id: userId } });
-      } catch (e) {
-        console.error("[WS] user load error", e?.message || e);
-      } finally {
-        userLookupDone = true;
-      }
-    }
-
-    async function initializeSession() {
-      const pickedKind = inferKind();
-      let base = "";
-      try {
-        base = await makeSystemMessage(userId, pickedKind);
-      } catch {
-        base = "";
-      }
-
-      const rules = `
-STRICT RULES:
-- Speak ONLY English. Never speak any other language.
-- Never say the phrase "English only" to the customer.
-- Calm, soft tone. Short sentences.
-- When you end the call, your LAST word must be exactly: "Goodbye."
-- After you say "Goodbye.", stop speaking and wait.
-`;
-
-      try {
-        openAiWs.send(
-          JSON.stringify(buildSessionUpdate(base + "\n\n" + rules))
-        );
-        sessionInitialized = true;
-        setTimeout(() => maybeSendGreeting(), 120);
-      } catch (e) {
-        console.error("[OPENAI] session.update error", e?.message || e);
-      }
-    }
-
-    function maybeInitializeSession() {
-      if (sessionInitialized) return;
-      if (!openAiReady || !twilioStarted || !userLookupDone) return;
-      initializeSession();
+        } catch (e) {
+          console.error("[TWILIO] hangup error", e?.message || e);
+        }
+      }, 2000);
     }
 
     function maybeSendGreeting() {
-      if (
-        greetingSent ||
-        !sessionInitialized ||
-        !callStarted ||
-        !streamSid ||
-        openAiWs.readyState !== WebSocket.OPEN
-      )
-        return;
+      if (greetingSent) return;
+      if (!sessionInitialized || !callStarted) return;
+      if (!streamSid) return;
+      if (openAiWs.readyState !== WebSocket.OPEN) return;
 
       greetingSent = true;
 
       const name = getDisplayName(user);
-      const k = String(inferKind()).toLowerCase();
+      const k = String(kind || "").toLowerCase();
 
-      const greeting =
+      const greetingInstruction =
         k === "satisfaction"
-          ? `You must speak first. English only. Calm tone.
-Say: "Hi ${name}, this is a quick follow-up from our customer success team."
-Then ask: "Our agent spoke with you recently. Are you satisfied with the assistance you received?"
-Stop and wait.`
-          : `You must speak first. English only. Calm tone.
-Say: "Hi ${name}, this is a quick call from our customer success team."
-Then ask: "Would you be interested in this kind of solution for your business?"
-Stop and wait.`;
+          ? `Speak FIRST. English only. Calm tone. Greet "${name}". Then say: our agent spoke with you recently. Ask exactly: "Are you satisfied with the assistance you received?" Then STOP and wait.`
+          : `Speak FIRST. English only. Calm tone. Greet "${name}". Say this is a quick call to share one simple way to help their business grow using their existing payments. Ask: "Is now a good moment to talk for less than a minute?" Then STOP and wait.`;
 
       try {
         openAiWs.send(
           JSON.stringify({
             type: "response.create",
-            response: { instructions: greeting },
+            response: {
+              modalities: ["audio"],
+              instructions: greetingInstruction,
+            },
           })
         );
-        armReprompt();
       } catch (e) {
         console.error("[OPENAI] greeting error", e?.message || e);
+      }
+    }
+
+    async function initializeSession() {
+      if (sessionInitialized || sessionInitializing) return;
+      if (!openAiReady || !twilioStarted || !userLoaded) return;
+
+      sessionInitializing = true;
+      try {
+        const pickedKind = String(kind || "upsell").toLowerCase();
+        const base = await makeSystemMessage(userId, pickedKind);
+
+        const extra = `
+VOICE STYLE:
+- Calm, soft, relaxed tone.
+- Slightly slower than normal, not robotic.
+
+RULES:
+- Speak ONLY English.
+- When you are ending the call, your FINAL word must be exactly: "Goodbye."
+`;
+
+        openAiWs.send(JSON.stringify(buildSessionUpdate(base + "\n" + extra)));
+        sessionInitialized = true;
+        sessionInitializing = false;
+        maybeSendGreeting();
+      } catch (e) {
+        sessionInitializing = false;
+        console.error("[OPENAI] session.init error", e?.message || e);
       }
     }
 
@@ -276,28 +210,43 @@ Stop and wait.`;
       kind = url.searchParams.get("kind") || null;
     } catch {}
 
+    if (!userId || !kind) {
+      try {
+        const raw = req?.url || "";
+        const qs = raw.includes("?") ? raw.split("?")[1] : "";
+        const sp = new URLSearchParams(qs);
+        userId = userId || sp.get("userId") || null;
+        kind = kind || sp.get("kind") || null;
+      } catch {}
+    }
+
+    if (userId) {
+      try {
+        user = await User.findOne({ where: { id: userId } });
+        userLoaded = true;
+      } catch (e) {
+        userLoaded = true;
+        console.error("[WS] user load error", e?.message || e);
+      }
+    } else {
+      userLoaded = true;
+    }
+
     openAiWs.on("open", async () => {
       openAiReady = true;
-      await loadUser();
-      maybeInitializeSession();
+      await initializeSession();
     });
 
-    openAiWs.on("message", (data) => {
+    openAiWs.on("message", (buf) => {
       try {
-        const msg = JSON.parse(data);
+        const msg = JSON.parse(buf);
 
         if (msg.type === "response.created") hasActiveResponse = true;
-
-        if (msg.type === "input_audio_buffer.speech_started") {
-          lastSpeechStartAt = Date.now();
-          if (hangupArmed) cancelHangup();
-          cancelReprompt();
-        }
 
         if (
           msg.type === "conversation.item.input_audio_transcription.completed"
         ) {
-          const q =
+          const t =
             (typeof msg.transcript === "string" && msg.transcript.trim()) ||
             (
               msg.item?.content?.find?.(
@@ -305,40 +254,32 @@ Stop and wait.`;
               )?.transcript || ""
             ).trim();
 
-          if (!isJunkTranscript(q)) pendingUserQ = q;
+          if (!shouldIgnoreTranscript(t)) pendingUserQ = t;
         }
 
         if (msg.type === "input_audio_buffer.speech_stopped") {
-          if (hangupArmed) return;
-          if (hasActiveResponse) return;
-
-          const dur = lastSpeechStartAt ? Date.now() - lastSpeechStartAt : 0;
-          if (dur < MIN_SPEECH_MS) return;
-
-          try {
-            openAiWs.send(JSON.stringify({ type: "response.create" }));
-          } catch {}
-          armReprompt();
+          if (!hasActiveResponse && openAiWs.readyState === WebSocket.OPEN) {
+            try {
+              openAiWs.send(JSON.stringify({ type: "response.create" }));
+            } catch {}
+          }
         }
 
         if (
           (msg.type === "response.audio.delta" ||
             msg.type === "response.output_audio.delta") &&
-          msg.delta &&
-          streamSid
+          msg.delta
         ) {
           const payload =
             typeof msg.delta === "string"
               ? msg.delta
               : Buffer.from(msg.delta).toString("base64");
 
-          connection.send(
-            JSON.stringify({
-              event: "media",
-              streamSid,
-              media: { payload },
-            })
-          );
+          if (streamSid) {
+            connection.send(
+              JSON.stringify({ event: "media", streamSid, media: { payload } })
+            );
+          }
         }
 
         if (msg.type === "response.done") {
@@ -365,11 +306,7 @@ Stop and wait.`;
               qaPairs.push({ q: null, a });
             }
 
-            if (endsWithGoodbye(a)) {
-              armHangupWindow();
-            } else {
-              armReprompt();
-            }
+            if (endsWithGoodbye(a)) scheduleHangupFixed();
           }
         }
       } catch (e) {
@@ -377,33 +314,44 @@ Stop and wait.`;
       }
     });
 
-    connection.on("message", async (message) => {
+    openAiWs.on("close", (code, reason) => {
+      console.log(
+        "[OPENAI] socket closed",
+        code,
+        reason ? reason.toString() : ""
+      );
+    });
+
+    connection.on("message", async (raw) => {
       try {
-        const data = JSON.parse(message);
+        const data = JSON.parse(raw);
 
-        if (data.event === "start") {
-          streamSid = data.start.streamSid;
-          callSid = data.start.callSid || null;
+        switch (data.event) {
+          case "start": {
+            streamSid = data.start?.streamSid || streamSid || null;
+            callSid = data.start?.callSid || callSid || null;
 
-          twilioStarted = true;
-          callStarted = true;
+            twilioStarted = true;
+            callStarted = true;
 
-          const cp = (data.start && data.start.customParameters) || {};
-          if (!kind && typeof cp.kind === "string") kind = cp.kind;
-          if (!userId && typeof cp.userId === "string") userId = cp.userId;
+            const cp = data.start?.customParameters || {};
+            if (!kind && typeof cp.kind === "string") kind = cp.kind;
+            if (!userId && typeof cp.userId === "string") userId = cp.userId;
 
-          await loadUser();
-          maybeInitializeSession();
-          maybeSendGreeting();
+            if (userId && (!user || String(user.id) !== String(userId))) {
+              try {
+                user = await User.findOne({ where: { id: userId } });
+              } catch {}
+              userLoaded = true;
+            }
 
-          try {
-            if (callSid) {
-              await Call.findOrCreate({
-                where: { callSid },
-                defaults: { callSid },
-              });
+            await Call.findOrCreate({
+              where: { callSid },
+              defaults: { callSid },
+            });
 
-              if (twilioClient && PUBLIC_BASE_URL) {
+            if (PUBLIC_BASE_URL && twilioClient && callSid) {
+              try {
                 await twilioClient.calls(callSid).recordings.create({
                   recordingStatusCallback: `${PUBLIC_BASE_URL}/recording-status`,
                   recordingStatusCallbackEvent: [
@@ -414,34 +362,38 @@ Stop and wait.`;
                   recordingChannels: "dual",
                   recordingTrack: "both",
                 });
-              }
+              } catch {}
             }
-          } catch {}
 
-          return;
-        }
-
-        if (data.event === "media") {
-          if (hangupArmed) cancelHangup();
-          cancelReprompt();
-
-          if (openAiWs.readyState === WebSocket.OPEN) {
-            openAiWs.send(
-              JSON.stringify({
-                type: "input_audio_buffer.append",
-                audio: data.media.payload,
-              })
-            );
+            await initializeSession();
+            maybeSendGreeting();
+            break;
           }
-          return;
-        }
 
-        if (data.event === "stop") {
-          cancelHangup();
-          cancelReprompt();
-          try {
-            if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
-          } catch {}
+          case "media": {
+            const payload = data.media?.payload || "";
+            if (openAiWs.readyState === WebSocket.OPEN) {
+              try {
+                openAiWs.send(
+                  JSON.stringify({
+                    type: "input_audio_buffer.append",
+                    audio: payload,
+                  })
+                );
+              } catch {}
+            }
+            break;
+          }
+
+          case "stop": {
+            try {
+              if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+            } catch {}
+            break;
+          }
+
+          default:
+            break;
         }
       } catch (e) {
         console.error("[WS] parse error", e?.message || e);
@@ -449,19 +401,18 @@ Stop and wait.`;
     });
 
     connection.on("close", async () => {
-      cancelHangup();
-      cancelReprompt();
       try {
         if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
       } catch {}
 
       try {
-        await processCallOutcome({
+        const result = await processCallOutcome({
           qaPairs,
           userId,
           callSid,
-          campaignType: String(kind || inferKind()),
+          campaignType: String(kind || "upsell").toLowerCase(),
         });
+        console.log("[SUMMARY] outcome", result?.outcome);
       } catch (e) {
         console.error("[SUMMARY] error", e?.message || e);
       }

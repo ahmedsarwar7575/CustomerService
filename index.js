@@ -3,7 +3,7 @@ import http from "http";
 import app from "./app.js";
 import { createUpsellWSS } from "./outbound/automaticOutbound.js";
 import { attachMediaStreamServer } from "./inbound/mediaStream.js";
-import { startUpsellCron } from "./outbound/cronJob.js"; 
+// import { startUpsellCron } from "./outbound/cronJob.js"; 
 
 import { bootTokens } from './Email/Email.js';
 dotenv.config();
@@ -44,7 +44,7 @@ server.on("upgrade", (req, socket, head) => {
 
   socket.destroy();
 });
-startUpsellCron();
+// startUpsellCron();
 server.listen(PORT, () => {
   bootTokens();
   console.log(`Server running on port ${PORT}`);
