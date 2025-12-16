@@ -66,7 +66,7 @@
 
       console.log(`✅ Uploaded: s3://${BUCKET}/${key}`);
       const call = await Call.findOne({ where: { callSid: CallSid } });
-      console.log("call is ", call);
+      // console.log("call is ", call);
       call.recordingUrl = key;
       await call.save();
       // Generate a presigned URL valid for 1 hour
