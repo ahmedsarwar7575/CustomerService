@@ -46,6 +46,7 @@ import {
   deleteCall,
   toggleIsSatisfied,
 } from "../controllers/Call.js";
+import { sendCallController } from "../outbound/sendCall.js";
 import { dashboardLite } from "../controllers/dashboard.js";
 import getRecordingUrlBySid from "../controllers/recoerding.js";
 const router = express.Router();
@@ -161,5 +162,5 @@ router.get(
   "/api/call/:id/agent",
   /* #swagger.tags = ['Calls'] */ getAllCallsForAgent
 );
-
+router.post("/api/send-call", sendCallController);
 export default router;
