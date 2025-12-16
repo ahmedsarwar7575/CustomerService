@@ -10,13 +10,14 @@ import processCallOutcome from "./summerize.js";
 
 const {
   OPENAI_API_KEY,
-  REALTIME_VOICE = "fable",
+  REALTIME_VOICE = "echo",
   REALTIME_MODEL,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
+  PUBLIC_BASE_URL,
 } = process.env;
 
-const RT_MODEL = REALTIME_MODEL || "gpt-4o-realtime-preview";
+const MODEL = REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
 const GOODBYE_WAIT_MS = 3000;
 
 const twilioClient =
@@ -24,15 +25,14 @@ const twilioClient =
     ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
 
-function createOpenAIWs() {
+function createOpenAIWebSocket() {
   const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
-    RT_MODEL
+    MODEL
   )}`;
   return new WebSocket(url, {
     headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY || "MISSING"}`,
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
       "OpenAI-Beta": "realtime=v1",
-      Origin: "https://server.local",
     },
     perMessageDeflate: false,
   });
@@ -55,12 +55,12 @@ function buildSessionUpdate(instructions) {
       voice: REALTIME_VOICE,
       instructions,
       modalities: ["text", "audio"],
-      temperature: 0.5,
+      temperature: 0.6,
       input_audio_transcription: {
         model: "gpt-4o-mini-transcribe",
         language: "en",
         prompt:
-          "Transcribe ONLY spoken audio to English. If non-English is spoken, translate meaning to English. If silence/noise, output nothing.",
+          "Transcribe ONLY spoken audio to English. If non-English is spoken, translate meaning to English. Never output meta-instructions. If unclear/noise, output nothing.",
       },
     },
   };
@@ -70,21 +70,17 @@ function looksLikeJunkTranscript(s = "") {
   const t = String(s).trim().toLowerCase();
   if (!t) return true;
   if (t === "english only" || t === "english only.") return true;
-  if (t.includes("transcribe only english")) return true;
-  if (t.includes("do not output non-english")) return true;
+  if (t.includes("transcribe only") || t.includes("do not output")) return true;
   if (t.includes("additional context/instructions")) return true;
-  if (t.includes("delimiters")) return true;
-  if (t.includes("###")) return true;
-  if (t.startsWith("you will receive")) return true;
+  if (t.includes("###") || t.startsWith("you will receive")) return true;
   return false;
 }
 
-function isFinalGoodbye(text = "") {
-  const s = String(text || "").trim();
-  if (!s) return false;
-  const cleaned = s.replace(/\s+/g, " ").replace(/[^\w\s]+$/g, "");
-  const last = cleaned.split(" ").pop()?.toLowerCase();
-  return last === "goodbye" || last === "bye";
+function isFinalGoodbye(a = "") {
+  const t = String(a).trim();
+  if (!t) return false;
+  const cleaned = t.replace(/\s+/g, " ").replace(/[^\w\s.]+$/g, "");
+  return cleaned.endsWith("Goodbye.") || cleaned.endsWith("Goodbye");
 }
 
 function getDisplayName(user) {
@@ -104,12 +100,11 @@ export function createUpsellWSS() {
 
     let openAiReady = false;
     let twilioStarted = false;
+    let userLookupDone = false;
 
     let sessionInitialized = false;
     let callStarted = false;
-
     let greetingSent = false;
-    let greetingDone = false;
 
     let hasActiveResponse = false;
 
@@ -119,10 +114,8 @@ export function createUpsellWSS() {
     let hangupArmed = false;
     let hangupTimer = null;
 
-    let audioMode = null; // "output" | "audio" (choose first delta type we see)
-
     const qaPairs = [];
-    const openAiWs = createOpenAIWs();
+    const openAiWs = createOpenAIWebSocket();
 
     function inferKind() {
       if (kind) return kind;
@@ -131,15 +124,6 @@ export function createUpsellWSS() {
         if (user.isUpSellCall === false) return "upsell";
       }
       return "upsell";
-    }
-
-    async function loadUser() {
-      if (user || !userId) return;
-      try {
-        user = await User.findOne({ where: { id: userId } });
-      } catch (e) {
-        console.error("[WS] user load error", e?.message || e);
-      }
     }
 
     function cancelHangup() {
@@ -182,14 +166,14 @@ export function createUpsellWSS() {
 
       const greetingInstruction =
         k === "satisfaction"
-          ? `You must speak first. English only. Calm tone.
+          ? `English only. Calm tone. You must speak first.
 Say: "Hi ${name}, this is a quick follow-up from our customer success team."
-Ask: "Our agent spoke with you recently. Are you satisfied with the assistance you received?"
+Then ask: "Our agent spoke with you recently. Are you satisfied with the assistance you received?"
 Stop and wait.
 When you end the call, the LAST word must be exactly: "Goodbye."`
-          : `You must speak first. English only. Calm tone.
+          : `English only. Calm tone. You must speak first.
 Say: "Hi ${name}, this is a quick call from our customer success team."
-Ask: "Is now a good moment for a quick 30-second chat?"
+Then ask: "Is now a good moment for a quick 30-second chat?"
 Stop and wait.
 When you end the call, the LAST word must be exactly: "Goodbye."`;
 
@@ -197,7 +181,10 @@ When you end the call, the LAST word must be exactly: "Goodbye."`;
         openAiWs.send(
           JSON.stringify({
             type: "response.create",
-            response: { modalities: ["audio"], instructions: greetingInstruction },
+            response: {
+              modalities: ["audio"],
+              instructions: greetingInstruction,
+            },
           })
         );
       } catch (e) {
@@ -205,34 +192,57 @@ When you end the call, the LAST word must be exactly: "Goodbye."`;
       }
     }
 
-    async function initializeSession() {
-      if (sessionInitialized) return;
-      if (!openAiReady || !twilioStarted) return;
-
-      await loadUser();
-
+    function initializeSession() {
       const pickedKind = inferKind();
-      const base = await makeSystemMessage(userId, pickedKind);
 
-      const instructions =
-        base +
-        `
+      let instr =
+        `STRICT RULES:
+- Speak ONLY English. Never speak any other language.
+- NEVER say the words "English only" to the caller.
+- Calm, soft tone. Short sentences.
+- Only end when finished; when ending, last word must be exactly "Goodbye."
+` + "\n\n";
 
-GLOBAL:
-- Speak ONLY English.
-- Calm, friendly voice. Short sentences.
-- Do NOT invent what the caller said.
-- Only end when finished.
-- When ending, the LAST word must be exactly: "Goodbye."
-`.trim();
+      return makeSystemMessage(userId, pickedKind).then((base) => {
+        const final = base + "\n\n" + instr;
+        try {
+          openAiWs.send(JSON.stringify(buildSessionUpdate(final)));
+        } catch (e) {
+          console.error("[OPENAI] session.update error", e?.message || e);
+        }
+      });
+    }
 
-      try {
-        openAiWs.send(JSON.stringify(buildSessionUpdate(instructions)));
-        sessionInitialized = true;
-        setTimeout(() => maybeSendGreeting(), 200);
-      } catch (e) {
-        console.error("[OPENAI] session.update error", e?.message || e);
-      }
+    function maybeInitializeSession() {
+      if (sessionInitialized) return;
+      if (!openAiReady || !twilioStarted || !userLookupDone) return;
+
+      initializeSession()
+        .then(() => {
+          const fallback = setTimeout(() => {
+            if (!sessionInitialized) {
+              sessionInitialized = true;
+              maybeSendGreeting();
+            }
+          }, 250);
+
+          const once = (buf) => {
+            try {
+              const msg = JSON.parse(buf);
+              if (msg.type === "session.updated") {
+                clearTimeout(fallback);
+                if (!sessionInitialized) {
+                  sessionInitialized = true;
+                  maybeSendGreeting();
+                }
+                openAiWs.off("message", once);
+              }
+            } catch {}
+          };
+
+          openAiWs.on("message", once);
+        })
+        .catch((e) => console.error("[OPENAI] init err", e?.message || e));
     }
 
     try {
@@ -242,75 +252,82 @@ GLOBAL:
       kind = url.searchParams.get("kind") || null;
     } catch {}
 
+    async function loadUser() {
+      if (!userId) return;
+      try {
+        user = await User.findOne({ where: { id: userId } });
+      } catch (e) {
+        console.error("[WS] user load error", e?.message || e);
+      } finally {
+        userLookupDone = true;
+      }
+    }
+
     openAiWs.on("open", async () => {
       openAiReady = true;
-      await initializeSession();
+      await loadUser();
+      maybeInitializeSession();
     });
 
-    openAiWs.on("message", (buf) => {
+    openAiWs.on("message", (data) => {
       try {
-        const msg = JSON.parse(buf);
+        const msg = JSON.parse(data);
+
+        if (msg.type === "response.created") hasActiveResponse = true;
 
         if (msg.type === "input_audio_buffer.speech_started") {
           if (hangupArmed) cancelHangup();
         }
 
-        if (msg.type === "input_audio_buffer.speech_stopped") {
-          if (!greetingDone) return;
-          if (hasActiveResponse) return;
-          if (hangupArmed) return;
+        if (
+          msg.type === "conversation.item.input_audio_transcription.completed"
+        ) {
+          const q =
+            (typeof msg.transcript === "string" && msg.transcript.trim()) ||
+            (
+              msg.item?.content?.find?.(
+                (c) => typeof c?.transcript === "string"
+              )?.transcript || ""
+            ).trim();
 
-          const recent = Date.now() - lastTranscriptAt < 2000;
+          if (looksLikeJunkTranscript(q)) return;
+
+          pendingUserQ = q;
+          lastTranscriptAt = Date.now();
+          if (hangupArmed) cancelHangup();
+        }
+
+        if (msg.type === "input_audio_buffer.speech_stopped") {
+          if (hangupArmed) return;
+          if (hasActiveResponse) return;
+
+          const recent = Date.now() - lastTranscriptAt < 1800;
           if (!recent) return;
+          if (!pendingUserQ) return;
 
           try {
             openAiWs.send(JSON.stringify({ type: "response.create" }));
           } catch {}
         }
 
-        if (msg.type === "response.created") {
-          hasActiveResponse = true;
-        }
+        if (
+          (msg.type === "response.audio.delta" ||
+            msg.type === "response.output_audio.delta") &&
+          msg.delta &&
+          streamSid
+        ) {
+          const payload =
+            typeof msg.delta === "string"
+              ? msg.delta
+              : Buffer.from(msg.delta).toString("base64");
 
-        const isOutputDelta =
-          msg.type === "response.output_audio.delta" && msg.delta;
-        const isAudioDelta = msg.type === "response.audio.delta" && msg.delta;
-
-        if ((isOutputDelta || isAudioDelta) && streamSid) {
-          if (!audioMode) audioMode = isOutputDelta ? "output" : "audio";
-
-          const shouldForward =
-            (audioMode === "output" && isOutputDelta) ||
-            (audioMode === "audio" && isAudioDelta);
-
-          if (shouldForward) {
-            const payload =
-              typeof msg.delta === "string"
-                ? msg.delta
-                : Buffer.from(msg.delta).toString("base64");
-
-            connection.send(
-              JSON.stringify({ event: "media", streamSid, media: { payload } })
-            );
-          }
-        }
-
-        if (msg.type === "conversation.item.input_audio_transcription.completed") {
-          const rawT =
-            (typeof msg.transcript === "string" && msg.transcript.trim()) ||
-            (
-              msg.item?.content?.find?.((c) => typeof c?.transcript === "string")
-                ?.transcript || ""
-            ).trim();
-
-          if (looksLikeJunkTranscript(rawT)) return;
-
-          const t = String(rawT).trim();
-          if (!t) return;
-
-          pendingUserQ = t;
-          lastTranscriptAt = Date.now();
-          if (hangupArmed) cancelHangup();
+          connection.send(
+            JSON.stringify({
+              event: "media",
+              streamSid,
+              media: { payload },
+            })
+          );
         }
 
         if (msg.type === "response.done") {
@@ -322,14 +339,13 @@ GLOBAL:
 
             const part = Array.isArray(out.content)
               ? out.content.find(
-                  (c) => typeof c?.transcript === "string" && c.transcript.trim()
+                  (c) =>
+                    typeof c?.transcript === "string" && c.transcript.trim()
                 )
               : null;
 
             const a = (part?.transcript || "").trim();
             if (!a) continue;
-
-            if (!greetingDone && greetingSent) greetingDone = true;
 
             if (pendingUserQ) {
               qaPairs.push({ q: pendingUserQ, a });
@@ -346,13 +362,13 @@ GLOBAL:
       }
     });
 
-    connection.on("message", async (raw) => {
+    connection.on("message", async (message) => {
       try {
-        const data = JSON.parse(raw);
+        const data = JSON.parse(message);
 
         if (data.event === "start") {
-          streamSid = data.start?.streamSid || streamSid || null;
-          callSid = data.start?.callSid || callSid || null;
+          streamSid = data.start.streamSid;
+          callSid = data.start.callSid || null;
 
           twilioStarted = true;
           callStarted = true;
@@ -362,7 +378,7 @@ GLOBAL:
           if (!userId && typeof cp.userId === "string") userId = cp.userId;
 
           await loadUser();
-          await initializeSession();
+          maybeInitializeSession();
 
           try {
             if (callSid) {
@@ -370,25 +386,34 @@ GLOBAL:
                 where: { callSid },
                 defaults: { callSid },
               });
+
+              if (twilioClient && PUBLIC_BASE_URL) {
+                await twilioClient.calls(callSid).recordings.create({
+                  recordingStatusCallback: `${PUBLIC_BASE_URL}/recording-status`,
+                  recordingStatusCallbackEvent: [
+                    "in-progress",
+                    "completed",
+                    "absent",
+                  ],
+                  recordingChannels: "dual",
+                  recordingTrack: "both",
+                });
+              }
             }
           } catch {}
 
-          setTimeout(() => maybeSendGreeting(), 200);
           return;
         }
 
         if (data.event === "media") {
-          const payload = data.media?.payload || "";
-          if (!payload) return;
-
           if (hangupArmed) cancelHangup();
-
           if (openAiWs.readyState === WebSocket.OPEN) {
-            try {
-              openAiWs.send(
-                JSON.stringify({ type: "input_audio_buffer.append", audio: payload })
-              );
-            } catch {}
+            openAiWs.send(
+              JSON.stringify({
+                type: "input_audio_buffer.append",
+                audio: data.media.payload,
+              })
+            );
           }
           return;
         }
@@ -418,7 +443,7 @@ GLOBAL:
           campaignType: String(kind || inferKind()),
         });
       } catch (e) {
-        console.error("[SUMMARY] summarize error", e?.message || e);
+        console.error("[SUMMARY] error", e?.message || e);
       }
     });
 
