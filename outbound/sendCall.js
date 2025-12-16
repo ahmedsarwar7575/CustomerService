@@ -117,14 +117,14 @@ export const sendCallController = async (req, res) => {
     // }
 
     // cooldown (avoid spam)
-    if (await hasRecentOutboundAttempt(user.id, kind)) {
-      return res.status(429).json({
-        error: "cooldown_active",
-        message: `Outbound ${kind} was attempted within last ${ATTEMPT_COOLDOWN_HOURS}h`,
-        userId: user.id,
-        type: kind,
-      });
-    }
+    // if (await hasRecentOutboundAttempt(user.id, kind)) {
+    //   return res.status(429).json({
+    //     error: "cooldown_active",
+    //     message: `Outbound ${kind} was attempted within last ${ATTEMPT_COOLDOWN_HOURS}h`,
+    //     userId: user.id,
+    //     type: kind,
+    //   });
+    // }
 
     const url = makeUrl(user.id, kind);
 
