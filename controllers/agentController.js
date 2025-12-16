@@ -450,3 +450,40 @@ export const getAllTicketsByAgentId = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+export const deleteAgent = async (req, res) => {
+  try {
+    const agentId = req.params.id;
+
+  
+    // Find agent
+    const agent = await Agent.findByPk(agentId);
+    if (!agent) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
+
+    // Check for active tickets
+    const ticketCount = await Ticket.count({ where: { agentId, status: "open" } });
+    if (ticketCount > 0) {
+      return res.status(400).json({
+        error: `Cannot delete agent with ${ticketCount} active tickets`,
+      });
+    }
+
+    // Delete all ratings for this agent
+    await Rating.destroy({ where: { agentId } });
+
+    // Delete the agent
+    await agent.destroy();
+
+    return res.status(200).json({
+      message: "Agent deleted successfully",
+      deletedAgentId: agentId,
+    });
+  } catch (error) {
+    console.error("Delete agent error:", error);
+    return res.status(500).json({
+      error: "Internal server error",
+      details: error.message,
+    });
+  }
+};
