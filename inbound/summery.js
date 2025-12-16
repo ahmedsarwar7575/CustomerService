@@ -6,10 +6,44 @@ import sequelize from "../config/db.js";
 import { Op } from "sequelize";
 import sendEmail from "../utils/Email.js";
 
+const ADMIN_EMAIL = "ahmedsarwar7575@gmail.com";
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const EMAIL_FIND_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+
 const YES_RE =
   /\b(yes|yeah|yep|yup|correct|that's right|that is right|right|sure|ok(?:ay)?|affirmative|exactly)\b/i;
+
+// Urdu/Arabic script ranges (good enough to catch Urdu text)
+const ARABIC_SCRIPT_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
+
+const NUM_WORD = {
+  zero: "0",
+  one: "1",
+  two: "2",
+  three: "3",
+  four: "4",
+  five: "5",
+  six: "6",
+  seven: "7",
+  eight: "8",
+  nine: "9",
+};
+
+const safeSendEmail = async ({ to, subject, text, html }) => {
+  try {
+    // Common signature: sendEmail({to,subject,text,html})
+    return await sendEmail( to, subject, text);
+  } catch (e1) {
+    try {
+      // Fallback signature: sendEmail(to, subject, body)
+      return await sendEmail(to, subject, html || text || "");
+    } catch (e2) {
+      console.warn("sendEmail failed:", e2?.message || e2);
+      return null;
+    }
+  }
+};
 
 const normalizePhone = (p) => {
   if (!p) return null;
@@ -27,81 +61,183 @@ const normalizeName = (n) => {
   return trimmed.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
-const cleanLanguages = (arr) => {
-  if (!Array.isArray(arr)) return [];
-  return Array.from(
-    new Set(
-      arr.map((v) => (v == null ? "" : String(v).trim())).filter((v) => v)
-    )
+const looksLikeAgentReadback = (s) =>
+  /\b(let me repeat|repeat that|make sure i have it|is that correct|correct\?)\b/i.test(
+    String(s || "")
   );
+
+/**
+ * If user INTENDS "_" or "-", they usually say "underscore" / "dash" / "hyphen".
+ * If transcript shows m-i-r-z-a... that’s spelling letters => remove hyphens.
+ * We only collapse hyphens when it looks like spelled-out letters (long sequence).
+ */
+const deSpellToken = (tok) => {
+  if (!tok) return "";
+  const t = String(tok).toLowerCase();
+
+  // e.g. one-one-one -> 111
+  if (t.includes("-")) {
+    const parts = t.split("-").filter(Boolean);
+
+    // numeric word chain
+    if (parts.length >= 2 && parts.every((p) => NUM_WORD[p] != null)) {
+      return parts.map((p) => NUM_WORD[p]).join("");
+    }
+
+    // spelling letters/digits like m-i-r-z-a OR 1-1-1
+    // only join when it's clearly spelling (many single-char parts)
+    const singleCount = parts.filter((p) => /^[a-z0-9]$/.test(p)).length;
+    if (parts.length >= 6 && singleCount / parts.length >= 0.8) {
+      return parts.join("");
+    }
+
+    return t; // keep as-is otherwise (could be real hyphen)
+  }
+
+  if (NUM_WORD[t] != null) return NUM_WORD[t];
+  return t;
+};
+
+const normalizeHyphenSpelledEmail = (email) => {
+  if (!email) return null;
+  let e = String(email).trim().toLowerCase();
+
+  // strip trailing punctuation
+  e = e.replace(/[>,.)]+$/g, "");
+
+  if (!e.includes("@")) return EMAIL_RE.test(e) ? e : null;
+
+  const [local0, domain0] = e.split("@");
+  if (!local0 || !domain0) return null;
+
+  let local = local0;
+  let domain = domain0;
+
+  // Collapse spelled-out local part like m-i-r-z-a-t-a-l-h-a...
+  const localParts = local.split("-").filter(Boolean);
+  const singleCount = localParts.filter((p) => /^[a-z0-9]$/.test(p)).length;
+
+  // Only collapse if it REALLY looks like spelling letters (long + mostly single chars)
+  if (localParts.length >= 6 && singleCount / localParts.length >= 0.8) {
+    local = localParts.join("");
+  }
+
+  // Collapse digits ONLY when it's clearly 1-1-1 (at least 2 hyphens between digits)
+  if (/\d-\d-\d/.test(local)) {
+    local = local.replace(/(\d)-(?=\d)/g, "$1");
+  }
+
+  // Domain sometimes gets hyphen-spelled too (rare), e.g. g-m-a-i-l
+  domain = domain
+    .split(".")
+    .map((label) => {
+      const parts = label.split("-").filter(Boolean);
+      if (parts.length >= 4 && parts.every((p) => /^[a-z]$/.test(p)))
+        return parts.join("");
+      return label;
+    })
+    .join(".");
+
+  const out = `${local}@${domain}`;
+  return EMAIL_RE.test(out) ? out : null;
 };
 
 /**
- * Sometimes transcription is wrong. Only trust an email if it is CONFIRMED.
- * Rules:
- * 1) If agent reads back an email and the user confirms (yes/correct), trust that email.
- * 2) Else, if user says an email and agent repeats the SAME email (or clearly acknowledges it), trust it.
- * 3) Else, return null (=> "not specified").
+ * Build an email from spoken/spelled text:
+ *  "m-i-r-z-a-t-a-l-h-a one-one-one at gmail dot com"
+ *   -> "mirzatalha111@gmail.com"
+ *
+ * IMPORTANT:
+ * - If they say "underscore" => keep "_"
+ * - If they say "dash/hyphen" => keep "-"
+ */
+const spokenToEmail = (text) => {
+  if (!text) return null;
+  const s0 = String(text).toLowerCase();
+
+  // 1) If transcript already has an email, normalize spelling-style hyphens
+  const direct = s0.match(EMAIL_FIND_RE) || [];
+  for (let i = direct.length - 1; i >= 0; i--) {
+    const norm = normalizeHyphenSpelledEmail(direct[i]);
+    if (norm) return norm;
+  }
+
+  // 2) Otherwise try building from words (at/dot/underscore/dash)
+  const s = s0
+    .replace(/[(),;:]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (
+    !/\b(at|dot|gmail|yahoo|outlook|hotmail|underscore|dash|hyphen)\b/i.test(s)
+  )
+    return null;
+
+  const tokens = s.split(" ");
+  let out = "";
+
+  for (const rawTok of tokens) {
+    const tok = rawTok.replace(/[^a-z0-9-]/g, ""); // keep hyphen for deSpellToken
+    if (!tok) continue;
+
+    if (tok === "at") out += "@";
+    else if (tok === "dot" || tok === "period" || tok === "point") out += ".";
+    else if (tok === "underscore") out += "_";
+    else if (tok === "dash" || tok === "hyphen") out += "-";
+    else if (tok === "plus") out += "+";
+    else out += deSpellToken(tok);
+  }
+
+  out = out.replace(/[^a-z0-9._%+\-@]/g, "");
+  const norm = normalizeHyphenSpelledEmail(out);
+  return norm || null;
+};
+
+/**
+ * CONFIRMED email only (transcription can be wrong):
+ * - Strongest: agent read-back email + user confirms yes/correct.
+ * - Also: user says "Yes, <email>" then agent repeats it => accept agent version.
+ * - If not clearly confirmed, return null.
  */
 const extractConfirmedEmail = (pairs) => {
   if (!Array.isArray(pairs) || !pairs.length) return null;
 
-  const getEmails = (s) =>
-    (String(s || "").match(EMAIL_FIND_RE) || []).slice(0);
-
   let lastConfirmed = null;
 
-  // 1) Agent read-back -> user confirms
   for (let i = 0; i < pairs.length; i++) {
-    const a = String(pairs[i]?.a || "");
-    const aEmails = getEmails(a);
-    if (!aEmails.length) continue;
+    const userUtter = String(pairs[i]?.q || "");
+    const agentUtter = String(pairs[i]?.a || "");
 
-    // "we have your email as X", "is your email X", etc.
-    const looksLikeReadBack = /\b(email|e-mail)\b/i.test(a);
+    const userSaidYes = YES_RE.test(userUtter.toLowerCase());
+    const nextUser1 = String(pairs[i + 1]?.q || "");
+    const nextUser2 = String(pairs[i + 2]?.q || "");
+    const nextSaidYes =
+      YES_RE.test(nextUser1.toLowerCase()) ||
+      YES_RE.test(nextUser2.toLowerCase());
 
-    if (!looksLikeReadBack) continue;
+    const userEmail = spokenToEmail(userUtter);
+    const agentEmail = spokenToEmail(agentUtter);
 
-    const nextQ1 = String(pairs[i + 1]?.q || "");
-    const nextQ2 = String(pairs[i + 2]?.q || "");
+    // Strong: agent read-back + confirmation
+    if (looksLikeAgentReadback(agentUtter) && agentEmail) {
+      if (userSaidYes || nextSaidYes) lastConfirmed = agentEmail;
+      continue;
+    }
 
-    const userConfirmed =
-      YES_RE.test(nextQ1.toLowerCase()) || YES_RE.test(nextQ2.toLowerCase());
+    // Common: user begins with "Yes, ..." then agent repeats
+    if (userSaidYes && agentEmail) {
+      lastConfirmed = agentEmail;
+      continue;
+    }
 
-    if (userConfirmed) {
-      lastConfirmed = aEmails[aEmails.length - 1];
+    // If user says yes and provides an email (and nothing better), accept it
+    if (userSaidYes && userEmail) {
+      lastConfirmed = userEmail;
+      continue;
     }
   }
 
-  if (lastConfirmed && EMAIL_RE.test(lastConfirmed)) return lastConfirmed;
-
-  // 2) User provides email -> agent repeats/acknowledges same email
-  for (let i = 0; i < pairs.length; i++) {
-    const q = String(pairs[i]?.q || "");
-    const qEmails = getEmails(q);
-    if (!qEmails.length) continue;
-
-    const userEmail = qEmails[qEmails.length - 1];
-    if (!EMAIL_RE.test(userEmail)) continue;
-
-    const a = String(pairs[i]?.a || "");
-    const aEmails = getEmails(a);
-    const agentRepeatedSame = aEmails.some(
-      (e) => e.toLowerCase() === userEmail.toLowerCase()
-    );
-
-    const agentAcknowledged =
-      /\b(got it|ok(?:ay)?|confirmed|thanks|thank you|perfect|great)\b/i.test(
-        a
-      );
-
-    if (agentRepeatedSame || agentAcknowledged) {
-      // Still require at least some sign of agreement (agent repeated OR acknowledged)
-      return userEmail;
-    }
-  }
-
-  return null;
+  return lastConfirmed;
 };
 
 const shouldForceUnsatisfiedIfTicketFlow = (pairs) => {
@@ -110,24 +246,57 @@ const shouldForceUnsatisfiedIfTicketFlow = (pairs) => {
     .join(" ")
     .toLowerCase();
 
-  // conservative: only when it really sounds like escalation/ticket creation/follow-up
   return /\b(escalat|open(?:ed)?\s+(a\s+)?ticket|create(?:d)?\s+(a\s+)?ticket|log(?:ged)?\s+(a\s+)?ticket|technician\s+(will|to)\s+(call|contact)|we('?ll| will)\s+(call|contact)\s+you|follow\s*up\s+(with\s+you)?|case\s+number)\b/i.test(
     text
   );
+};
+
+const normalizeLanguages = (arr, pairs) => {
+  const out = [];
+  const add = (v) => {
+    if (!v) return;
+    if (!out.includes(v)) out.push(v);
+  };
+
+  // From model
+  if (Array.isArray(arr)) {
+    for (const raw of arr) {
+      const s = String(raw || "").trim();
+      if (!s) continue;
+
+      // If model outputs Urdu phrase like "نہیں، مرزا طلحہ" => treat as Urdu
+      if (ARABIC_SCRIPT_RE.test(s)) {
+        add("Urdu");
+        continue;
+      }
+
+      const low = s.toLowerCase();
+      if (low.includes("urdu")) add("Urdu");
+      else if (low.includes("english")) add("English");
+      else if (low.includes("punjabi")) add("Punjabi");
+      else if (low.includes("pashto")) add("Pashto");
+      else if (low.includes("arabic")) add("Arabic");
+      else {
+        // keep short clean names only
+        if (s.length <= 20 && !/[،,]/.test(s)) add(normalizeName(s));
+      }
+    }
+  }
+
+  // From transcript text (backup)
+  const text = (pairs || [])
+    .map((p) => `${p?.q ?? ""} ${p?.a ?? ""}`)
+    .join(" ");
+  if (ARABIC_SCRIPT_RE.test(text)) add("Urdu");
+
+  return out;
 };
 
 function mockExtract(pairs) {
   const text = pairs.map((p) => `${p.q ?? ""} ${p.a ?? ""}`).join(" ");
   const lower = text.toLowerCase();
 
-  // Prefer confirmed email if possible (transcription can be wrong)
   const confirmedEmail = extractConfirmedEmail(pairs);
-
-  // Fallback: last email mentioned anywhere (least reliable; used only if confirmed not found)
-  const emailMatches = text.match(EMAIL_FIND_RE) || [];
-  const email =
-    confirmedEmail ||
-    (emailMatches.length ? emailMatches[emailMatches.length - 1] : null);
 
   const nameMatch = text.match(
     /\b(?:my name is|it's|i am)\s+([A-Za-z][A-Za-z\s'-]{1,40})/i
@@ -152,16 +321,13 @@ function mockExtract(pairs) {
     /\binvoice|payment|charge|refund|login|reset|error|ticket|order|shipment|crash|declined|fail|lost|track/i.test(
       lower
     );
+
   const greetingsOnly =
     !contactInfoOnly &&
     !satisfied &&
     !unsatisfied &&
     !hasIssueKeyword &&
     /\b(hello|hi|salam|assalam|testing the line|bye)\b/i.test(lower);
-
-  const languages = [];
-  if (/\b(assalam|wa[ -]?alaikum|ji haan|theek hai)\b/i.test(lower))
-    languages.push("Urdu");
 
   let ticketType = null;
   if (/\b(invoice|billing|charge|refund|card|declined|payment)\b/i.test(lower))
@@ -192,14 +358,13 @@ function mockExtract(pairs) {
   ).slice(0, 160);
   const summary = customerLine || "not specified";
 
-  // Business rule: if ticket/escalation flow, treat as not satisfied
   const forceUnsatisfied = shouldForceUnsatisfiedIfTicketFlow(pairs);
 
   return {
     customer: {
       name: name ? normalizeName(name) : "not specified",
       name_raw: name || "not specified",
-      email: email || "not specified",
+      email: confirmedEmail || "not specified",
     },
     ticket: {
       ticketType: ticketType || "not specified",
@@ -217,7 +382,7 @@ function mockExtract(pairs) {
     summary,
     has_meaningful_conversation: !greetingsOnly,
     contact_info_only: contactInfoOnly,
-    non_english_detected: languages,
+    non_english_detected: normalizeLanguages([], pairs),
     clarifications_needed: [],
     mishears_or_typos: [],
   };
@@ -228,15 +393,15 @@ const extractWithOpenAI = async (pairs, { timeoutMs = 60000 } = {}) => {
     "You are an accurate, terse extractor for GETPIE customer support call logs.",
     "English only. Output ONLY JSON matching the provided JSON Schema.",
     "If unknown/unclear, set the value to the string 'not specified'. Do not invent facts.",
-    "Transcription can be wrong. Prefer facts that are explicitly CONFIRMED in the call.",
-    "Email rule (important):",
-    "- The transcript may mis-spell an email when the user first says it.",
-    "- If the agent reads an email back and the user confirms (yes/correct), that confirmed email is the truth.",
-    "- If the user changes email, only use the new email if it is confirmed at the end.",
+    "Transcription can be wrong. Prefer facts explicitly CONFIRMED in the call.",
+    "EMAIL RULES (important):",
+    "- The transcript may mis-spell an email and may add hyphens between letters when user spells it (e.g., m-i-r-z-a...). Those hyphens are NOT part of the email; remove them.",
+    "- If the user explicitly says 'underscore' or 'dash/hyphen', keep those characters in the email.",
+    "- If agent reads an email back and user confirms yes/correct, that confirmed email is the truth.",
     "- If there is ANY doubt which email is correct, set customer.email = 'not specified'.",
-    "Satisfaction rule (important):",
+    "SATISFACTION RULES (important):",
     "- If agent/customer agree to create/escalate/open a ticket or schedule technician follow-up, set ticket.isSatisfied = false.",
-    "- Only set ticket.isSatisfied = true if the customer explicitly says solved/resolved/works and no escalation/ticket flow is happening.",
+    "- Only set ticket.isSatisfied = true if customer explicitly says solved/resolved/works and NO escalation/ticket flow exists.",
     "Keep summary <= 80 words.",
   ].join(" ");
 
@@ -321,7 +486,6 @@ ${JSON.stringify(pairs, null, 2)}
       model: "gpt-4o-mini",
       temperature: 0.2,
       max_output_tokens: 450,
-      // Structured Outputs (strict schema)
       text: {
         format: {
           type: "json_schema",
@@ -359,7 +523,6 @@ ${JSON.stringify(pairs, null, 2)}
     return { error: "openai_bad_json", body: raw };
   }
 
-  // IMPORTANT: handle incomplete generations (prevents parsing cut-off JSON)
   if (data?.status && data.status !== "completed") {
     return {
       error: "openai_incomplete",
@@ -370,9 +533,8 @@ ${JSON.stringify(pairs, null, 2)}
   }
 
   let outText = null;
-  if (typeof data.output_text === "string") {
-    outText = data.output_text;
-  } else if (Array.isArray(data.output)) {
+  if (typeof data.output_text === "string") outText = data.output_text;
+  else if (Array.isArray(data.output)) {
     const msgItem = data.output.find((item) => item.type === "message");
     const contentText = msgItem?.content?.find?.(
       (c) => c.type === "output_text"
@@ -401,7 +563,6 @@ export const summarizer = async (pairs, callSid, phone) => {
     if (useMock) {
       parsed = mockExtract(pairs);
     } else {
-      // Try once, then one retry with a bit more output room (still small output)
       parsed = await extractWithOpenAI(pairs, { timeoutMs: 60000 });
 
       if (parsed?.error) {
@@ -409,10 +570,7 @@ export const summarizer = async (pairs, callSid, phone) => {
         if (!retry?.error) parsed = retry;
       }
 
-      if (parsed?.error) {
-        // Keep behavior: return the error object (DB logic unchanged)
-        return parsed;
-      }
+      if (parsed?.error) return parsed;
     }
 
     const ns = (v) => {
@@ -423,7 +581,7 @@ export const summarizer = async (pairs, callSid, phone) => {
       return trimmed.toLowerCase() === "not specified" ? null : trimmed;
     };
 
-    // ✅ transcription-safe email: prefer confirmed email from pairs over model output
+    // ✅ transcription-safe confirmed email (agent read-back + user yes)
     const confirmedEmail = extractConfirmedEmail(pairs);
     const rawEmail = ns(confirmedEmail || parsed?.customer?.email);
     const safeEmail =
@@ -437,14 +595,13 @@ export const summarizer = async (pairs, callSid, phone) => {
       ns(parsed?.customer?.name) || ns(parsed?.customer?.name_raw);
     const safeName = normalizeName(rawName);
 
-    // Business rule safety: if ticket/escalation flow happened, force unsatisfied
+    // Business rule: ticket/escalation => unsatisfied
     const forceUnsatisfied = shouldForceUnsatisfiedIfTicketFlow(pairs);
 
     const parsedIsSat = parsed?.ticket?.isSatisfied;
     let isSatisfied = null;
     if (parsedIsSat === true) isSatisfied = true;
     else if (parsedIsSat === false) isSatisfied = false;
-
     if (forceUnsatisfied) isSatisfied = false;
 
     const priorityRaw = ns(parsed?.ticket?.priority);
@@ -471,20 +628,24 @@ export const summarizer = async (pairs, callSid, phone) => {
     const hasConversation = !!parsed?.has_meaningful_conversation;
     const contactInfoOnly = !!parsed?.contact_info_only;
 
-    // ✅ Do NOT ask the model to echo logs; store original pairs
+    // Store original pairs (don’t rely on model echo)
     const qaLog = Array.isArray(pairs) ? pairs : [];
 
     const summary = typeof parsed?.summary === "string" ? parsed.summary : "";
-    const languages = cleanLanguages(parsed?.non_english_detected);
+
+    // ✅ Clean languages so you never store Urdu phrases here
+    const languages = normalizeLanguages(parsed?.non_english_detected, pairs);
 
     if (!hasConversation && !contactInfoOnly) {
       return { skipped: "no_conversation", extracted: { summary, qaLog } };
     }
 
-    // CONTACT INFO ONLY FLOW
+    // CONTACT INFO ONLY FLOW (DB logic unchanged)
     if (contactInfoOnly) {
       const userResult = await sequelize.transaction(async (t) => {
         let userRecord = null;
+        let userCreated = false;
+
         if (safePhone)
           userRecord = await User.findOne({
             where: { phone: safePhone },
@@ -506,10 +667,10 @@ export const summarizer = async (pairs, callSid, phone) => {
             },
             { transaction: t }
           );
+          userCreated = true;
         } else {
           const patch = {};
           if (safeName && userRecord.name !== safeName) patch.name = safeName;
-          // update email if final confirmed email was extracted
           if (safeEmail && userRecord.email !== safeEmail)
             patch.email = safeEmail;
           if (safePhone && !userRecord.phone) patch.phone = safePhone;
@@ -518,11 +679,22 @@ export const summarizer = async (pairs, callSid, phone) => {
             await userRecord.update(patch, { transaction: t });
         }
 
-        return { user: userRecord };
+        return { user: userRecord, _flags: { userCreated } };
       });
 
+      // ✅ Admin notify (safe try/catch)
+      if (userResult?._flags?.userCreated) {
+        await safeSendEmail({
+          to: ADMIN_EMAIL,
+          subject: "GETPIE: New user created (contact-info call)",
+          text: `A new user was created.\nName: ${safeName || "N/A"}\nEmail: ${
+            safeEmail || "N/A"
+          }\nPhone: ${safePhone || "N/A"}\nCallSid: ${callSid}`,
+        });
+      }
+
       return {
-        ...userResult,
+        user: userResult.user,
         note: "contact_info_only_user_created",
         extracted: {
           name: safeName,
@@ -539,6 +711,8 @@ export const summarizer = async (pairs, callSid, phone) => {
 
     const result = await sequelize.transaction(async (t) => {
       let userRecord = null;
+      let userCreated = false;
+
       if (safePhone)
         userRecord = await User.findOne({
           where: { phone: safePhone },
@@ -560,6 +734,7 @@ export const summarizer = async (pairs, callSid, phone) => {
           },
           { transaction: t }
         );
+        userCreated = true;
       } else {
         const patch = {};
         if (safeName && userRecord.name !== safeName) patch.name = safeName;
@@ -572,6 +747,7 @@ export const summarizer = async (pairs, callSid, phone) => {
       }
 
       let ticketRecord = null;
+      let ticketCreated = false;
       let assignedAgentId = null;
 
       if (shouldCreateTicket) {
@@ -607,8 +783,8 @@ export const summarizer = async (pairs, callSid, phone) => {
                 Number(r.get("cnt")),
               ])
             );
-            let best = null;
 
+            let best = null;
             let bestCnt = Infinity;
             for (const a of agents) {
               const cnt = map.get(String(a.id)) ?? 0;
@@ -636,6 +812,7 @@ export const summarizer = async (pairs, callSid, phone) => {
           },
           { transaction: t }
         );
+        ticketCreated = true;
       }
 
       const callPatch = {
@@ -654,11 +831,14 @@ export const summarizer = async (pairs, callSid, phone) => {
       });
 
       let callRecord = null;
+      let callCreated = false;
+
       if (affected === 0) {
         callRecord = await Call.create(
           { callSid, ...callPatch },
           { transaction: t }
         );
+        callCreated = true;
       } else {
         callRecord = await Call.findOne({ where: { callSid }, transaction: t });
       }
@@ -668,6 +848,7 @@ export const summarizer = async (pairs, callSid, phone) => {
         ticket: ticketRecord,
         call: callRecord,
         agentId: assignedAgentId,
+        _flags: { userCreated, ticketCreated, callCreated },
         extracted: {
           name: safeName,
           email: safeEmail,
@@ -681,6 +862,53 @@ export const summarizer = async (pairs, callSid, phone) => {
         },
       };
     });
+
+    // ✅ EMAIL NOTIFICATIONS (safe try/catch) — DB logic unchanged
+    try {
+      const flags = result?._flags || {};
+      const events = [];
+      if (flags.userCreated) events.push("New user created");
+      if (flags.callCreated) events.push("New call created");
+      if (flags.ticketCreated) events.push("New ticket created");
+
+      if (events.length) {
+        await safeSendEmail({
+          to: ADMIN_EMAIL,
+          subject: `GETPIE: ${events.join(" + ")}`,
+          text:
+            `Events:\n- ${events.join("\n- ")}\n\n` +
+            `CallSid: ${callSid}\n` +
+            `User: ${result.user?.id || "N/A"} | ${safeName || "N/A"}\n` +
+            `Email: ${safeEmail || "N/A"}\n` +
+            `Phone: ${safePhone || "N/A"}\n` +
+            `Ticket: ${result.ticket?.id || "N/A"}\n` +
+            `Type: ${result.ticket?.ticketType || ticketType || "N/A"}\n` +
+            `Priority: ${result.ticket?.priority || ticketPriority}\n` +
+            `Summary: ${summary || "N/A"}`,
+        });
+      }
+
+      // Email user when ticket is created
+      if (flags.ticketCreated && safeEmail) {
+        await safeSendEmail({
+          to: safeEmail,
+          subject: "Your GETPIE support ticket has been created",
+          text:
+            `Hi ${safeName || "there"},\n\n` +
+            `We created a support ticket for you.\n` +
+            `Ticket ID: ${result.ticket?.id || "N/A"}\n` +
+            `Priority: ${result.ticket?.priority || ticketPriority}\n` +
+            `Summary: ${summary || "N/A"}\n\n` +
+            `We’ll contact you soon.\n\n` +
+            `— GETPIE Support`,
+        });
+      }
+    } catch (e) {
+      console.warn(
+        "Post-transaction email notifications failed:",
+        e?.message || e
+      );
+    }
 
     if (isSatisfied === true) result.note = "satisfied_no_ticket";
     return result;
