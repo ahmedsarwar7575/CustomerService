@@ -109,12 +109,12 @@ export const sendCallController = async (req, res) => {
     if (!user.phone) return res.status(400).json({ error: "user_missing_phone" });
 
     // respect "already completed" flags (same idea as cron userWhere filters)
-    if (kind === "satisfaction" && User.rawAttributes?.isSatisfactionCall && user.isSatisfactionCall) {
-      return res.json({ skipped: "already_completed", type: kind, userId: user.id });
-    }
-    if (kind === "upsell" && User.rawAttributes?.isUpSellCall && user.isUpSellCall) {
-      return res.json({ skipped: "already_completed", type: kind, userId: user.id });
-    }
+    // if (kind === "satisfaction" && User.rawAttributes?.isSatisfactionCall && user.isSatisfactionCall) {
+    //   return res.json({ skipped: "already_completed", type: kind, userId: user.id });
+    // }
+    // if (kind === "upsell" && User.rawAttributes?.isUpSellCall && user.isUpSellCall) {
+    //   return res.json({ skipped: "already_completed", type: kind, userId: user.id });
+    // }
 
     // cooldown (avoid spam)
     if (await hasRecentOutboundAttempt(user.id, kind)) {
