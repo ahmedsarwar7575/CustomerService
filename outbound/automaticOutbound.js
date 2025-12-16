@@ -1,4 +1,3 @@
-// automaticOutbound.js
 import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -11,7 +10,7 @@ import processCallOutcome from "./summerize.js";
 
 const {
   OPENAI_API_KEY,
-  REALTIME_VOICE = "alloy",
+  REALTIME_VOICE = "fable",
   REALTIME_MODEL,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
@@ -61,14 +60,10 @@ function buildSessionUpdate(instructions) {
         model: "gpt-4o-mini-transcribe",
         language: "en",
         prompt:
-          "Transcribe spoken audio to English. If the caller speaks another language, translate to English meaning. If silence/noise, output nothing.",
+          "Transcribe ONLY spoken audio to English. If non-English is spoken, translate meaning to English. If silence/noise, output nothing.",
       },
     },
   };
-}
-
-function getDisplayName(user) {
-  return user?.name || user?.firstName || "there";
 }
 
 function looksLikeJunkTranscript(s = "") {
@@ -92,6 +87,10 @@ function isFinalGoodbye(text = "") {
   return last === "goodbye" || last === "bye";
 }
 
+function getDisplayName(user) {
+  return user?.name || user?.firstName || "there";
+}
+
 export function createUpsellWSS() {
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
@@ -105,9 +104,10 @@ export function createUpsellWSS() {
 
     let openAiReady = false;
     let twilioStarted = false;
-    let sessionInitialized = false;
 
+    let sessionInitialized = false;
     let callStarted = false;
+
     let greetingSent = false;
     let greetingDone = false;
 
@@ -119,6 +119,8 @@ export function createUpsellWSS() {
     let hangupArmed = false;
     let hangupTimer = null;
 
+    let audioMode = null; // "output" | "audio" (choose first delta type we see)
+
     const qaPairs = [];
     const openAiWs = createOpenAIWs();
 
@@ -129,6 +131,15 @@ export function createUpsellWSS() {
         if (user.isUpSellCall === false) return "upsell";
       }
       return "upsell";
+    }
+
+    async function loadUser() {
+      if (user || !userId) return;
+      try {
+        user = await User.findOne({ where: { id: userId } });
+      } catch (e) {
+        console.error("[WS] user load error", e?.message || e);
+      }
     }
 
     function cancelHangup() {
@@ -155,15 +166,6 @@ export function createUpsellWSS() {
       }, GOODBYE_WAIT_MS);
     }
 
-    async function loadUser() {
-      if (user || !userId) return;
-      try {
-        user = await User.findOne({ where: { id: userId } });
-      } catch (e) {
-        console.error("[WS] user load error", e?.message || e);
-      }
-    }
-
     function maybeSendGreeting() {
       if (
         greetingSent ||
@@ -175,30 +177,27 @@ export function createUpsellWSS() {
 
       greetingSent = true;
 
-      const displayName = getDisplayName(user);
+      const name = getDisplayName(user);
       const k = String(inferKind()).toLowerCase();
 
       const greetingInstruction =
         k === "satisfaction"
           ? `You must speak first. English only. Calm tone.
-Say: "Hi ${displayName}, this is a quick follow-up from our customer success team."
-Then ask: "Our agent spoke with you recently. Are you satisfied with the assistance you received?"
+Say: "Hi ${name}, this is a quick follow-up from our customer success team."
+Ask: "Our agent spoke with you recently. Are you satisfied with the assistance you received?"
 Stop and wait.
-When ending the call, the LAST word must be exactly: "Goodbye."`
+When you end the call, the LAST word must be exactly: "Goodbye."`
           : `You must speak first. English only. Calm tone.
-Say: "Hi ${displayName}, this is a quick call from our customer success team."
+Say: "Hi ${name}, this is a quick call from our customer success team."
 Ask: "Is now a good moment for a quick 30-second chat?"
 Stop and wait.
-When ending the call, the LAST word must be exactly: "Goodbye."`;
+When you end the call, the LAST word must be exactly: "Goodbye."`;
 
       try {
         openAiWs.send(
           JSON.stringify({
             type: "response.create",
-            response: {
-              modalities: ["audio"],
-              instructions: greetingInstruction,
-            },
+            response: { modalities: ["audio"], instructions: greetingInstruction },
           })
         );
       } catch (e) {
@@ -219,17 +218,18 @@ When ending the call, the LAST word must be exactly: "Goodbye."`;
         base +
         `
 
-GLOBAL RULES:
+GLOBAL:
 - Speak ONLY English.
-- Calm, friendly tone.
-- Do NOT end the call unless you are done.
-- When you end, the LAST word must be exactly: "Goodbye."
+- Calm, friendly voice. Short sentences.
+- Do NOT invent what the caller said.
+- Only end when finished.
+- When ending, the LAST word must be exactly: "Goodbye."
 `.trim();
 
       try {
         openAiWs.send(JSON.stringify(buildSessionUpdate(instructions)));
         sessionInitialized = true;
-        maybeSendGreeting();
+        setTimeout(() => maybeSendGreeting(), 200);
       } catch (e) {
         console.error("[OPENAI] session.update error", e?.message || e);
       }
@@ -272,30 +272,35 @@ GLOBAL RULES:
           hasActiveResponse = true;
         }
 
-        if (
-          msg.type === "response.output_audio.delta" &&
-          msg.delta &&
-          streamSid
-        ) {
-          const payload =
-            typeof msg.delta === "string"
-              ? msg.delta
-              : Buffer.from(msg.delta).toString("base64");
+        const isOutputDelta =
+          msg.type === "response.output_audio.delta" && msg.delta;
+        const isAudioDelta = msg.type === "response.audio.delta" && msg.delta;
 
-          connection.send(
-            JSON.stringify({ event: "media", streamSid, media: { payload } })
-          );
+        if ((isOutputDelta || isAudioDelta) && streamSid) {
+          if (!audioMode) audioMode = isOutputDelta ? "output" : "audio";
+
+          const shouldForward =
+            (audioMode === "output" && isOutputDelta) ||
+            (audioMode === "audio" && isAudioDelta);
+
+          if (shouldForward) {
+            const payload =
+              typeof msg.delta === "string"
+                ? msg.delta
+                : Buffer.from(msg.delta).toString("base64");
+
+            connection.send(
+              JSON.stringify({ event: "media", streamSid, media: { payload } })
+            );
+          }
         }
 
-        if (
-          msg.type === "conversation.item.input_audio_transcription.completed"
-        ) {
+        if (msg.type === "conversation.item.input_audio_transcription.completed") {
           const rawT =
             (typeof msg.transcript === "string" && msg.transcript.trim()) ||
             (
-              msg.item?.content?.find?.(
-                (c) => typeof c?.transcript === "string"
-              )?.transcript || ""
+              msg.item?.content?.find?.((c) => typeof c?.transcript === "string")
+                ?.transcript || ""
             ).trim();
 
           if (looksLikeJunkTranscript(rawT)) return;
@@ -317,8 +322,7 @@ GLOBAL RULES:
 
             const part = Array.isArray(out.content)
               ? out.content.find(
-                  (c) =>
-                    typeof c?.transcript === "string" && c.transcript.trim()
+                  (c) => typeof c?.transcript === "string" && c.transcript.trim()
                 )
               : null;
 
@@ -334,9 +338,7 @@ GLOBAL RULES:
               qaPairs.push({ q: null, a });
             }
 
-            if (isFinalGoodbye(a)) {
-              armHangupWindow();
-            }
+            if (isFinalGoodbye(a)) armHangupWindow();
           }
         }
       } catch (e) {
@@ -363,7 +365,7 @@ GLOBAL RULES:
           await initializeSession();
 
           try {
-            if (callSid && twilioClient) {
+            if (callSid) {
               await Call.findOrCreate({
                 where: { callSid },
                 defaults: { callSid },
@@ -371,7 +373,7 @@ GLOBAL RULES:
             }
           } catch {}
 
-          maybeSendGreeting();
+          setTimeout(() => maybeSendGreeting(), 200);
           return;
         }
 
@@ -384,10 +386,7 @@ GLOBAL RULES:
           if (openAiWs.readyState === WebSocket.OPEN) {
             try {
               openAiWs.send(
-                JSON.stringify({
-                  type: "input_audio_buffer.append",
-                  audio: payload,
-                })
+                JSON.stringify({ type: "input_audio_buffer.append", audio: payload })
               );
             } catch {}
           }
@@ -412,13 +411,12 @@ GLOBAL RULES:
       } catch {}
 
       try {
-        const result = await processCallOutcome({
+        await processCallOutcome({
           qaPairs,
           userId,
           callSid,
           campaignType: String(kind || inferKind()),
         });
-        console.log("[SUMMARY] outcome", result?.outcome);
       } catch (e) {
         console.error("[SUMMARY] summarize error", e?.message || e);
       }
