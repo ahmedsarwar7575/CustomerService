@@ -19,14 +19,19 @@ const {
 
 const RT_MODEL = REALTIME_MODEL || "gpt-4o-realtime-preview";
 
-if (!OPENAI_API_KEY) {
-  console.error("[OPENAI] ERROR: Missing OPENAI_API_KEY in environment");
-}
-
 const twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
     ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
+
+// ---- tuning knobs ----
+const MIN_USER_SPEECH_MS = 180; // ignore tiny VAD blips (noise)
+const GOODBYE_WAIT_MS = 3000; // user wants 3 seconds
+const GOODBYE_GRACE_MS = 300; // small buffer so last TTS frames aren't cut
+
+if (!OPENAI_API_KEY) {
+  console.error("[OPENAI] ERROR: Missing OPENAI_API_KEY in environment");
+}
 
 /** ---------------- OPENAI WS FACTORY ---------------- */
 function createOpenAIWs() {
@@ -75,24 +80,24 @@ function buildSessionUpdate(instructions) {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.85, // less sensitive to tiny noise
+        threshold: 0.85,
         prefix_padding_ms: 300,
         silence_duration_ms: 700,
-        create_response: false, // we call response.create manually
-        interrupt_response: false, // no server barge-in
+        create_response: false,
+        interrupt_response: false,
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
       instructions,
       modalities: ["text", "audio"],
-      temperature: 0.7,
+      temperature: 0.6,
       input_audio_transcription: {
-        // 🔥 better model + hard English
-        model: "gpt-4o-transcribe-preview",
+        // use stable model; if your preview exists you can swap it back
+        model: "gpt-4o-mini-transcribe",
         language: "en",
         prompt:
-          "Agent and caller must speak ONLY English. If the caller uses any other language, transcribe it as English meaning only.",
+          "Transcribe ONLY English. If caller speaks another language, translate to English meaning. Do not output non-English.",
       },
     },
   };
@@ -112,7 +117,6 @@ function isGoodbye(text = "") {
   );
 }
 
-/** Simple helper to get a nice display name */
 function getDisplayName(user) {
   if (!user) return "there";
   return user.name || user.firstName || "there";
@@ -128,26 +132,41 @@ export function createUpsellWSS() {
 
     let streamSid = null;
     let callSid = null;
-    let markQueue = [];
-    let hasActiveResponse = false;
-    let pendingUserQ = null;
+
     let openaiReady = false;
-    let sessionConfigured = false;
-    let commitTimer = null;
-    let metricsTimer = null;
-    let hangupScheduled = false;
     let twilioStarted = false;
     let callStarted = false;
+    let firstMediaReceived = false;
+
+    let sessionConfigured = false;
+    let sessionAcked = false; // ✅ wait for session.updated before greeting (noise fix)
     let greetingSent = false;
 
+    let hasActiveResponse = false;
+    let pendingUserQ = null;
+
+    let commitTimer = null;
+    let metricsTimer = null;
+
+    // speech duration tracking (noise control)
+    let lastSpeechStartAt = null;
+
+    // goodbye window state
+    let goodbyePending = false;
+    let goodbyeTimer = null;
+    let goodbyeSpeechStartAt = null;
+    let hangupDone = false;
+
+    // assistant text fallback
+    let currentAssistantText = "";
+
+    // queues
+    let markQueue = [];
     let mediaQueue = [];
 
-    let framesIn = 0;
-    let framesOut = 0;
-    let bytesIn = 0;
-    let bytesOut = 0;
-
+    // QA for summarizer
     const qaPairs = [];
+
     const openAiWs = createOpenAIWs();
 
     function inferKind() {
@@ -161,12 +180,7 @@ export function createUpsellWSS() {
 
     const startMetrics = () => {
       if (metricsTimer) return;
-      metricsTimer = setInterval(() => {
-        // Uncomment to debug metrics:
-        // console.log(
-        //   `[METRICS] in=${framesIn}/${bytesIn}B out=${framesOut}/${bytesOut}B active=${hasActiveResponse} openai=${openaiReady} marks=${markQueue.length}`
-        // );
-      }, 3000);
+      metricsTimer = setInterval(() => {}, 3000);
     };
 
     const sendMark = () => {
@@ -183,62 +197,71 @@ export function createUpsellWSS() {
       } catch {}
     };
 
-    function scheduleHangup() {
-      if (hangupScheduled || !callSid || !twilioClient) return;
-      hangupScheduled = true;
-      // ⏳ wait longer so closing sentence is NOT cut off
-      setTimeout(() => {
-        twilioClient
-          .calls(callSid)
-          .update({ status: "completed" })
-          .then(() => {
-            console.log(
-              `[TWILIO] Hung up outbound call ${callSid} ~7s after goodbye.`
-            );
-          })
-          .catch((err) => {
-            console.error("[TWILIO] hangup error", err?.message || err);
-          });
-      }, 7000);
+    function clearGoodbyeWindow() {
+      goodbyePending = false;
+      goodbyeSpeechStartAt = null;
+      if (goodbyeTimer) clearTimeout(goodbyeTimer);
+      goodbyeTimer = null;
+    }
+
+    async function hangupCallNow() {
+      if (hangupDone || !callSid || !twilioClient) return;
+      hangupDone = true;
+
+      try {
+        await twilioClient.calls(callSid).update({ status: "completed" });
+        console.log(`[TWILIO] Hung up outbound call ${callSid}`);
+      } catch (err) {
+        console.error("[TWILIO] hangup error", err?.message || err);
+      }
+    }
+
+    // ✅ NEW: goodbye → wait 3s → if user speaks cancel, else hang up
+    function startGoodbyeWindow() {
+      clearGoodbyeWindow();
+      goodbyePending = true;
+
+      // small grace so last audio frames finish playing
+      goodbyeTimer = setTimeout(async () => {
+        if (!goodbyePending) return;
+        console.log("[HANGUP] goodbye window expired, hanging up");
+        await hangupCallNow();
+      }, GOODBYE_GRACE_MS + GOODBYE_WAIT_MS);
     }
 
     /** --------------- GREETING LOGIC (AGENT SPEAKS FIRST) --------------- */
     function maybeSendGreeting() {
       if (greetingSent) return;
-      if (!sessionConfigured) return;
-      if (!callStarted) return;
+      if (!sessionConfigured || !sessionAcked) return; // ✅ wait for session.updated
+      if (!callStarted || !twilioStarted) return;
+      if (!firstMediaReceived) return; // ✅ wait for stream audio path
       if (openAiWs.readyState !== WebSocket.OPEN) return;
 
       greetingSent = true;
 
       const displayName = getDisplayName(user);
-      const k = String(kind || "").toLowerCase();
+      const k = String(inferKind() || "").toLowerCase();
 
-      let greetingInstruction;
+      const greetingInstruction =
+        k === "satisfaction"
+          ? `
+Speak ONLY English. Calm, friendly tone. Short sentences.
 
-      if (k === "satisfaction") {
-        // Satisfaction campaign greeting
-        greetingInstruction = `
-In this FIRST reply, speak in English only, with a calm, natural tone.
+FIRST: Greet the customer by name "${displayName}" if natural.
+SECOND: Say this is a quick follow-up about their recent support interaction.
+THIRD: Ask: "Are you satisfied with the assistance you received?"
 
-1. Greet the customer by name "${displayName}" if it sounds natural.
-2. Briefly say this is a quick follow-up about their recent support call.
-3. Then clearly ask: "Are you satisfied with the assistance you received?"
-4. After asking, STOP and wait for their answer.
-You must speak first. Keep it to 1–2 short sentences plus the question.
+Then STOP and wait for their answer. You must speak first.
+`.trim()
+          : `
+Speak ONLY English. Calm, friendly tone. Short sentences.
+
+FIRST: Greet the customer by name "${displayName}" if natural.
+SECOND: Say this is a quick call to share one simple way to help their business grow using their existing payment processing.
+THIRD: Ask: "Is now a good moment to talk for less than a minute?"
+
+Then STOP and wait for their answer. You must speak first.
 `.trim();
-      } else {
-        // Upsell campaign greeting
-        greetingInstruction = `
-In this FIRST reply, speak in English only, with a calm, natural tone.
-
-1. Greet the customer by name "${displayName}" if it sounds natural.
-2. Say this is a quick call to share one simple way to help their business grow using their existing payment processing.
-3. Then ask a single short question like: "Is now a good moment to talk for less than a minute?"
-4. After asking, STOP and wait for their answer.
-You must speak first. Keep it brief and friendly.
-`.trim();
-      }
 
       try {
         openAiWs.send(
@@ -252,7 +275,7 @@ You must speak first. Keep it brief and friendly.
         );
         console.log("[OPENAI] greeting sent (agent spoke first)");
       } catch (e) {
-        console.error("greeting response.create error", e);
+        console.error("[OPENAI] greeting response.create error", e);
       }
     }
 
@@ -264,64 +287,23 @@ You must speak first. Keep it brief and friendly.
 
       try {
         const pickedKind = inferKind() || "upsell";
+        const instrBase = await makeSystemMessage(userId, pickedKind);
 
-        let instrBase = await makeSystemMessage(userId, pickedKind);
-
-        // Global behavior: English only + calm tone
         const instr =
           instrBase +
           `
-          
+
 GLOBAL BEHAVIOR (VERY IMPORTANT):
-- Always speak ONLY in English, even if the caller uses another language.
-- Use a calm, friendly, human tone. Short sentences, no robotic style.
-- Always end the call with a natural goodbye line before hanging up.
+- Speak ONLY English (no Urdu, no Punjabi). If caller uses another language, respond in English.
+- Calm, clear, human tone. No robotic style.
+- Never produce sound effects or filler noises.
+- When ending the call, say a clear goodbye sentence, then stay silent briefly to let the caller respond.
 `.trim();
 
-        // Only send session.update here (no greeting yet)
         openAiWs.send(JSON.stringify(buildSessionUpdate(instr)));
         sessionConfigured = true;
-        console.log("[OPENAI] session.update sent (configured)");
-
-        // Now that session is configured, send the first greeting
-        maybeSendGreeting();
-
-        // Start periodic commit loop so VAD can segment audio
-        if (!commitTimer) {
-          commitTimer = setInterval(() => {
-            if (
-              openAiWs.readyState === WebSocket.OPEN &&
-              sessionConfigured &&
-              !hasActiveResponse
-            ) {
-              try {
-                openAiWs.send(
-                  JSON.stringify({ type: "input_audio_buffer.commit" })
-                );
-              } catch {}
-            }
-          }, 300);
-        }
-
-        // Flush any queued Twilio audio
-        if (mediaQueue.length) {
-          try {
-            for (const payload of mediaQueue) {
-              openAiWs.send(
-                JSON.stringify({
-                  type: "input_audio_buffer.append",
-                  audio: payload,
-                })
-              );
-            }
-            mediaQueue = [];
-            openAiWs.send(
-              JSON.stringify({ type: "input_audio_buffer.commit" })
-            );
-          } catch (e) {
-            console.error("[OPENAI] flush queued media error", e?.message);
-          }
-        }
+        sessionAcked = false; // will flip on "session.updated"
+        console.log("[OPENAI] session.update sent");
       } catch (e) {
         console.error(
           "[OPENAI] configureSessionIfNeeded error",
@@ -378,23 +360,67 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
       try {
         const msg = JSON.parse(buf);
 
-        // We do NOT cancel on speech_started -> avoids tiny-noise barge-in
+        // ✅ this is the key for the noise fix
+        if (msg.type === "session.updated") {
+          sessionAcked = true;
+          console.log("[OPENAI] session.updated (ack)");
+          maybeSendGreeting();
+        }
 
+        // capture assistant text as fallback (goodbye detection)
+        if (msg.type === "response.created") {
+          hasActiveResponse = true;
+          currentAssistantText = "";
+        }
+        if (
+          msg.type === "response.text.delta" &&
+          typeof msg.delta === "string"
+        ) {
+          currentAssistantText += msg.delta;
+        }
+        if (
+          msg.type === "response.output_text.delta" &&
+          typeof msg.delta === "string"
+        ) {
+          currentAssistantText += msg.delta;
+        }
+
+        // speech started (used for noise gating + goodbye cancel)
+        if (msg.type === "input_audio_buffer.speech_started") {
+          lastSpeechStartAt = Date.now();
+
+          if (goodbyePending) {
+            goodbyeSpeechStartAt = Date.now();
+          }
+        }
+
+        // user stopped talking => create response only if it was real speech (not tiny noise)
         if (msg.type === "input_audio_buffer.speech_stopped") {
-          console.log("[OPENAI] speech_stopped");
-          if (!hasActiveResponse) {
+          const dur = lastSpeechStartAt ? Date.now() - lastSpeechStartAt : 0;
+          lastSpeechStartAt = null;
+
+          // If user spoke during goodbye window long enough -> cancel hangup and continue
+          if (goodbyePending && goodbyeSpeechStartAt) {
+            const gdDur = Date.now() - goodbyeSpeechStartAt;
+            if (gdDur >= MIN_USER_SPEECH_MS) {
+              console.log(
+                "[HANGUP] user spoke during goodbye window -> cancel hangup"
+              );
+              clearGoodbyeWindow();
+            }
+          }
+
+          // only respond if speech was not just noise
+          if (dur >= MIN_USER_SPEECH_MS && !hasActiveResponse) {
             try {
               openAiWs.send(JSON.stringify({ type: "response.create" }));
             } catch (e) {
-              console.error("manual response.create error", e);
+              console.error("[OPENAI] manual response.create error", e);
             }
           }
         }
 
-        if (msg.type === "response.created") {
-          hasActiveResponse = true;
-        }
-
+        // stream assistant audio to Twilio
         if (
           (msg.type === "response.audio.delta" ||
             msg.type === "response.output_audio.delta") &&
@@ -404,9 +430,6 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
             typeof msg.delta === "string"
               ? msg.delta
               : Buffer.from(msg.delta).toString("base64");
-
-          bytesOut += Buffer.byteLength(payload);
-          framesOut++;
 
           if (streamSid) {
             connection.send(
@@ -420,6 +443,7 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
           }
         }
 
+        // transcription completed (also cancels goodbye if real text came in)
         if (
           msg.type === "conversation.item.input_audio_transcription.completed"
         ) {
@@ -430,34 +454,48 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
                 (c) => typeof c?.transcript === "string"
               )?.transcript || ""
             ).trim();
-          if (t) pendingUserQ = t;
+
+          if (t) {
+            pendingUserQ = t;
+
+            if (goodbyePending) {
+              console.log(
+                "[HANGUP] transcription arrived during goodbye window -> cancel hangup"
+              );
+              clearGoodbyeWindow();
+            }
+          }
         }
 
+        // response done => Q/A logging + goodbye window start
         if (msg.type === "response.done") {
           hasActiveResponse = false;
+
           const outputs = msg.response?.output || [];
           for (const out of outputs) {
-            if (out?.role === "assistant") {
-              const part = Array.isArray(out.content)
-                ? out.content.find(
-                    (c) =>
-                      typeof c?.transcript === "string" && c.transcript.trim()
-                  )
-                : null;
-              const a = (part?.transcript || "").trim();
-              if (a) {
-                if (pendingUserQ) {
-                  qaPairs.push({ q: pendingUserQ, a });
-                  pendingUserQ = null;
-                } else {
-                  qaPairs.push({ q: null, a });
-                }
+            if (out?.role !== "assistant") continue;
 
-                // goodbye detection -> hang up ~7s later
-                if (isGoodbye(a)) {
-                  scheduleHangup();
-                }
-              }
+            const part = Array.isArray(out.content)
+              ? out.content.find(
+                  (c) =>
+                    typeof c?.transcript === "string" && c.transcript.trim()
+                )
+              : null;
+
+            const a = (part?.transcript || currentAssistantText || "").trim();
+            if (!a) continue;
+
+            if (pendingUserQ) {
+              qaPairs.push({ q: pendingUserQ, a });
+              pendingUserQ = null;
+            } else {
+              qaPairs.push({ q: null, a });
+            }
+
+            // ✅ NEW behavior: goodbye -> wait 3 seconds -> if user doesn't speak => hang up
+            if (isGoodbye(a)) {
+              console.log("[HANGUP] assistant said goodbye -> start 3s window");
+              startGoodbyeWindow();
             }
           }
         }
@@ -476,9 +514,6 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
           case "start": {
             streamSid = data.start?.streamSid || streamSid || null;
             callSid = data.start?.callSid || callSid || null;
-            console.log(
-              `[TWILIO] start streamSid=${streamSid} callSid=${callSid}`
-            );
 
             twilioStarted = true;
             callStarted = true;
@@ -490,8 +525,6 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
             if (!user || String(user.id) !== String(userId)) {
               try {
                 user = await User.findOne({ where: { id: userId } });
-                if (user)
-                  console.log("[WS] user reloaded via start.customParameters");
               } catch (e) {
                 console.error("[WS] user reload error", e?.message || e);
               }
@@ -499,45 +532,46 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
 
             await configureSessionIfNeeded();
 
+            // commit loop (helps VAD segmentation)
+            if (!commitTimer) {
+              commitTimer = setInterval(() => {
+                if (
+                  openAiWs.readyState === WebSocket.OPEN &&
+                  sessionConfigured &&
+                  !hasActiveResponse
+                ) {
+                  try {
+                    openAiWs.send(
+                      JSON.stringify({ type: "input_audio_buffer.commit" })
+                    );
+                  } catch {}
+                }
+              }, 300);
+            }
+
+            // create Call row (optional)
             try {
-              if (callSid && twilioClient) {
+              if (callSid) {
                 await Call.findOrCreate({
                   where: { callSid },
-                  defaults: {
-                    callSid,
-                  },
+                  defaults: { callSid },
                 });
-
-                const base =
-                  process.env.PUBLIC_BASE_URL || "https://example.com";
-
-                await twilioClient.calls(callSid).recordings.create({
-                  recordingStatusCallback: `${base}/recording-status`,
-                  recordingStatusCallbackEvent: [
-                    "in-progress",
-                    "completed",
-                    "absent",
-                  ],
-                  recordingChannels: "dual",
-                  recordingTrack: "both",
-                });
-                console.log("[TWILIO] recording started");
               }
-            } catch (e) {
-              console.error("[TWILIO] recording error", e?.message || e);
-            }
+            } catch {}
+
             break;
           }
 
           case "media": {
-            if (!streamSid && data.streamSid) {
-              streamSid = data.streamSid;
-              console.log("[TWILIO] inferred streamSid", streamSid);
-            }
+            if (!streamSid && data.streamSid) streamSid = data.streamSid;
 
-            framesIn++;
             const payload = data.media?.payload || "";
-            bytesIn += Buffer.byteLength(payload);
+
+            if (!firstMediaReceived) {
+              firstMediaReceived = true;
+              // after first media arrives, greeting is now safe once session.updated arrives
+              maybeSendGreeting();
+            }
 
             await configureSessionIfNeeded();
 
@@ -565,11 +599,11 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
           }
 
           case "stop": {
-            console.log("[TWILIO] stop");
             if (commitTimer) {
               clearInterval(commitTimer);
               commitTimer = null;
             }
+            clearGoodbyeWindow();
             try {
               if (openAiWs.readyState === WebSocket.OPEN) {
                 openAiWs.send(
@@ -581,10 +615,8 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
             break;
           }
 
-          default: {
-            console.log("[TWILIO] event", data.event);
+          default:
             break;
-          }
         }
       } catch (e) {
         console.error("[WS] parse error", e);
@@ -592,24 +624,20 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
     });
 
     connection.on("close", async () => {
-      console.log("[WS] Twilio disconnected");
       if (metricsTimer) clearInterval(metricsTimer);
-      if (commitTimer) {
-        clearInterval(commitTimer);
-        commitTimer = null;
-      }
+      if (commitTimer) clearInterval(commitTimer);
+      clearGoodbyeWindow();
+
       try {
         if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
       } catch {}
-
-      console.log("[SUMMARY] qaPairs", qaPairs.length);
 
       try {
         const result = await processCallOutcome({
           qaPairs,
           userId,
           callSid,
-          campaignType: kind || "upsell",
+          campaignType: inferKind() || "upsell",
         });
         console.log("[SUMMARY] outcome", result?.outcome);
       } catch (e) {
@@ -620,6 +648,6 @@ GLOBAL BEHAVIOR (VERY IMPORTANT):
     connection.on("error", (e) => console.error("[WS] error", e?.message || e));
   });
 
-  console.log("[WS] upsell WSS ready (noServer)");
+  console.log("[WS] outbound WSS ready (noServer)");
   return wss;
 }
