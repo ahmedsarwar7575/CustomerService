@@ -60,27 +60,26 @@ function buildSessionUpdate(instructions) {
         model: "gpt-4o-mini-transcribe",
         language: "en",
         prompt:
-          "Transcribe ONLY spoken audio to English. If non-English is spoken, translate meaning to English. Never output meta-instructions. If unclear/noise, output nothing.",
+          "Transcribe ONLY spoken audio to English. If non-English is spoken, translate meaning to English. If unclear/noise/silence, output nothing.",
       },
     },
   };
 }
 
-function looksLikeJunkTranscript(s = "") {
+function isJunkTranscript(s = "") {
   const t = String(s).trim().toLowerCase();
   if (!t) return true;
   if (t === "english only" || t === "english only.") return true;
-  if (t.includes("transcribe only") || t.includes("do not output")) return true;
+  if (t.includes("transcribe only")) return true;
+  if (t.includes("do not output")) return true;
   if (t.includes("additional context/instructions")) return true;
   if (t.includes("###") || t.startsWith("you will receive")) return true;
   return false;
 }
 
-function isFinalGoodbye(a = "") {
-  const t = String(a).trim();
-  if (!t) return false;
-  const cleaned = t.replace(/\s+/g, " ").replace(/[^\w\s.]+$/g, "");
-  return cleaned.endsWith("Goodbye.") || cleaned.endsWith("Goodbye");
+function endsWithGoodbye(a = "") {
+  const t = String(a).trim().replace(/\s+/g, " ");
+  return t.endsWith("Goodbye.") || t.endsWith("Goodbye");
 }
 
 function getDisplayName(user) {
@@ -109,7 +108,7 @@ export function createUpsellWSS() {
     let hasActiveResponse = false;
 
     let pendingUserQ = null;
-    let lastTranscriptAt = 0;
+    let lastUserTranscriptAt = 0;
 
     let hangupArmed = false;
     let hangupTimer = null;
@@ -150,11 +149,57 @@ export function createUpsellWSS() {
       }, GOODBYE_WAIT_MS);
     }
 
+    async function loadUser() {
+      try {
+        if (!userId) return;
+        user = await User.findOne({ where: { id: userId } });
+      } catch (e) {
+        console.error("[WS] user load error", e?.message || e);
+      } finally {
+        userLookupDone = true;
+      }
+    }
+
+    async function initializeSession() {
+      const pickedKind = inferKind();
+      let base = "";
+      try {
+        base = await makeSystemMessage(userId, pickedKind);
+      } catch (e) {
+        base = "";
+      }
+
+      const rules = `
+STRICT RULES:
+- Speak ONLY English. Never speak any other language.
+- Never say the phrase "English only" to the customer.
+- Calm, soft tone. Short sentences.
+- When you end the call, your LAST word must be exactly: "Goodbye."
+`;
+
+      try {
+        openAiWs.send(
+          JSON.stringify(buildSessionUpdate(base + "\n\n" + rules))
+        );
+        sessionInitialized = true;
+        setTimeout(() => maybeSendGreeting(), 120);
+      } catch (e) {
+        console.error("[OPENAI] session.update error", e?.message || e);
+      }
+    }
+
+    function maybeInitializeSession() {
+      if (sessionInitialized) return;
+      if (!openAiReady || !twilioStarted || !userLookupDone) return;
+      initializeSession();
+    }
+
     function maybeSendGreeting() {
       if (
         greetingSent ||
         !sessionInitialized ||
         !callStarted ||
+        !streamSid ||
         openAiWs.readyState !== WebSocket.OPEN
       )
         return;
@@ -166,83 +211,26 @@ export function createUpsellWSS() {
 
       const greetingInstruction =
         k === "satisfaction"
-          ? `English only. Calm tone. You must speak first.
+          ? `You must speak first. English only. Calm tone.
 Say: "Hi ${name}, this is a quick follow-up from our customer success team."
 Then ask: "Our agent spoke with you recently. Are you satisfied with the assistance you received?"
-Stop and wait.
-When you end the call, the LAST word must be exactly: "Goodbye."`
-          : `English only. Calm tone. You must speak first.
+Stop and wait.`
+          : `You must speak first. English only. Calm tone.
 Say: "Hi ${name}, this is a quick call from our customer success team."
 Then ask: "Is now a good moment for a quick 30-second chat?"
-Stop and wait.
-When you end the call, the LAST word must be exactly: "Goodbye."`;
+Stop and wait.`;
 
       try {
         openAiWs.send(
           JSON.stringify({
             type: "response.create",
-            response: {
-              modalities: ["audio"],
-              instructions: greetingInstruction,
-            },
+            response: { instructions: greetingInstruction },
           })
         );
+        console.log("[OPENAI] greeting sent");
       } catch (e) {
         console.error("[OPENAI] greeting error", e?.message || e);
       }
-    }
-
-    function initializeSession() {
-      const pickedKind = inferKind();
-
-      let instr =
-        `STRICT RULES:
-- Speak ONLY English. Never speak any other language.
-- NEVER say the words "English only" to the caller.
-- Calm, soft tone. Short sentences.
-- Only end when finished; when ending, last word must be exactly "Goodbye."
-` + "\n\n";
-
-      return makeSystemMessage(userId, pickedKind).then((base) => {
-        const final = base + "\n\n" + instr;
-        try {
-          openAiWs.send(JSON.stringify(buildSessionUpdate(final)));
-        } catch (e) {
-          console.error("[OPENAI] session.update error", e?.message || e);
-        }
-      });
-    }
-
-    function maybeInitializeSession() {
-      if (sessionInitialized) return;
-      if (!openAiReady || !twilioStarted || !userLookupDone) return;
-
-      initializeSession()
-        .then(() => {
-          const fallback = setTimeout(() => {
-            if (!sessionInitialized) {
-              sessionInitialized = true;
-              maybeSendGreeting();
-            }
-          }, 250);
-
-          const once = (buf) => {
-            try {
-              const msg = JSON.parse(buf);
-              if (msg.type === "session.updated") {
-                clearTimeout(fallback);
-                if (!sessionInitialized) {
-                  sessionInitialized = true;
-                  maybeSendGreeting();
-                }
-                openAiWs.off("message", once);
-              }
-            } catch {}
-          };
-
-          openAiWs.on("message", once);
-        })
-        .catch((e) => console.error("[OPENAI] init err", e?.message || e));
     }
 
     try {
@@ -251,17 +239,6 @@ When you end the call, the LAST word must be exactly: "Goodbye."`;
       if (parts[0] === "upsell-stream" && parts[1]) userId = parts[1];
       kind = url.searchParams.get("kind") || null;
     } catch {}
-
-    async function loadUser() {
-      if (!userId) return;
-      try {
-        user = await User.findOne({ where: { id: userId } });
-      } catch (e) {
-        console.error("[WS] user load error", e?.message || e);
-      } finally {
-        userLookupDone = true;
-      }
-    }
 
     openAiWs.on("open", async () => {
       openAiReady = true;
@@ -290,20 +267,18 @@ When you end the call, the LAST word must be exactly: "Goodbye."`;
               )?.transcript || ""
             ).trim();
 
-          if (looksLikeJunkTranscript(q)) return;
+          if (isJunkTranscript(q)) return;
 
           pendingUserQ = q;
-          lastTranscriptAt = Date.now();
+          lastUserTranscriptAt = Date.now();
           if (hangupArmed) cancelHangup();
         }
 
         if (msg.type === "input_audio_buffer.speech_stopped") {
           if (hangupArmed) return;
           if (hasActiveResponse) return;
-
-          const recent = Date.now() - lastTranscriptAt < 1800;
-          if (!recent) return;
           if (!pendingUserQ) return;
+          if (Date.now() - lastUserTranscriptAt > 2500) return;
 
           try {
             openAiWs.send(JSON.stringify({ type: "response.create" }));
@@ -354,7 +329,7 @@ When you end the call, the LAST word must be exactly: "Goodbye."`;
               qaPairs.push({ q: null, a });
             }
 
-            if (isFinalGoodbye(a)) armHangupWindow();
+            if (endsWithGoodbye(a)) armHangupWindow();
           }
         }
       } catch (e) {
@@ -379,6 +354,7 @@ When you end the call, the LAST word must be exactly: "Goodbye."`;
 
           await loadUser();
           maybeInitializeSession();
+          maybeSendGreeting();
 
           try {
             if (callSid) {
