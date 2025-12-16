@@ -19,6 +19,8 @@ const {
 
 const MODEL = REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
 const GOODBYE_WAIT_MS = 3000;
+const REPROMPT_MS = 8000;
+const MIN_SPEECH_MS = 350;
 
 const twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
@@ -108,10 +110,13 @@ export function createUpsellWSS() {
     let hasActiveResponse = false;
 
     let pendingUserQ = null;
-    let lastUserTranscriptAt = 0;
 
     let hangupArmed = false;
     let hangupTimer = null;
+
+    let repromptTimer = null;
+
+    let lastSpeechStartAt = 0;
 
     const qaPairs = [];
     const openAiWs = createOpenAIWebSocket();
@@ -131,6 +136,11 @@ export function createUpsellWSS() {
       hangupTimer = null;
     }
 
+    function cancelReprompt() {
+      if (repromptTimer) clearTimeout(repromptTimer);
+      repromptTimer = null;
+    }
+
     async function hangupNow() {
       if (!callSid || !twilioClient) return;
       try {
@@ -142,11 +152,36 @@ export function createUpsellWSS() {
 
     function armHangupWindow() {
       cancelHangup();
+      cancelReprompt();
       hangupArmed = true;
       hangupTimer = setTimeout(async () => {
         if (!hangupArmed) return;
         await hangupNow();
       }, GOODBYE_WAIT_MS);
+    }
+
+    function armReprompt() {
+      cancelReprompt();
+      repromptTimer = setTimeout(() => {
+        if (!openAiWs || openAiWs.readyState !== WebSocket.OPEN) return;
+        if (hasActiveResponse) return;
+        if (hangupArmed) return;
+
+        const k = String(inferKind()).toLowerCase();
+        const nudge =
+          k === "satisfaction"
+            ? "English only. Please answer yes or no: are you satisfied with the assistance you received?"
+            : "English only. Just a quick yes or no: are you interested in this solution for your business?";
+
+        try {
+          openAiWs.send(
+            JSON.stringify({
+              type: "response.create",
+              response: { instructions: nudge },
+            })
+          );
+        } catch {}
+      }, REPROMPT_MS);
     }
 
     async function loadUser() {
@@ -165,7 +200,7 @@ export function createUpsellWSS() {
       let base = "";
       try {
         base = await makeSystemMessage(userId, pickedKind);
-      } catch (e) {
+      } catch {
         base = "";
       }
 
@@ -175,6 +210,7 @@ STRICT RULES:
 - Never say the phrase "English only" to the customer.
 - Calm, soft tone. Short sentences.
 - When you end the call, your LAST word must be exactly: "Goodbye."
+- After you say "Goodbye.", stop speaking and wait.
 `;
 
       try {
@@ -209,7 +245,7 @@ STRICT RULES:
       const name = getDisplayName(user);
       const k = String(inferKind()).toLowerCase();
 
-      const greetingInstruction =
+      const greeting =
         k === "satisfaction"
           ? `You must speak first. English only. Calm tone.
 Say: "Hi ${name}, this is a quick follow-up from our customer success team."
@@ -217,17 +253,17 @@ Then ask: "Our agent spoke with you recently. Are you satisfied with the assista
 Stop and wait.`
           : `You must speak first. English only. Calm tone.
 Say: "Hi ${name}, this is a quick call from our customer success team."
-Then ask: "Is now a good moment for a quick 30-second chat?"
+Then ask: "Would you be interested in this kind of solution for your business?"
 Stop and wait.`;
 
       try {
         openAiWs.send(
           JSON.stringify({
             type: "response.create",
-            response: { instructions: greetingInstruction },
+            response: { instructions: greeting },
           })
         );
-        console.log("[OPENAI] greeting sent");
+        armReprompt();
       } catch (e) {
         console.error("[OPENAI] greeting error", e?.message || e);
       }
@@ -253,7 +289,9 @@ Stop and wait.`;
         if (msg.type === "response.created") hasActiveResponse = true;
 
         if (msg.type === "input_audio_buffer.speech_started") {
+          lastSpeechStartAt = Date.now();
           if (hangupArmed) cancelHangup();
+          cancelReprompt();
         }
 
         if (
@@ -267,22 +305,20 @@ Stop and wait.`;
               )?.transcript || ""
             ).trim();
 
-          if (isJunkTranscript(q)) return;
-
-          pendingUserQ = q;
-          lastUserTranscriptAt = Date.now();
-          if (hangupArmed) cancelHangup();
+          if (!isJunkTranscript(q)) pendingUserQ = q;
         }
 
         if (msg.type === "input_audio_buffer.speech_stopped") {
           if (hangupArmed) return;
           if (hasActiveResponse) return;
-          if (!pendingUserQ) return;
-          if (Date.now() - lastUserTranscriptAt > 2500) return;
+
+          const dur = lastSpeechStartAt ? Date.now() - lastSpeechStartAt : 0;
+          if (dur < MIN_SPEECH_MS) return;
 
           try {
             openAiWs.send(JSON.stringify({ type: "response.create" }));
           } catch {}
+          armReprompt();
         }
 
         if (
@@ -329,7 +365,11 @@ Stop and wait.`;
               qaPairs.push({ q: null, a });
             }
 
-            if (endsWithGoodbye(a)) armHangupWindow();
+            if (endsWithGoodbye(a)) {
+              armHangupWindow();
+            } else {
+              armReprompt();
+            }
           }
         }
       } catch (e) {
@@ -383,6 +423,8 @@ Stop and wait.`;
 
         if (data.event === "media") {
           if (hangupArmed) cancelHangup();
+          cancelReprompt();
+
           if (openAiWs.readyState === WebSocket.OPEN) {
             openAiWs.send(
               JSON.stringify({
@@ -396,6 +438,7 @@ Stop and wait.`;
 
         if (data.event === "stop") {
           cancelHangup();
+          cancelReprompt();
           try {
             if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
           } catch {}
@@ -407,6 +450,7 @@ Stop and wait.`;
 
     connection.on("close", async () => {
       cancelHangup();
+      cancelReprompt();
       try {
         if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
       } catch {}
