@@ -9,6 +9,7 @@ import {
   getAgentPerformance,
   adminLogin,
   getAllTicketsByAgentId,
+  deleteAgent
 } from "../controllers/agentController.js";
 import {
   createTicket,
@@ -57,6 +58,7 @@ router.post("/api/agents", /* #swagger.tags = ['Agents'] */ createAgent);
 router.get("/api/agents", /* #swagger.tags = ['Agents'] */ getAllAgents);
 router.get("/api/agents/:id", /* #swagger.tags = ['Agents'] */ getAgentById);
 router.put("/api/agents/:id", /* #swagger.tags = ['Agents'] */ updateAgent);
+router.delete("/api/agents/:id", /* #swagger.tags = ['Agents'] */ deleteAgent);
 router.delete(
   "/api/agents/:id",
   /* #swagger.tags = ['Agents'] */ deactivateAgent
