@@ -7,6 +7,9 @@ import { Op } from "sequelize";
 import sendEmail from "../utils/Email.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+const EMAIL_FIND_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const YES_RE =
+  /\b(yes|yeah|yep|yup|correct|that's right|that is right|right|sure|ok(?:ay)?|affirmative|exactly)\b/i;
 
 const normalizePhone = (p) => {
   if (!p) return null;
@@ -33,16 +36,98 @@ const cleanLanguages = (arr) => {
   );
 };
 
+/**
+ * Sometimes transcription is wrong. Only trust an email if it is CONFIRMED.
+ * Rules:
+ * 1) If agent reads back an email and the user confirms (yes/correct), trust that email.
+ * 2) Else, if user says an email and agent repeats the SAME email (or clearly acknowledges it), trust it.
+ * 3) Else, return null (=> "not specified").
+ */
+const extractConfirmedEmail = (pairs) => {
+  if (!Array.isArray(pairs) || !pairs.length) return null;
+
+  const getEmails = (s) =>
+    (String(s || "").match(EMAIL_FIND_RE) || []).slice(0);
+
+  let lastConfirmed = null;
+
+  // 1) Agent read-back -> user confirms
+  for (let i = 0; i < pairs.length; i++) {
+    const a = String(pairs[i]?.a || "");
+    const aEmails = getEmails(a);
+    if (!aEmails.length) continue;
+
+    // "we have your email as X", "is your email X", etc.
+    const looksLikeReadBack = /\b(email|e-mail)\b/i.test(a);
+
+    if (!looksLikeReadBack) continue;
+
+    const nextQ1 = String(pairs[i + 1]?.q || "");
+    const nextQ2 = String(pairs[i + 2]?.q || "");
+
+    const userConfirmed =
+      YES_RE.test(nextQ1.toLowerCase()) || YES_RE.test(nextQ2.toLowerCase());
+
+    if (userConfirmed) {
+      lastConfirmed = aEmails[aEmails.length - 1];
+    }
+  }
+
+  if (lastConfirmed && EMAIL_RE.test(lastConfirmed)) return lastConfirmed;
+
+  // 2) User provides email -> agent repeats/acknowledges same email
+  for (let i = 0; i < pairs.length; i++) {
+    const q = String(pairs[i]?.q || "");
+    const qEmails = getEmails(q);
+    if (!qEmails.length) continue;
+
+    const userEmail = qEmails[qEmails.length - 1];
+    if (!EMAIL_RE.test(userEmail)) continue;
+
+    const a = String(pairs[i]?.a || "");
+    const aEmails = getEmails(a);
+    const agentRepeatedSame = aEmails.some(
+      (e) => e.toLowerCase() === userEmail.toLowerCase()
+    );
+
+    const agentAcknowledged =
+      /\b(got it|ok(?:ay)?|confirmed|thanks|thank you|perfect|great)\b/i.test(
+        a
+      );
+
+    if (agentRepeatedSame || agentAcknowledged) {
+      // Still require at least some sign of agreement (agent repeated OR acknowledged)
+      return userEmail;
+    }
+  }
+
+  return null;
+};
+
+const shouldForceUnsatisfiedIfTicketFlow = (pairs) => {
+  const text = (pairs || [])
+    .map((p) => `${p?.q ?? ""} ${p?.a ?? ""}`)
+    .join(" ")
+    .toLowerCase();
+
+  // conservative: only when it really sounds like escalation/ticket creation/follow-up
+  return /\b(escalat|open(?:ed)?\s+(a\s+)?ticket|create(?:d)?\s+(a\s+)?ticket|log(?:ged)?\s+(a\s+)?ticket|technician\s+(will|to)\s+(call|contact)|we('?ll| will)\s+(call|contact)\s+you|follow\s*up\s+(with\s+you)?|case\s+number)\b/i.test(
+    text
+  );
+};
+
 function mockExtract(pairs) {
   const text = pairs.map((p) => `${p.q ?? ""} ${p.a ?? ""}`).join(" ");
   const lower = text.toLowerCase();
 
-  // ★ Prefer the LAST email in the conversation, since that is most likely the final agreed one
-  const emailMatches =
-    text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
-  const email = emailMatches.length
-    ? emailMatches[emailMatches.length - 1]
-    : null;
+  // Prefer confirmed email if possible (transcription can be wrong)
+  const confirmedEmail = extractConfirmedEmail(pairs);
+
+  // Fallback: last email mentioned anywhere (least reliable; used only if confirmed not found)
+  const emailMatches = text.match(EMAIL_FIND_RE) || [];
+  const email =
+    confirmedEmail ||
+    (emailMatches.length ? emailMatches[emailMatches.length - 1] : null);
 
   const nameMatch = text.match(
     /\b(?:my name is|it's|i am)\s+([A-Za-z][A-Za-z\s'-]{1,40})/i
@@ -57,6 +142,7 @@ function mockExtract(pairs) {
     /(not satisfied|not happy|still failing|doesn'?t work|not resolved)/i.test(
       lower
     );
+
   const contactInfoOnly =
     /\b(register (my )?details|no issue( right)? now|only (my )?(name|email)|just (my )?details)\b/i.test(
       lower
@@ -106,6 +192,9 @@ function mockExtract(pairs) {
   ).slice(0, 160);
   const summary = customerLine || "not specified";
 
+  // Business rule: if ticket/escalation flow, treat as not satisfied
+  const forceUnsatisfied = shouldForceUnsatisfiedIfTicketFlow(pairs);
+
   return {
     customer: {
       name: name ? normalizeName(name) : "not specified",
@@ -114,12 +203,17 @@ function mockExtract(pairs) {
     },
     ticket: {
       ticketType: ticketType || "not specified",
-      status: satisfied ? "resolved" : "open",
+      status: satisfied && !forceUnsatisfied ? "resolved" : "open",
       priority: /critical|p1|high/.test(lower) ? "high" : "medium",
       proposedSolution,
-      isSatisfied: satisfied ? true : unsatisfied ? false : "not specified",
+      isSatisfied: forceUnsatisfied
+        ? false
+        : satisfied
+        ? true
+        : unsatisfied
+        ? false
+        : "not specified",
     },
-    qa_log: Array.isArray(pairs) ? pairs : [],
     summary,
     has_meaningful_conversation: !greetingsOnly,
     contact_info_only: contactInfoOnly,
@@ -128,6 +222,172 @@ function mockExtract(pairs) {
     mishears_or_typos: [],
   };
 }
+
+const extractWithOpenAI = async (pairs, { timeoutMs = 60000 } = {}) => {
+  const system = [
+    "You are an accurate, terse extractor for GETPIE customer support call logs.",
+    "English only. Output ONLY JSON matching the provided JSON Schema.",
+    "If unknown/unclear, set the value to the string 'not specified'. Do not invent facts.",
+    "Transcription can be wrong. Prefer facts that are explicitly CONFIRMED in the call.",
+    "Email rule (important):",
+    "- The transcript may mis-spell an email when the user first says it.",
+    "- If the agent reads an email back and the user confirms (yes/correct), that confirmed email is the truth.",
+    "- If the user changes email, only use the new email if it is confirmed at the end.",
+    "- If there is ANY doubt which email is correct, set customer.email = 'not specified'.",
+    "Satisfaction rule (important):",
+    "- If agent/customer agree to create/escalate/open a ticket or schedule technician follow-up, set ticket.isSatisfied = false.",
+    "- Only set ticket.isSatisfied = true if the customer explicitly says solved/resolved/works and no escalation/ticket flow is happening.",
+    "Keep summary <= 80 words.",
+  ].join(" ");
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "customer",
+      "ticket",
+      "summary",
+      "has_meaningful_conversation",
+      "contact_info_only",
+      "non_english_detected",
+      "clarifications_needed",
+      "mishears_or_typos",
+    ],
+    properties: {
+      customer: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "name_raw", "email"],
+        properties: {
+          name: { type: "string" },
+          name_raw: { type: "string" },
+          email: { type: "string" },
+        },
+      },
+      ticket: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "ticketType",
+          "status",
+          "priority",
+          "proposedSolution",
+          "isSatisfied",
+        ],
+        properties: {
+          ticketType: {
+            type: "string",
+            enum: ["support", "sales", "billing", "not specified"],
+          },
+          status: { type: "string", enum: ["open", "resolved"] },
+          priority: {
+            type: "string",
+            enum: ["low", "medium", "high", "critical"],
+          },
+          proposedSolution: { type: "string" },
+          isSatisfied: {
+            anyOf: [
+              { type: "boolean" },
+              { type: "string", enum: ["not specified"] },
+            ],
+          },
+        },
+      },
+      summary: { type: "string" },
+      has_meaningful_conversation: { type: "boolean" },
+      contact_info_only: { type: "boolean" },
+      non_english_detected: { type: "array", items: { type: "string" } },
+      clarifications_needed: { type: "array", items: { type: "string" } },
+      mishears_or_typos: { type: "array", items: { type: "string" } },
+    },
+  };
+
+  const userMsg = `
+Extract fields from these Q/A pairs.
+
+Return JSON ONLY (no markdown, no extra text).
+
+Q/A PAIRS:
+${JSON.stringify(pairs, null, 2)}
+  `.trim();
+
+  const ctrl = new AbortController();
+  const timeoutId = setTimeout(() => ctrl.abort(), timeoutMs);
+
+  let r;
+  let raw;
+  try {
+    const payload = {
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      max_output_tokens: 450,
+      // Structured Outputs (strict schema)
+      text: {
+        format: {
+          type: "json_schema",
+          name: "getpie_ticket_extract",
+          strict: true,
+          schema,
+        },
+      },
+      input: [
+        { role: "system", content: [{ type: "input_text", text: system }] },
+        { role: "user", content: [{ type: "input_text", text: userMsg }] },
+      ],
+    };
+
+    r = await fetch("https://api.openai.com/v1/responses", {
+      signal: ctrl.signal,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    raw = await r.text();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!r.ok) return { error: "openai", status: r.status, body: raw };
+
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return { error: "openai_bad_json", body: raw };
+  }
+
+  // IMPORTANT: handle incomplete generations (prevents parsing cut-off JSON)
+  if (data?.status && data.status !== "completed") {
+    return {
+      error: "openai_incomplete",
+      status: data.status,
+      incomplete_details: data.incomplete_details,
+      body: raw,
+    };
+  }
+
+  let outText = null;
+  if (typeof data.output_text === "string") {
+    outText = data.output_text;
+  } else if (Array.isArray(data.output)) {
+    const msgItem = data.output.find((item) => item.type === "message");
+    const contentText = msgItem?.content?.find?.(
+      (c) => c.type === "output_text"
+    )?.text;
+    if (typeof contentText === "string") outText = contentText;
+  }
+
+  if (!outText) return { error: "openai_no_text", body: raw };
+
+  try {
+    return JSON.parse(outText);
+  } catch {
+    return { error: "parse", text: outText, body: raw };
+  }
+};
 
 export const summarizer = async (pairs, callSid, phone) => {
   try {
@@ -141,104 +401,17 @@ export const summarizer = async (pairs, callSid, phone) => {
     if (useMock) {
       parsed = mockExtract(pairs);
     } else {
-      const system = [
-        "You are an accurate, terse extractor for GETPIE customer support logs.",
-        "English only. Output ONLY JSON, no extra words.",
-        "If a value is unknown/unclear, set it to the string 'not specified'.",
-        "Correct obvious misspellings; also include '*_raw' with the original when you normalize.",
-        "Normalize and fix customer name and language names when possible.",
-        "Do not invent facts. Prefer 'not specified' over guessing.",
-        "Validate email as something@something.tld (basic).",
-        // ★ EMAIL RULES:
-        "If the conversation mentions multiple email addresses, always choose the ONE FINAL email address that both the agent and customer agree is correct at the end of the call.",
-        "If the agent reads an email from the system (like an old email) and the customer says it is correct, that is the final email.",
-        "If the customer corrects the email or gives a new email and they confirm it, use the NEW email and ignore the old one.",
-        "If there is no clear final agreed email, set customer.email to 'not specified'.",
-        "Derive is_satisfied from the conversation (true/false) if explicit; else 'not specified'.",
-        "Keep the summary <= 80 words.",
-        "Also output flags: has_meaningful_conversation (boolean), contact_info_only (boolean).",
-        "Languages list must be real-world names (e.g., English, Urdu, Punjabi).",
-      ].join(" ");
+      // Try once, then one retry with a bit more output room (still small output)
+      parsed = await extractWithOpenAI(pairs, { timeoutMs: 60000 });
 
-      const userMsg = `
-From these Q/A pairs, return ONLY this JSON:
-BRO if our agent said that i will escalate ticket then isSatisfied will be always false means if context is user and agent aggreed on creating ticket then isSatisfied will be false.
-BRO about email: conversation can include an old email already on file and a new email if the user changes it. Always set "customer.email" to the FINAL email address that both the agent and the user confirm as correct at the end of the call. If the user keeps the existing email, use that one. If the user changes the email and confirms the new one, use the NEW email and ignore the old one. If there is any doubt which email is correct, set "customer.email" to "not specified".
-
-{
-  "customer": { "name": string | "not specified", "name_raw": string | "not specified", "email": string | "not specified" },
-  "ticket": { "ticketType"(Always return tikcet type): "support" | "sales" | "billing"  | "not specified", "status": "open" | "resolved", "priority": "low" | "medium" | "high" | "critical", "proposedSolution": string | "not specified", "isSatisfied": true | false | "not specified" },
-  "qa_log": Array<{ "q": string, "a": string }>,
-  "summary": string,
-  "has_meaningful_conversation": boolean,
-  "contact_info_only": boolean,
-  "current_datetime_iso": "${new Date().toISOString()}",
-  "timezone": "Asia/Karachi",
-  "non_english_detected": string[],
-  "clarifications_needed": string[],
-  "mishears_or_typos": string[]
-}
-
-Q/A PAIRS:
-${JSON.stringify(pairs, null, 2)}
-`.trim();
-
-      const ctrl = new AbortController();
-      const timeoutId = setTimeout(() => ctrl.abort(), 60000);
-
-      let r;
-      let raw;
-      try {
-        const payload = {
-          model: "gpt-4o-mini",
-          temperature: 0.2,
-          max_output_tokens: 900,
-          text: { format: { type: "json_object" } },
-          input: [
-            { role: "system", content: [{ type: "input_text", text: system }] },
-            { role: "user", content: [{ type: "input_text", text: userMsg }] },
-          ],
-        };
-
-        r = await fetch("https://api.openai.com/v1/responses", {
-          signal: ctrl.signal,
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(payload),
-        });
-        raw = await r.text();
-      } catch (err) {
-        clearTimeout(timeoutId);
-        throw err;
+      if (parsed?.error) {
+        const retry = await extractWithOpenAI(pairs, { timeoutMs: 60000 });
+        if (!retry?.error) parsed = retry;
       }
 
-      clearTimeout(timeoutId);
-
-      if (!r.ok) return { error: "openai", status: r.status, body: raw };
-
-      let outText = null;
-      try {
-        const data = JSON.parse(raw);
-        if (typeof data.output_text === "string") {
-          outText = data.output_text;
-        } else if (Array.isArray(data.output)) {
-          const msgItem = data.output.find((item) => item.type === "message");
-          const contentText = msgItem?.content?.find?.(
-            (c) => c.type === "output_text"
-          )?.text;
-          if (typeof contentText === "string") outText = contentText;
-        }
-      } catch (err) {}
-
-      if (!outText) return { error: "openai_no_text", body: raw };
-
-      try {
-        parsed = JSON.parse(outText);
-      } catch {
-        return { error: "parse", text: outText };
+      if (parsed?.error) {
+        // Keep behavior: return the error object (DB logic unchanged)
+        return parsed;
       }
     }
 
@@ -250,7 +423,9 @@ ${JSON.stringify(pairs, null, 2)}
       return trimmed.toLowerCase() === "not specified" ? null : trimmed;
     };
 
-    const rawEmail = ns(parsed?.customer?.email);
+    // ✅ transcription-safe email: prefer confirmed email from pairs over model output
+    const confirmedEmail = extractConfirmedEmail(pairs);
+    const rawEmail = ns(confirmedEmail || parsed?.customer?.email);
     const safeEmail =
       typeof rawEmail === "string" && EMAIL_RE.test(rawEmail)
         ? rawEmail.toLowerCase()
@@ -262,10 +437,15 @@ ${JSON.stringify(pairs, null, 2)}
       ns(parsed?.customer?.name) || ns(parsed?.customer?.name_raw);
     const safeName = normalizeName(rawName);
 
+    // Business rule safety: if ticket/escalation flow happened, force unsatisfied
+    const forceUnsatisfied = shouldForceUnsatisfiedIfTicketFlow(pairs);
+
     const parsedIsSat = parsed?.ticket?.isSatisfied;
     let isSatisfied = null;
     if (parsedIsSat === true) isSatisfied = true;
     else if (parsedIsSat === false) isSatisfied = false;
+
+    if (forceUnsatisfied) isSatisfied = false;
 
     const priorityRaw = ns(parsed?.ticket?.priority);
     const priorityNorm =
@@ -290,7 +470,10 @@ ${JSON.stringify(pairs, null, 2)}
 
     const hasConversation = !!parsed?.has_meaningful_conversation;
     const contactInfoOnly = !!parsed?.contact_info_only;
-    const qaLog = Array.isArray(parsed?.qa_log) ? parsed.qa_log : [];
+
+    // ✅ Do NOT ask the model to echo logs; store original pairs
+    const qaLog = Array.isArray(pairs) ? pairs : [];
+
     const summary = typeof parsed?.summary === "string" ? parsed.summary : "";
     const languages = cleanLanguages(parsed?.non_english_detected);
 
@@ -326,7 +509,7 @@ ${JSON.stringify(pairs, null, 2)}
         } else {
           const patch = {};
           if (safeName && userRecord.name !== safeName) patch.name = safeName;
-          // ★ If user and agent agreed on a final email, update it even if one already exists
+          // update email if final confirmed email was extracted
           if (safeEmail && userRecord.email !== safeEmail)
             patch.email = safeEmail;
           if (safePhone && !userRecord.phone) patch.phone = safePhone;
@@ -380,7 +563,6 @@ ${JSON.stringify(pairs, null, 2)}
       } else {
         const patch = {};
         if (safeName && userRecord.name !== safeName) patch.name = safeName;
-        // ★ Same here: update email if a new final confirmed email was extracted
         if (safeEmail && userRecord.email !== safeEmail)
           patch.email = safeEmail;
         if (safePhone && !userRecord.phone) patch.phone = safePhone;
@@ -426,6 +608,7 @@ ${JSON.stringify(pairs, null, 2)}
               ])
             );
             let best = null;
+
             let bestCnt = Infinity;
             for (const a of agents) {
               const cnt = map.get(String(a.id)) ?? 0;
@@ -469,6 +652,7 @@ ${JSON.stringify(pairs, null, 2)}
         where: { callSid },
         transaction: t,
       });
+
       let callRecord = null;
       if (affected === 0) {
         callRecord = await Call.create(
