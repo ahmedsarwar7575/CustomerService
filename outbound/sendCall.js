@@ -28,7 +28,7 @@ const TIMEOUT = parseInt(CALL_STATUS_TIMEOUT_SEC, 10) || 1200;
 const ATTEMPT_COOLDOWN_HOURS = 24;
 
 function makeUrl(userId, kind) {
-  const base = PUBLIC_BASE_URL || "https://customerservice-kabe.onrender.com";
+  const base = PUBLIC_BASE_URL || "https://csagentbackend.getpie.io";
   const u = new URL(base);
   const basePath = u.pathname.replace(/\/+$/, "");
   u.pathname = `${basePath}/outbound-upsell/${encodeURIComponent(userId)}`;
