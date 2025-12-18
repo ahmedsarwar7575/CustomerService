@@ -12,7 +12,7 @@ import processCallOutcome from "./summerize.js";
 const {
   OPENAI_API_KEY,
   REALTIME_VOICE = "echo",
-  REALTIME_MODEL = "gpt-4o-realtime-preview",
+  REALTIME_MODEL = "gpt-realtime-2025-08-28",
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   PUBLIC_BASE_URL,
