@@ -16,7 +16,7 @@ const {
   PUBLIC_BASE_URL,
 } = process.env;
 
-const MODEL = "gpt-4o-realtime-preview-2024-12-17";
+const MODEL = "gpt-realtime-2025-08-28";
 
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
