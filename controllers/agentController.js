@@ -454,7 +454,6 @@ export const deleteAgent = async (req, res) => {
   try {
     const agentId = req.params.id;
 
-  
     // Find agent
     const agent = await Agent.findByPk(agentId);
     if (!agent) {
@@ -462,7 +461,9 @@ export const deleteAgent = async (req, res) => {
     }
 
     // Check for active tickets
-    const ticketCount = await Ticket.count({ where: { agentId, status: "open" } });
+    const ticketCount = await Ticket.count({
+      where: { agentId, status: "open" },
+    });
     if (ticketCount > 0) {
       return res.status(400).json({
         error: `Cannot delete agent with ${ticketCount} active tickets`,
@@ -485,5 +486,46 @@ export const deleteAgent = async (req, res) => {
       error: "Internal server error",
       details: error.message,
     });
+  }
+};
+export const getAllUsersByAgentId = async (req, res) => {
+  try {
+    const agentId = req.params.id;
+    if (!agentId)
+      return res.status(400).json({ error: "Agent ID is required" });
+
+    const rows = await Ticket.findAll({
+      where: { agentId },
+      attributes: [], // ✅ excludes ticket fields from the result
+      include: [
+        {
+          model: Agent,
+          attributes: ["id", "firstName", "lastName"],
+        },
+        {
+          model: User,
+          // pick what you want to return (recommended) OR use exclude
+          // attributes: ["id", "firstName", "lastName", "email"],
+          attributes: { exclude: ["password"] },
+        },
+      ],
+    });
+
+    if (!rows?.length)
+      return res.status(404).json({ error: "No users found for this agent" });
+
+    const agent = rows[0].Agent;
+
+    // ✅ collect users and dedupe (since multiple tickets can reference same user)
+    const users = [
+      ...new Map(
+        rows.map((r) => [r.User?.id, r.User]).filter(([, u]) => u)
+      ).values(),
+    ];
+
+    return res.json({ agent, users });
+  } catch (error) {
+    console.error("Error fetching users by agent:", error);
+    return res.status(500).json({ error: error.message });
   }
 };
