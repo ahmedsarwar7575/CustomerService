@@ -36,47 +36,49 @@ function createOpenAIWebSocket() {
 function buildSessionUpdate(userProfile = null) {
   // Dynamic instructions depending on whether the caller exists in DB
   const dynamicContext = userProfile
-    ? `
-==================================================
-CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
-==================================================
-- Name on file: ${userProfile.name || "Unknown"}
-- Email on file: ${userProfile.email || "Unknown"}
-
-For this call:
-- Treat the caller as a returning customer.
-- In your first reply, greet them warmly using their name "${
-        userProfile.name || ""
-      }" and ask how you can help today.
-- Do NOT ask "What is your name?" as if you do not know it.
-- You already know their email on file: "${userProfile.email || ""}".
-- At a natural moment early in the conversation, say something like:
-  "We have your email as ${
-    userProfile.email || ""
-  }. Do you want to keep this email or change it?"
-    But always ask for email confirmation at end that we have your email do you want to keep it or not.
-- If they say it is correct / they want to keep it:
-Say something like: "Great! I’ll keep that email."
-- If they want to change it:
-  - Collect a NEW email using the normal spell-and-confirm flow.
-- You do NOT need to re-collect their name unless they say it is wrong or want to change it. 
+    ? `CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
+    - Name on file: ${userProfile.name || "Unknown"}
+    - Email on file: ${userProfile.email || "Unknown"}
+    
+    For this call:
+    - Treat the caller as a returning customer.
+    - In your first reply, greet them warmly using their name "${
+      userProfile.name || ""
+    }" and ask how you can help today.
+    - Do NOT ask "What is your name?" unless they say the name on file is wrong or they want to update it.
+    - You already have an email on file: "${userProfile.email || ""}".
+    
+    EMAIL CONFIRMATION (EARLY, NO GUESSING):
+    - Early in the call (right after you confirm their issue in one short sentence), ask ONLY this:
+      "I have your email as ${
+        userProfile.email || ""
+      }. Do you want to KEEP it or CHANGE it? Please say 'keep' or 'change'."
+    - If the reply is unclear/noisy/ambiguous, do NOT proceed—repeat the same keep/change question until you clearly hear 'keep' or 'change'. If they say keep say i will keep email. Then ask for confirmation.
+    - Never assume their choice from “yes/yeah/mm-hmm”.
+    
+    IF KEEP:
+    - Say: "Got it—I'll keep that email."
+    - Do NOT re-collect the email.
+    
+    IF CHANGE:
+    - Collect a NEW email using strict spell-and-confirm:
+      1) Ask them to spell it letter by letter (including @ and dot).
+      2) Repeat the full email back (spelled) and ask "Is that correct?"
+      3) If correction: ask ONLY for the incorrect part, then repeat the full email again.
+    
+    END CHECK (ONE LAST TIME):
+    - Before ending the call, if the email was not clearly confirmed earlier, ask once:
+    - You do NOT need to re-collect their name unless they say it is wrong or want to change it.
+    
 `
     : `
-==================================================
-CALLER PROFILE FROM DATABASE (NEW CUSTOMER)
-==================================================
-- No existing customer record was found for this phone number.
-
-For this call:
-- Follow your normal flow to:
-  - Ask for and confirm their NAME.
-  - Ask for and confirm their EMAIL with spelling, repeat, and confirmation.
+=
 `;
-const calmVoiceStyle = `
+  const calmVoiceStyle = `
 ==================================================
 VOICE STYLE
 ==================================================
-- You are using the Fable voice.
+- You are using the Echo voice.
 - Speak in a calm, soft, relaxed tone.
 - Talk slightly slower than normal, but not robotic.
 - Avoid sounding overly excited or dramatic.
@@ -111,10 +113,7 @@ VOICE STYLE
 // detect when assistant is saying goodbye
 function isGoodbye(text = "") {
   const t = text.toLowerCase();
-  return (
-    t.includes("goodbye") ||
-    /\bbye\b/.test(t)
-  );
+  return t.includes("goodbye") || /\bbye\b/.test(t);
 }
 
 export function attachMediaStreamServer(server) {
