@@ -15,8 +15,9 @@ router.all("/incoming-call", async (req, res) => {
   const callSid = req.body?.CallSid || "";
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>Welcome to Get PI pay. Please wait while we connect your call to the AI assistant.</Say>
+  <Response>
+  <Pause length="2"/>
+  <Say>Welcome to Get Pie Pay. Please hold for a moment while I connect you with Max.</Say>
   <Connect>
     <Stream url="${wsUrl}">
       <Parameter name="from" value="${from}"/>

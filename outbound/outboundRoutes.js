@@ -18,15 +18,17 @@ router.all(/^\/+outbound-upsell\/([^/]+)$/, async (req, res) => {
   );
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>Please wait while we connect your call to the AI assistant.</Say>
-  <Connect>
-    <Stream url="${wsUrl}">
-      <Parameter name="userId" value="${userId || ""}"/>
-      <Parameter name="kind" value="${kind || ""}"/>
-    </Stream>
-  </Connect>
-</Response>`;
+  <Response>
+    <Pause length="1"/>
+    <Say>Hello, this is a call from Get Pie Pay. Please hold for a moment while we connect you with our agent, Max.</Say>
+    <Connect>
+      <Stream url="${wsUrl}">
+        <Parameter name="userId" value="${userId || ""}"/>
+        <Parameter name="kind" value="${kind || ""}"/>
+      </Stream>
+    </Connect>
+  </Response>
+  `;
 
   res.type("text/xml").send(twiml);
 });

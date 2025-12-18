@@ -102,7 +102,7 @@ VOICE STYLE
       temperature: 0.7,
       input_audio_transcription: {
         model: "gpt-4o-mini-transcribe",
-        language: "en", // force transcription language to English
+        language: "en", 
         prompt:
           "The caller is speaking English (even with an accent). Always transcribe to English.",
       },
