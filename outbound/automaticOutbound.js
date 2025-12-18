@@ -140,7 +140,7 @@ export function createUpsellWSS() {
         } catch (e) {
           console.error("[TWILIO] hangup error", e?.message || e);
         }
-      }, 2000);
+      }, 5000);
     }
 
     function maybeSendGreeting() {
