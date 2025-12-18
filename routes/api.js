@@ -9,6 +9,7 @@ import {
   getAgentPerformance,
   adminLogin,
   getAllTicketsByAgentId,
+  getAllUsersByAgentId,
   deleteAgent
 } from "../controllers/agentController.js";
 import {
@@ -71,6 +72,10 @@ router.get("/api/adminLogin", /* #swagger.tags = ['Agents'] */ adminLogin);
 router.get(
   "/api/agents/:id/tickets",
   /* #swagger.tags = ['Agents'] */ getAllTicketsByAgentId
+);
+router.get(
+  "/api/agents/:id/users",
+  /* #swagger.tags = ['Agents'] */ getAllUsersByAgentId
 );
 
 // Ticket Routes
