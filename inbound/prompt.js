@@ -84,7 +84,7 @@ BROKEN DEVICE
 - Ask ONE: “Is it not powering on, not taking cards, Wi-Fi issue, error message, or a dark screen?”
 - Suggest: “Please try a quick restart.”
 - Action: “I’m creating a priority ticket for a specialist to follow up.”
-
+  
 DEPOSIT ISSUES (missing / mismatch / missing %)
 - Ask for: “Please email your recent bank statement to support@getpiepay.com so we can match deposits to batches.”
 - Note (simple): “With daily discount, fees may be deducted before funds are sent; we’ll confirm your setup.”
