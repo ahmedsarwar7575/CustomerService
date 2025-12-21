@@ -47,28 +47,49 @@ function buildSessionUpdate(userProfile = null) {
     }" and ask how you can help today.
     - Do NOT ask for their name unless they say the name on file is wrong or they want to update it.
     
-    EMAIL CONFIRMATION (RIGHT AFTER YOU CONFIRM THE ISSUE)
-    Ask ONLY:
-    “I have your email as ${
-      userProfile.email || ""
-    }. Do you want to keep it or change it? Please say keep or change.”
+    EMAIL ON FILE VALIDATION (HARD)
+    - Before asking keep/change, validate the email on file:
+      - exactly one “@”
+      - no spaces
+      - has a dot in the domain
+      - does NOT contain phrases like “let me confirm” or “is that correct”
+    - If the email on file fails validation or is “Unknown”, do NOT ask keep/change.
+      Say: “I’m not seeing a valid email on file. Please spell your email letter by letter, including @ and dot.”
+      Then use the strict spell-and-confirm rules below.
     
-    DECISION RULE (HARD)
+    WHEN TO ASK KEEP/CHANGE
+    - Ask keep/change ONLY right after you confirm the caller’s issue in one short sentence.
+    - If the user’s last utterance is noise (examples: “transcribed by…”, a website name, a URL), do NOT advance the flow.
+      Say: “Sorry, I didn’t catch that—could you repeat your request?”
+    
+    KEEP/CHANGE QUESTION (EXACT)
+    - Ask ONLY this:
+      “I have your email as ${
+        userProfile.email || ""
+      }. Do you want to keep it or change it? Please say keep or change.”
+    
+    KEEP/CHANGE DECISION RULE (HARD)
     - Accept ONLY a clear “keep” or “change”.
-    - If the caller says “keep but…”, “change but…”, or adds extra words/details, do NOT commit.
+    - Never assume their choice from “yes/yeah/mm-hmm”.
+    - If the reply is unclear, or they say “keep but…”, “change but…”, or add extra details, do NOT commit.
       Say only: “I’m listening—please finish,” then repeat the keep/change question.
     
     IF KEEP
-    - “Got it—I’ll keep that email.”
+    - Say: “Got it—I’ll keep that email.”
     - Do NOT re-collect the email.
     
     IF CHANGE
-    - Collect a new email with strict spell-and-confirm.
-    - Validate: one @, no spaces, dot in domain.
-    - Spell back full email and confirm.
+    - Collect a NEW email using strict spell-and-confirm:
+      1) Ask them to spell it letter by letter (including @ and dot). Treat “at the rate” as “@”.
+      2) Spell back the full email slowly and ask: “Is that correct?”
+      3) If correction: ask ONLY for the incorrect part (username or domain), then spell back the full email again.
+      4) If still unclear after 2 attempts: ask them to restart spelling from the beginning.
+    - Validation: exactly one “@”, no spaces, and a dot in the domain.
+    - When the new email is confirmed, say: “Got it—I’ve updated that email.”
     
     REVERSAL ALLOWED
-    - If later they say they want to change it after choosing keep, allow it and restart the change flow.    
+    - If later in the call they say they want to change the email after choosing keep, allow it and restart the change flow.
+    
     
 `
     : `
@@ -80,7 +101,7 @@ function buildSessionUpdate(userProfile = null) {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.75,
+        threshold: 0.85,
         prefix_padding_ms: 300,
         silence_duration_ms: 700,
         create_response: false,
