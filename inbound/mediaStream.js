@@ -85,7 +85,7 @@ function buildSessionUpdate(userProfile = null) {
         silence_duration_ms: 700,
         create_response: false,
         silence_duration_ms: 700,
-        interrupt_response: false, 
+        interrupt_response: false,
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
@@ -139,6 +139,9 @@ export function attachMediaStreamServer(server) {
 
       // response state
       let hasActiveResponse = false;
+
+      // ✅ FIX: queue user turn if they speak while assistant is responding
+      let pendingUserTurn = false;
 
       const started = new Set();
       const openAiWs = createOpenAIWebSocket();
@@ -246,8 +249,10 @@ export function attachMediaStreamServer(server) {
 
           // --- 1b) Manual turn handling: when user stops talking, trigger response ---
           if (msg.type === "input_audio_buffer.speech_stopped") {
-            // Only create a new response if none is currently active
-            if (!hasActiveResponse && openAiWs.readyState === WebSocket.OPEN) {
+            // ✅ FIX: if user spoke while assistant was talking, queue it
+            if (hasActiveResponse) {
+              pendingUserTurn = true;
+            } else if (openAiWs.readyState === WebSocket.OPEN) {
               try {
                 openAiWs.send(JSON.stringify({ type: "response.create" }));
               } catch (e) {
@@ -309,6 +314,16 @@ export function attachMediaStreamServer(server) {
               // goodbye detection
               if (isGoodbye(a)) {
                 scheduleHangup();
+              }
+            }
+
+            // ✅ FIX: if caller spoke during the assistant response, answer now
+            if (pendingUserTurn && openAiWs.readyState === WebSocket.OPEN) {
+              pendingUserTurn = false;
+              try {
+                openAiWs.send(JSON.stringify({ type: "response.create" }));
+              } catch (e) {
+                console.error("queued response.create error", e);
               }
             }
           }
