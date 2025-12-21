@@ -93,7 +93,6 @@ function buildSessionUpdate(userProfile = null) {
       instructions: SYSTEM_MESSAGE + dynamicContext,
       modalities: ["text", "audio"],
       temperature: 0.8,
-      noise_reduction: { type: "near_field" },
       input_audio_transcription: {
         model: "whisper-1",
         language: "en",
