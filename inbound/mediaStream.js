@@ -75,39 +75,33 @@ function buildSessionUpdate(userProfile = null) {
 =
 `;
 
-return {
-  type: "session.update",
-  session: {
-    audio: {
-      input: {
-        format: { type: "audio/pcmu" }, 
-        noise_reduction: { type: "near_field" }, 
-        transcription: {
-          model: "whisper-1",
-          language: "en",
-          prompt: "Caller speaks English (possibly accented). Transcribe in English."
-        },
-        turn_detection: {
-          type: "server_vad",
-          threshold: 0.55,          
-          prefix_padding_ms: 800,   
-          silence_duration_ms: 1000,
-          create_response: false,
-          interrupt_response: true  
-        }
-      }
+  return {
+    type: "session.update",
+    session: {
+      turn_detection: {
+        type: "server_vad",
+        threshold: 0.75,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 700,
+        create_response: false,
+        silence_duration_ms: 700,
+        interrupt_response: false, 
+      },
+      input_audio_format: "g711_ulaw",
+      output_audio_format: "g711_ulaw",
+      voice: REALTIME_VOICE,
+      instructions: SYSTEM_MESSAGE + dynamicContext,
+      modalities: ["text", "audio"],
+      temperature: 0.8,
+      noise_reduction: { type: "near_field" },
+      input_audio_transcription: {
+        model: "whisper-1",
+        language: "en",
+        prompt:
+          "The caller is speaking English (even with an accent). Always transcribe to English.",
+      },
     },
-
-    output_audio_format: "g711_ulaw", 
-    voice: REALTIME_VOICE,
-    instructions: SYSTEM_MESSAGE + dynamicContext,
-    modalities: ["text", "audio"],
-    temperature: 0.7,
-
-    include: ["item.input_audio_transcription.logprobs"] 
-  }
-};
-
+  };
 }
 
 // detect when assistant is saying goodbye
