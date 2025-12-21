@@ -40,74 +40,74 @@ function buildSessionUpdate(userProfile = null) {
     - Name on file: ${userProfile.name || "Unknown"}
     - Email on file: ${userProfile.email || "Unknown"}
     
-    For this call:
-    - Treat the caller as a returning customer.
+    FOR THIS CALL
+    - Treat the caller as returning.
     - In your first reply, greet them warmly using their name "${
       userProfile.name || ""
     }" and ask how you can help today.
-    - Do NOT ask "What is your name?" unless they say the name on file is wrong or they want to update it.
-    - You already have an email on file: "${userProfile.email || ""}".
+    - Do NOT ask for their name unless they say the name on file is wrong or they want to update it.
     
-    EMAIL CONFIRMATION (EARLY, NO GUESSING):
-    - Early in the call (right after you confirm their issue in one short sentence), ask ONLY this:
-      "I have your email as ${
-        userProfile.email || ""
-      }. Do you want to KEEP it or CHANGE it? Please say 'keep' or 'change'."
-    - If the reply is unclear/noisy/ambiguous, do NOT proceed—repeat the same keep/change question until you clearly hear 'keep' or 'change'. If they say keep say i will keep email. Then ask for confirmation.
-    - Never assume their choice from “yes/yeah/mm-hmm”.
+    EMAIL CONFIRMATION (RIGHT AFTER YOU CONFIRM THE ISSUE)
+    Ask ONLY:
+    “I have your email as ${
+      userProfile.email || ""
+    }. Do you want to keep it or change it? Please say keep or change.”
     
-    IF KEEP:
-    - Say: "Got it—I'll keep that email."
+    DECISION RULE (HARD)
+    - Accept ONLY a clear “keep” or “change”.
+    - If the caller says “keep but…”, “change but…”, or adds extra words/details, do NOT commit.
+      Say only: “I’m listening—please finish,” then repeat the keep/change question.
+    
+    IF KEEP
+    - “Got it—I’ll keep that email.”
     - Do NOT re-collect the email.
     
-    IF CHANGE:
-    - Collect a NEW email using strict spell-and-confirm:
-      1) Ask them to spell it letter by letter (including @ and dot).
-      2) Repeat the full email back (spelled) and ask "Is that correct?"
-      3) If correction: ask ONLY for the incorrect part, then repeat the full email again.
+    IF CHANGE
+    - Collect a new email with strict spell-and-confirm.
+    - Validate: one @, no spaces, dot in domain.
+    - Spell back full email and confirm.
     
-    END CHECK (ONE LAST TIME):
-    - Before ending the call, if the email was not clearly confirmed earlier, ask once:
-    - You do NOT need to re-collect their name unless they say it is wrong or want to change it.
+    REVERSAL ALLOWED
+    - If later they say they want to change it after choosing keep, allow it and restart the change flow.    
     
 `
     : `
 =
 `;
-  const calmVoiceStyle = `
-==================================================
-VOICE STYLE
-==================================================
-- You are using the Echo voice.
-- Speak in a calm, soft, relaxed tone.
-- Talk slightly slower than normal, but not robotic.
-- Avoid sounding overly excited or dramatic.
-`;
-  return {
-    type: "session.update",
-    session: {
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.85,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 700,
-        create_response: false, // ❌ let US call response.create
-        interrupt_response: false, // ❌ no server barge-in
-      },
-      input_audio_format: "g711_ulaw",
-      output_audio_format: "g711_ulaw",
-      voice: REALTIME_VOICE,
-      instructions: SYSTEM_MESSAGE + dynamicContext + calmVoiceStyle,
-      modalities: ["text", "audio"],
-      temperature: 0.7,
-      input_audio_transcription: {
-        model: "gpt-4o-mini-transcribe",
-        language: "en", 
-        prompt:
-          "The caller is speaking English (even with an accent). Always transcribe to English.",
-      },
+
+return {
+  type: "session.update",
+  session: {
+    audio: {
+      input: {
+        format: { type: "audio/pcmu" }, 
+        noise_reduction: { type: "near_field" }, 
+        transcription: {
+          model: "whisper-1",
+          language: "en",
+          prompt: "Caller speaks English (possibly accented). Transcribe in English."
+        },
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.55,          
+          prefix_padding_ms: 800,   
+          silence_duration_ms: 1000,
+          create_response: false,
+          interrupt_response: true  
+        }
+      }
     },
-  };
+
+    output_audio_format: "g711_ulaw", 
+    voice: REALTIME_VOICE,
+    instructions: SYSTEM_MESSAGE + dynamicContext,
+    modalities: ["text", "audio"],
+    temperature: 0.7,
+
+    include: ["item.input_audio_transcription.logprobs"] 
+  }
+};
+
 }
 
 // detect when assistant is saying goodbye
