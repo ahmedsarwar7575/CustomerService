@@ -30,10 +30,30 @@ const NUM_WORD = {
   nine: "9",
 };
 
+// ✅ Prevent your own support emails from being stored as customer email
+const COMPANY_EMAIL_DOMAIN_RE = /@getpiepay\.com\s*$/i;
+const COMPANY_EMAILS = new Set(["support@getpiepay.com", "info@getpiepay.com"]);
+
+const isCompanyEmail = (email) => {
+  if (!email) return false;
+  const e = String(email).trim().toLowerCase();
+  return COMPANY_EMAILS.has(e) || COMPANY_EMAIL_DOMAIN_RE.test(e);
+};
+
+// ✅ Clip agent “Let me confirm ... is that correct?” so we don’t glue extra words into email
+const clipAfterConfirmationPhrase = (s) => {
+  if (!s) return "";
+  const lower = String(s).toLowerCase();
+  const cut = lower.search(
+    /\b(is that correct|is this correct|did i get that right|correct\?)\b/i
+  );
+  return cut > 0 ? String(s).slice(0, cut) : String(s);
+};
+
 const safeSendEmail = async ({ to, subject, text, html }) => {
   try {
     // Common signature: sendEmail({to,subject,text,html})
-    return await sendEmail( to, subject, text);
+    return await sendEmail(to, subject, text);
   } catch (e1) {
     try {
       // Fallback signature: sendEmail(to, subject, body)
@@ -62,7 +82,7 @@ const normalizeName = (n) => {
 };
 
 const looksLikeAgentReadback = (s) =>
-  /\b(let me repeat|repeat that|make sure i have it|is that correct|correct\?)\b/i.test(
+  /\b(let me repeat|repeat that|make sure i have it|let me confirm|confirm the full email|is that correct|correct\?)\b/i.test(
     String(s || "")
   );
 
@@ -153,7 +173,17 @@ const normalizeHyphenSpelledEmail = (email) => {
  */
 const spokenToEmail = (text) => {
   if (!text) return null;
-  const s0 = String(text).toLowerCase();
+
+  // ✅ remove trailing confirmation phrases like "is that correct?"
+  const clipped = clipAfterConfirmationPhrase(text);
+
+  let s0 = String(clipped).toLowerCase();
+
+  // ✅ normalize common voice phrase
+  s0 = s0.replace(/\bat\s+the\s+rate\b/g, " at ");
+
+  // ✅ treat literal dots as spoken dots
+  s0 = s0.replace(/\./g, " dot ");
 
   // 1) If transcript already has an email, normalize spelling-style hyphens
   const direct = s0.match(EMAIL_FIND_RE) || [];
@@ -169,23 +199,49 @@ const spokenToEmail = (text) => {
     .trim();
 
   if (
-    !/\b(at|dot|gmail|yahoo|outlook|hotmail|underscore|dash|hyphen)\b/i.test(s)
+    !/\b(at|dot|underscore|dash|hyphen|plus|gmail|yahoo|outlook|hotmail)\b/i.test(
+      s
+    )
   )
     return null;
 
   const tokens = s.split(" ");
   let out = "";
+  let sawAt = false;
+  let sawDotAfterAt = false;
 
   for (const rawTok of tokens) {
     const tok = rawTok.replace(/[^a-z0-9-]/g, ""); // keep hyphen for deSpellToken
     if (!tok) continue;
 
-    if (tok === "at") out += "@";
-    else if (tok === "dot" || tok === "period" || tok === "point") out += ".";
-    else if (tok === "underscore") out += "_";
-    else if (tok === "dash" || tok === "hyphen") out += "-";
-    else if (tok === "plus") out += "+";
-    else out += deSpellToken(tok);
+    if (tok === "at") {
+      out += "@";
+      sawAt = true;
+      continue;
+    } else if (tok === "dot" || tok === "period" || tok === "point") {
+      out += ".";
+      if (sawAt) sawDotAfterAt = true;
+      continue;
+    } else if (tok === "underscore") {
+      out += "_";
+      continue;
+    } else if (tok === "dash" || tok === "hyphen") {
+      out += "-";
+      continue;
+    } else if (tok === "plus") {
+      out += "+";
+      continue;
+    } else {
+      out += deSpellToken(tok);
+    }
+
+    // ✅ Stop early once we have a valid email after "@...dot..."
+    if (sawAt && sawDotAfterAt) {
+      const candidate = normalizeHyphenSpelledEmail(
+        out.replace(/[^a-z0-9._%+\-@]/g, "")
+      );
+      if (candidate) return candidate;
+    }
   }
 
   out = out.replace(/[^a-z0-9._%+\-@]/g, "");
@@ -194,50 +250,53 @@ const spokenToEmail = (text) => {
 };
 
 /**
- * CONFIRMED email only (transcription can be wrong):
- * - Strongest: agent read-back email + user confirms yes/correct.
- * - Also: user says "Yes, <email>" then agent repeats it => accept agent version.
- * - If not clearly confirmed, return null.
+ * CONFIRMED email only:
+ * - Accept only: agent read-back email + user confirms yes/correct.
+ * - Never accept company emails like support@getpiepay.com as customer email.
+ * - Lock the FIRST confirmed email; never overwrite with later agent messages.
  */
 const extractConfirmedEmail = (pairs) => {
   if (!Array.isArray(pairs) || !pairs.length) return null;
 
-  let lastConfirmed = null;
+  let confirmed = null;
 
   for (let i = 0; i < pairs.length; i++) {
     const userUtter = String(pairs[i]?.q || "");
-    const agentUtter = String(pairs[i]?.a || "");
+    const agentUtterRaw = String(pairs[i]?.a || "");
 
-    const userSaidYes = YES_RE.test(userUtter.toLowerCase());
+    const userSaidYes = YES_RE.test(userUtter);
+
     const nextUser1 = String(pairs[i + 1]?.q || "");
     const nextUser2 = String(pairs[i + 2]?.q || "");
-    const nextSaidYes =
-      YES_RE.test(nextUser1.toLowerCase()) ||
-      YES_RE.test(nextUser2.toLowerCase());
+    const nextSaidYes = YES_RE.test(nextUser1) || YES_RE.test(nextUser2);
 
+    // Use clipped agent text for extraction, but raw for "readback" detection
+    const agentEmail = spokenToEmail(
+      clipAfterConfirmationPhrase(agentUtterRaw)
+    );
     const userEmail = spokenToEmail(userUtter);
-    const agentEmail = spokenToEmail(agentUtter);
+
+    const agentEmailOk = agentEmail && !isCompanyEmail(agentEmail);
+    const userEmailOk = userEmail && !isCompanyEmail(userEmail);
 
     // Strong: agent read-back + confirmation
-    if (looksLikeAgentReadback(agentUtter) && agentEmail) {
-      if (userSaidYes || nextSaidYes) lastConfirmed = agentEmail;
+    if (
+      looksLikeAgentReadback(agentUtterRaw) &&
+      agentEmailOk &&
+      (userSaidYes || nextSaidYes)
+    ) {
+      if (!confirmed) confirmed = agentEmail; // ✅ lock first confirmed
       continue;
     }
 
-    // Common: user begins with "Yes, ..." then agent repeats
-    if (userSaidYes && agentEmail) {
-      lastConfirmed = agentEmail;
-      continue;
-    }
-
-    // If user says yes and provides an email (and nothing better), accept it
-    if (userSaidYes && userEmail) {
-      lastConfirmed = userEmail;
+    // Very rare fallback: user says email + yes (only if nothing confirmed yet)
+    if (!confirmed && userSaidYes && userEmailOk) {
+      confirmed = userEmail;
       continue;
     }
   }
 
-  return lastConfirmed;
+  return confirmed;
 };
 
 const shouldForceUnsatisfiedIfTicketFlow = (pairs) => {
@@ -264,7 +323,7 @@ const normalizeLanguages = (arr, pairs) => {
       const s = String(raw || "").trim();
       if (!s) continue;
 
-      // If model outputs Urdu phrase like "نہیں، مرزا طلحہ" => treat as Urdu
+      // If model outputs Urdu phrase => treat as Urdu
       if (ARABIC_SCRIPT_RE.test(s)) {
         add("Urdu");
         continue;
@@ -277,7 +336,6 @@ const normalizeLanguages = (arr, pairs) => {
       else if (low.includes("pashto")) add("Pashto");
       else if (low.includes("arabic")) add("Arabic");
       else {
-        // keep short clean names only
         if (s.length <= 20 && !/[،,]/.test(s)) add(normalizeName(s));
       }
     }
@@ -470,7 +528,7 @@ const extractWithOpenAI = async (pairs, { timeoutMs = 60000 } = {}) => {
   const userMsg = `
 Extract fields from these Q/A pairs.
 
-Return JSON ONLY (no markdown, no extra text).
+Return JSON ONLY (no extra text).
 
 Q/A PAIRS:
 ${JSON.stringify(pairs, null, 2)}
@@ -509,6 +567,7 @@ ${JSON.stringify(pairs, null, 2)}
       },
       body: JSON.stringify(payload),
     });
+
     raw = await r.text();
   } finally {
     clearTimeout(timeoutId);
@@ -581,11 +640,14 @@ export const summarizer = async (pairs, callSid, phone) => {
       return trimmed.toLowerCase() === "not specified" ? null : trimmed;
     };
 
-    // ✅ transcription-safe confirmed email (agent read-back + user yes)
+    // ✅ confirmed email (agent read-back + user yes), company emails blocked
     const confirmedEmail = extractConfirmedEmail(pairs);
     const rawEmail = ns(confirmedEmail || parsed?.customer?.email);
+
     const safeEmail =
-      typeof rawEmail === "string" && EMAIL_RE.test(rawEmail)
+      typeof rawEmail === "string" &&
+      EMAIL_RE.test(rawEmail) &&
+      !isCompanyEmail(rawEmail)
         ? rawEmail.toLowerCase()
         : null;
 
@@ -628,83 +690,12 @@ export const summarizer = async (pairs, callSid, phone) => {
     const hasConversation = !!parsed?.has_meaningful_conversation;
     const contactInfoOnly = !!parsed?.contact_info_only;
 
-    // Store original pairs (don’t rely on model echo)
     const qaLog = Array.isArray(pairs) ? pairs : [];
-
     const summary = typeof parsed?.summary === "string" ? parsed.summary : "";
-
-    // ✅ Clean languages so you never store Urdu phrases here
     const languages = normalizeLanguages(parsed?.non_english_detected, pairs);
 
     if (!hasConversation && !contactInfoOnly) {
       return { skipped: "no_conversation", extracted: { summary, qaLog } };
-    }
-
-    // CONTACT INFO ONLY FLOW (DB logic unchanged)
-    if (contactInfoOnly) {
-      const userResult = await sequelize.transaction(async (t) => {
-        let userRecord = null;
-        let userCreated = false;
-
-        if (safePhone)
-          userRecord = await User.findOne({
-            where: { phone: safePhone },
-            transaction: t,
-          });
-        if (!userRecord && safeEmail)
-          userRecord = await User.findOne({
-            where: { email: safeEmail },
-            transaction: t,
-          });
-
-        if (!userRecord) {
-          userRecord = await User.create(
-            {
-              name: safeName || null,
-              email: safeEmail,
-              phone: safePhone,
-              status: "active",
-            },
-            { transaction: t }
-          );
-          userCreated = true;
-        } else {
-          const patch = {};
-          if (safeName && userRecord.name !== safeName) patch.name = safeName;
-          if (safeEmail && userRecord.email !== safeEmail)
-            patch.email = safeEmail;
-          if (safePhone && !userRecord.phone) patch.phone = safePhone;
-          if (userRecord.status !== "active") patch.status = "active";
-          if (Object.keys(patch).length)
-            await userRecord.update(patch, { transaction: t });
-        }
-
-        return { user: userRecord, _flags: { userCreated } };
-      });
-
-      // ✅ Admin notify (safe try/catch)
-      if (userResult?._flags?.userCreated) {
-        await safeSendEmail({
-          to: ADMIN_EMAIL,
-          subject: "GETPIE: New user created (contact-info call)",
-          text: `A new user was created.\nName: ${safeName || "N/A"}\nEmail: ${
-            safeEmail || "N/A"
-          }\nPhone: ${safePhone || "N/A"}\nCallSid: ${callSid}`,
-        });
-      }
-
-      return {
-        user: userResult.user,
-        note: "contact_info_only_user_created",
-        extracted: {
-          name: safeName,
-          email: safeEmail,
-          phone: safePhone,
-          summary,
-          languages,
-          qa_log: qaLog,
-        },
-      };
     }
 
     const shouldCreateTicket = isSatisfied === false;
@@ -718,6 +709,7 @@ export const summarizer = async (pairs, callSid, phone) => {
           where: { phone: safePhone },
           transaction: t,
         });
+
       if (!userRecord && safeEmail)
         userRecord = await User.findOne({
           where: { email: safeEmail },
@@ -751,6 +743,7 @@ export const summarizer = async (pairs, callSid, phone) => {
       let assignedAgentId = null;
 
       if (shouldCreateTicket) {
+        // assign agent if possible (safe)
         try {
           const hasIsActive = !!Agent?.rawAttributes?.isActive;
           const hasTicketType = !!Agent?.rawAttributes?.ticketType;
@@ -825,50 +818,29 @@ export const summarizer = async (pairs, callSid, phone) => {
         type: "inbound",
       };
 
-      const [affected] = await Call.update(callPatch, {
-        where: { callSid },
-        transaction: t,
-      });
-
-      let callRecord = null;
-      let callCreated = false;
-
-      if (affected === 0) {
-        callRecord = await Call.create(
-          { callSid, ...callPatch },
-          { transaction: t }
-        );
-        callCreated = true;
-      } else {
-        callRecord = await Call.findOne({ where: { callSid }, transaction: t });
-      }
+      await Call.update(callPatch, { where: { callSid }, transaction: t });
 
       return {
         user: userRecord,
         ticket: ticketRecord,
-        call: callRecord,
         agentId: assignedAgentId,
-        _flags: { userCreated, ticketCreated, callCreated },
+        _flags: { userCreated, ticketCreated },
         extracted: {
           name: safeName,
           email: safeEmail,
           phone: safePhone,
-          qa_log: qaLog,
           summary,
           languages,
           isSatisfied,
-          hasConversation,
-          contactInfoOnly: false,
         },
       };
     });
 
-    // ✅ EMAIL NOTIFICATIONS (safe try/catch) — DB logic unchanged
+    // ✅ Notify admin on create events
     try {
       const flags = result?._flags || {};
       const events = [];
       if (flags.userCreated) events.push("New user created");
-      if (flags.callCreated) events.push("New call created");
       if (flags.ticketCreated) events.push("New ticket created");
 
       if (events.length) {
@@ -887,37 +859,13 @@ export const summarizer = async (pairs, callSid, phone) => {
             `Summary: ${summary || "N/A"}`,
         });
       }
-
-      // Email user when ticket is created
-      if (flags.ticketCreated && safeEmail) {
-        await safeSendEmail({
-          to: safeEmail,
-          subject: "Your GETPIE support ticket has been created",
-          text:
-            `Hi ${safeName || "there"},\n\n` +
-            `We created a support ticket for you.\n` +
-            `Ticket ID: ${result.ticket?.id || "N/A"}\n` +
-            `Priority: ${result.ticket?.priority || ticketPriority}\n` +
-            `Summary: ${summary || "N/A"}\n\n` +
-            `We’ll contact you soon.\n\n` +
-            `— GETPIE Support`,
-        });
-      }
     } catch (e) {
-      console.warn(
-        "Post-transaction email notifications failed:",
-        e?.message || e
-      );
+      console.warn("Admin notifications failed:", e?.message || e);
     }
 
-    if (isSatisfied === true) result.note = "satisfied_no_ticket";
     return result;
   } catch (e) {
     const msg = String(e?.message || e);
-    if (/aborted|The user aborted a request/i.test(msg))
-      return { error: "openai_timeout", message: msg };
-    if (/unique constraint|duplicate key/i.test(msg))
-      return { error: "db_conflict", message: msg };
     console.error("summarizer error", e);
     return { error: "summarizer_exception", message: msg };
   }
