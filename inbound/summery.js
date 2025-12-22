@@ -14,7 +14,6 @@ const EMAIL_FIND_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const YES_RE =
   /\b(yes|yeah|yep|yup|correct|that's right|that is right|right|sure|ok(?:ay)?|affirmative|exactly)\b/i;
 
-// Urdu/Arabic script ranges (good enough to catch Urdu text)
 const ARABIC_SCRIPT_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 
 const NUM_WORD = {
@@ -32,14 +31,11 @@ const NUM_WORD = {
 
 const safeSendEmail = async ({ to, subject, text, html }) => {
   try {
-    // Common signature: sendEmail({to,subject,text,html})
     return await sendEmail(to, subject, text);
   } catch (e1) {
     try {
-      // Fallback signature: sendEmail(to, subject, body)
       return await sendEmail(to, subject, html || text || "");
     } catch (e2) {
-      console.warn("sendEmail failed:", e2?.message || e2);
       return null;
     }
   }
@@ -62,36 +58,27 @@ const normalizeName = (n) => {
 };
 
 const looksLikeAgentReadback = (s) =>
-  /\b(let me repeat|repeat that|make sure i have it|is that correct|correct\?)\b/i.test(
+  /\b(let me repeat|repeat that|make sure i have it|is that correct|correct\?|let me confirm|to confirm|confirm:)\b/i.test(
     String(s || "")
   );
 
-/**
- * If user INTENDS "_" or "-", they usually say "underscore" / "dash" / "hyphen".
- * If transcript shows m-i-r-z-a... that’s spelling letters => remove hyphens.
- * We only collapse hyphens when it looks like spelled-out letters (long sequence).
- */
 const deSpellToken = (tok) => {
   if (!tok) return "";
   const t = String(tok).toLowerCase();
 
-  // e.g. one-one-one -> 111
   if (t.includes("-")) {
     const parts = t.split("-").filter(Boolean);
 
-    // numeric word chain
     if (parts.length >= 2 && parts.every((p) => NUM_WORD[p] != null)) {
       return parts.map((p) => NUM_WORD[p]).join("");
     }
 
-    // spelling letters/digits like m-i-r-z-a OR 1-1-1
-    // only join when it's clearly spelling (many single-char parts)
     const singleCount = parts.filter((p) => /^[a-z0-9]$/.test(p)).length;
     if (parts.length >= 6 && singleCount / parts.length >= 0.8) {
       return parts.join("");
     }
 
-    return t; // keep as-is otherwise (could be real hyphen)
+    return t;
   }
 
   if (NUM_WORD[t] != null) return NUM_WORD[t];
@@ -101,8 +88,6 @@ const deSpellToken = (tok) => {
 const normalizeHyphenSpelledEmail = (email) => {
   if (!email) return null;
   let e = String(email).trim().toLowerCase();
-
-  // strip trailing punctuation
   e = e.replace(/[>,.)]+$/g, "");
 
   if (!e.includes("@")) return EMAIL_RE.test(e) ? e : null;
@@ -113,21 +98,17 @@ const normalizeHyphenSpelledEmail = (email) => {
   let local = local0;
   let domain = domain0;
 
-  // Collapse spelled-out local part like m-i-r-z-a-t-a-l-h-a...
   const localParts = local.split("-").filter(Boolean);
   const singleCount = localParts.filter((p) => /^[a-z0-9]$/.test(p)).length;
 
-  // Only collapse if it REALLY looks like spelling letters (long + mostly single chars)
   if (localParts.length >= 6 && singleCount / localParts.length >= 0.8) {
     local = localParts.join("");
   }
 
-  // Collapse digits ONLY when it's clearly 1-1-1 (at least 2 hyphens between digits)
   if (/\d-\d-\d/.test(local)) {
     local = local.replace(/(\d)-(?=\d)/g, "$1");
   }
 
-  // Domain sometimes gets hyphen-spelled too (rare), e.g. g-m-a-i-l
   domain = domain
     .split(".")
     .map((label) => {
@@ -142,34 +123,28 @@ const normalizeHyphenSpelledEmail = (email) => {
   return EMAIL_RE.test(out) ? out : null;
 };
 
-/**
- * Build an email from spoken/spelled text:
- *  "m-i-r-z-a-t-a-l-h-a one-one-one at gmail dot com"
- *   -> "mirzatalha111@gmail.com"
- *
- * IMPORTANT:
- * - If they say "underscore" => keep "_"
- * - If they say "dash/hyphen" => keep "-"
- */
 const spokenToEmail = (text) => {
   if (!text) return null;
   const s0 = String(text).toLowerCase();
 
-  // 1) If transcript already has an email, normalize spelling-style hyphens
   const direct = s0.match(EMAIL_FIND_RE) || [];
   for (let i = direct.length - 1; i >= 0; i--) {
     const norm = normalizeHyphenSpelledEmail(direct[i]);
     if (norm) return norm;
   }
 
-  // 2) Otherwise try building from words (at/dot/underscore/dash)
   const s = s0
+    .replace(/\bat\s*the\s*rate\b/g, " at ")
+    .replace(/@/g, " at ")
+    .replace(/\./g, " dot ")
     .replace(/[(),;:]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
   if (
-    !/\b(at|dot|gmail|yahoo|outlook|hotmail|underscore|dash|hyphen)\b/i.test(s)
+    !/\b(at|dot|gmail|yahoo|outlook|hotmail|underscore|dash|hyphen|plus|period|point)\b/i.test(
+      s
+    )
   )
     return null;
 
@@ -177,7 +152,7 @@ const spokenToEmail = (text) => {
   let out = "";
 
   for (const rawTok of tokens) {
-    const tok = rawTok.replace(/[^a-z0-9-]/g, ""); // keep hyphen for deSpellToken
+    const tok = rawTok.replace(/[^a-z0-9-]/g, "");
     if (!tok) continue;
 
     if (tok === "at") out += "@";
@@ -193,12 +168,6 @@ const spokenToEmail = (text) => {
   return norm || null;
 };
 
-/**
- * CONFIRMED email only (transcription can be wrong):
- * - Strongest: agent read-back email + user confirms yes/correct.
- * - Also: user says "Yes, <email>" then agent repeats it => accept agent version.
- * - If not clearly confirmed, return null.
- */
 const EXCLUDED_EMAILS = new Set(["support@getpiepay.com"]);
 
 const isExcludedEmail = (email) => {
@@ -210,6 +179,15 @@ const extractConfirmedEmail = (pairs) => {
   if (!Array.isArray(pairs) || !pairs.length) return null;
 
   let lastConfirmed = null;
+  let lastSeenEmail = null;
+
+  const setSeen = (email) => {
+    if (!email) return;
+    const e = String(email).trim().toLowerCase();
+    if (!EMAIL_RE.test(e)) return;
+    if (isExcludedEmail(e)) return;
+    lastSeenEmail = e;
+  };
 
   for (let i = 0; i < pairs.length; i++) {
     const userUtter = String(pairs[i]?.q || "");
@@ -225,21 +203,34 @@ const extractConfirmedEmail = (pairs) => {
     const userEmail = spokenToEmail(userUtter);
     const agentEmail = spokenToEmail(agentUtter);
 
-    // Strong: agent read-back + confirmation
-    if (looksLikeAgentReadback(agentUtter) && agentEmail) {
-      if (!isExcludedEmail(agentEmail) && (userSaidYes || nextSaidYes)) {
-        lastConfirmed = agentEmail;
+    setSeen(userEmail);
+    setSeen(agentEmail);
+
+    if (looksLikeAgentReadback(agentUtter) && (agentEmail || lastSeenEmail)) {
+      if (userSaidYes || nextSaidYes) {
+        const picked = agentEmail || lastSeenEmail;
+        if (picked && !isExcludedEmail(picked)) lastConfirmed = picked;
       }
       continue;
     }
 
-    // Common: user begins with "Yes, ..." then agent repeats
     if (userSaidYes && agentEmail) {
       if (!isExcludedEmail(agentEmail)) lastConfirmed = agentEmail;
       continue;
     }
 
-    // If user says yes and provides an email (and nothing better), accept it
+    if (
+      userSaidYes &&
+      !agentEmail &&
+      lastSeenEmail &&
+      /\b(updated|i['’]?ve updated|i have updated|keep that email|i['’]?ll keep)\b/i.test(
+        agentUtter
+      )
+    ) {
+      if (!isExcludedEmail(lastSeenEmail)) lastConfirmed = lastSeenEmail;
+      continue;
+    }
+
     if (userSaidYes && userEmail) {
       if (!isExcludedEmail(userEmail)) lastConfirmed = userEmail;
       continue;
@@ -267,13 +258,11 @@ const normalizeLanguages = (arr, pairs) => {
     if (!out.includes(v)) out.push(v);
   };
 
-  // From model
   if (Array.isArray(arr)) {
     for (const raw of arr) {
       const s = String(raw || "").trim();
       if (!s) continue;
 
-      // If model outputs Urdu phrase like "نہیں، مرزا طلحہ" => treat as Urdu
       if (ARABIC_SCRIPT_RE.test(s)) {
         add("Urdu");
         continue;
@@ -286,13 +275,11 @@ const normalizeLanguages = (arr, pairs) => {
       else if (low.includes("pashto")) add("Pashto");
       else if (low.includes("arabic")) add("Arabic");
       else {
-        // keep short clean names only
         if (s.length <= 20 && !/[،,]/.test(s)) add(normalizeName(s));
       }
     }
   }
 
-  // From transcript text (backup)
   const text = (pairs || [])
     .map((p) => `${p?.q ?? ""} ${p?.a ?? ""}`)
     .join(" ");
@@ -405,6 +392,7 @@ const extractWithOpenAI = async (pairs, { timeoutMs = 60000 } = {}) => {
     "Transcription can be wrong. Prefer facts explicitly CONFIRMED in the call.",
     "EMAIL RULES (important):",
     "- The transcript may mis-spell an email and may add hyphens between letters when user spells it (e.g., m-i-r-z-a...). Those hyphens are NOT part of the email; remove them.",
+    "- The transcript may spell emails with spaces (e.g., m i r z a ... @ gmail.com). Reconstruct it.",
     "- If the user explicitly says 'underscore' or 'dash/hyphen', keep those characters in the email.",
     "- If agent reads an email back and user confirms yes/correct, that confirmed email is the truth.",
     "- If there is ANY doubt which email is correct, set customer.email = 'not specified'.",
@@ -590,7 +578,6 @@ export const summarizer = async (pairs, callSid, phone) => {
       return trimmed.toLowerCase() === "not specified" ? null : trimmed;
     };
 
-    // ✅ transcription-safe confirmed email (agent read-back + user yes)
     const confirmedEmail = extractConfirmedEmail(pairs);
     const rawEmail = ns(confirmedEmail || parsed?.customer?.email);
     const safeEmail =
@@ -604,7 +591,6 @@ export const summarizer = async (pairs, callSid, phone) => {
       ns(parsed?.customer?.name) || ns(parsed?.customer?.name_raw);
     const safeName = normalizeName(rawName);
 
-    // Business rule: ticket/escalation => unsatisfied
     const forceUnsatisfied = shouldForceUnsatisfiedIfTicketFlow(pairs);
 
     const parsedIsSat = parsed?.ticket?.isSatisfied;
@@ -637,19 +623,16 @@ export const summarizer = async (pairs, callSid, phone) => {
     const hasConversation = !!parsed?.has_meaningful_conversation;
     const contactInfoOnly = !!parsed?.contact_info_only;
 
-    // Store original pairs (don’t rely on model echo)
     const qaLog = Array.isArray(pairs) ? pairs : [];
 
     const summary = typeof parsed?.summary === "string" ? parsed.summary : "";
 
-    // ✅ Clean languages so you never store Urdu phrases here
     const languages = normalizeLanguages(parsed?.non_english_detected, pairs);
 
     if (!hasConversation && !contactInfoOnly) {
       return { skipped: "no_conversation", extracted: { summary, qaLog } };
     }
 
-    // CONTACT INFO ONLY FLOW (DB logic unchanged)
     if (contactInfoOnly) {
       const userResult = await sequelize.transaction(async (t) => {
         let userRecord = null;
@@ -691,7 +674,6 @@ export const summarizer = async (pairs, callSid, phone) => {
         return { user: userRecord, _flags: { userCreated } };
       });
 
-      // ✅ Admin notify (safe try/catch)
       if (userResult?._flags?.userCreated) {
         await safeSendEmail({
           to: ADMIN_EMAIL,
@@ -804,9 +786,7 @@ export const summarizer = async (pairs, callSid, phone) => {
             }
             assignedAgentId = best?.id ?? null;
           }
-        } catch (e) {
-          console.warn("Agent assignment skipped:", e?.message);
-        }
+        } catch (e) {}
 
         ticketRecord = await Ticket.create(
           {
@@ -872,7 +852,6 @@ export const summarizer = async (pairs, callSid, phone) => {
       };
     });
 
-    // ✅ EMAIL NOTIFICATIONS (safe try/catch) — DB logic unchanged
     try {
       const flags = result?._flags || {};
       const events = [];
@@ -897,7 +876,6 @@ export const summarizer = async (pairs, callSid, phone) => {
         });
       }
 
-      // Email user when ticket is created
       if (flags.ticketCreated && safeEmail) {
         await safeSendEmail({
           to: safeEmail,
@@ -912,12 +890,7 @@ export const summarizer = async (pairs, callSid, phone) => {
             `— GETPIE Support`,
         });
       }
-    } catch (e) {
-      console.warn(
-        "Post-transaction email notifications failed:",
-        e?.message || e
-      );
-    }
+    } catch (e) {}
 
     if (isSatisfied === true) result.note = "satisfied_no_ticket";
     return result;
@@ -927,7 +900,6 @@ export const summarizer = async (pairs, callSid, phone) => {
       return { error: "openai_timeout", message: msg };
     if (/unique constraint|duplicate key/i.test(msg))
       return { error: "db_conflict", message: msg };
-    console.error("summarizer error", e);
     return { error: "summarizer_exception", message: msg };
   }
 };
