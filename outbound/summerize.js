@@ -1,292 +1,480 @@
-import "dotenv/config";
-import { Op } from "sequelize";
-import sequelize from "../config/db.js"; // 👈 use your shared DB instance
+import Ticket from "../models/ticket.js";
+import Call from "../models/Call.js";
 import User from "../models/user.js";
 import Agent from "../models/agent.js";
-import Call from "../models/Call.js";
-import Ticket from "../models/ticket.js";
-import Rating from "../models/rating.js";
-// import sendEmail from "../utils/Email.js";
+import sequelize from "../config/db.js";
+import { Op } from "sequelize";
+import sendEmail from "../utils/Email.js";
 
-const now = () => new Date();
-const addDays = (d, n) => new Date(d.getTime() + n * 24 * 60 * 60 * 1000);
+const ADMIN_EMAIL = "ahmedsarwar7575@gmail.com";
 
-/** ---------------- AGENT LOAD BALANCING ---------------- */
-async function getLeastLoadedAgentSafe() {
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+const EMAIL_FIND_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+
+const YES_RE =
+  /\b(yes|yeah|yep|yup|correct|that's right|that is right|right|sure|ok(?:ay)?|affirmative|exactly)\b/i;
+
+const ARABIC_SCRIPT_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
+
+const NUM_WORD = {
+  zero: "0",
+  one: "1",
+  two: "2",
+  three: "3",
+  four: "4",
+  five: "5",
+  six: "6",
+  seven: "7",
+  eight: "8",
+  nine: "9",
+};
+
+const safeSendEmail = async ({ to, subject, text, html }) => {
   try {
-    const hasRole = !!Agent?.rawAttributes?.role;
-    const agents = await Agent.findAll({
-      where: hasRole ? { role: "agent" } : {},
-      attributes: ["id"],
-      raw: true,
-    });
-
-    if (!agents.length) return { agentId: null };
-
-    const { fn, col } = Ticket.sequelize;
-    const ticketCounts = await Ticket.findAll({
-      where: { status: { [Op.in]: ["open", "in_progress"] } },
-      attributes: ["agentId", [fn("COUNT", col("id")), "count"]],
-      group: ["agentId"],
-      raw: true,
-    });
-
-    const loadMap = {};
-    for (const row of ticketCounts) {
-      if (!row.agentId) continue;
-      loadMap[row.agentId] = parseInt(row.count, 10) || 0;
+    return await sendEmail(to, subject, text);
+  } catch (e1) {
+    try {
+      return await sendEmail(to, subject, html || text || "");
+    } catch (e2) {
+      return null;
     }
-
-    let best = null;
-    let bestLoad = Infinity;
-    for (const { id } of agents) {
-      const load = loadMap[id] ?? 0;
-      if (load < bestLoad) {
-        best = id;
-        bestLoad = load;
-      }
-    }
-    return { agentId: best };
-  } catch (e) {
-    console.warn("[getLeastLoadedAgentSafe] skipped:", e?.message || e);
-    return { agentId: null };
   }
-}
+};
 
-/** ---------------- TEXT HELPERS ---------------- */
-const textOfPairs = (pairs) =>
-  (Array.isArray(pairs) ? pairs : [])
-    .map((p) => `${p.q ?? ""} ${p.a ?? ""}`)
+const normalizePhone = (p) => {
+  if (!p) return null;
+  const s = String(p).trim();
+  const keepPlus = s.startsWith("+");
+  const digits = s.replace(/\D+/g, "");
+  if (!digits) return null;
+  return keepPlus ? `+${digits}` : digits;
+};
+
+const normalizeName = (n) => {
+  if (!n || typeof n !== "string") return null;
+  const trimmed = n.trim().replace(/\s+/g, " ");
+  if (!trimmed) return null;
+  return trimmed.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+};
+
+const looksLikeAgentReadback = (s) =>
+  /\b(let me repeat|repeat that|make sure i have it|is that correct|correct\?|let me confirm|to confirm|confirm:)\b/i.test(
+    String(s || "")
+  );
+
+const deSpellToken = (tok) => {
+  if (!tok) return "";
+  const t = String(tok).toLowerCase();
+
+  if (t.includes("-")) {
+    const parts = t.split("-").filter(Boolean);
+
+    if (parts.length >= 2 && parts.every((p) => NUM_WORD[p] != null)) {
+      return parts.map((p) => NUM_WORD[p]).join("");
+    }
+
+    const singleCount = parts.filter((p) => /^[a-z0-9]$/.test(p)).length;
+    if (parts.length >= 6 && singleCount / parts.length >= 0.8) {
+      return parts.join("");
+    }
+
+    return t;
+  }
+
+  if (NUM_WORD[t] != null) return NUM_WORD[t];
+  return t;
+};
+
+const normalizeHyphenSpelledEmail = (email) => {
+  if (!email) return null;
+  let e = String(email).trim().toLowerCase();
+  e = e.replace(/[>,.)]+$/g, "");
+
+  if (!e.includes("@")) return EMAIL_RE.test(e) ? e : null;
+
+  const [local0, domain0] = e.split("@");
+  if (!local0 || !domain0) return null;
+
+  let local = local0;
+  let domain = domain0;
+
+  const localParts = local.split("-").filter(Boolean);
+  const singleCount = localParts.filter((p) => /^[a-z0-9]$/.test(p)).length;
+
+  if (localParts.length >= 6 && singleCount / localParts.length >= 0.8) {
+    local = localParts.join("");
+  }
+
+  if (/\d-\d-\d/.test(local)) {
+    local = local.replace(/(\d)-(?=\d)/g, "$1");
+  }
+
+  domain = domain
+    .split(".")
+    .map((label) => {
+      const parts = label.split("-").filter(Boolean);
+      if (parts.length >= 4 && parts.every((p) => /^[a-z]$/.test(p)))
+        return parts.join("");
+      return label;
+    })
+    .join(".");
+
+  const out = `${local}@${domain}`;
+  return EMAIL_RE.test(out) ? out : null;
+};
+
+const spokenToEmail = (text) => {
+  if (!text) return null;
+  const s0 = String(text).toLowerCase();
+
+  const direct = s0.match(EMAIL_FIND_RE) || [];
+  for (let i = direct.length - 1; i >= 0; i--) {
+    const norm = normalizeHyphenSpelledEmail(direct[i]);
+    if (norm) return norm;
+  }
+
+  const s = s0
+    .replace(/\bat\s*the\s*rate\b/g, " at ")
+    .replace(/@/g, " at ")
+    .replace(/\./g, " dot ")
+    .replace(/[(),;:]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (
+    !/\b(at|dot|gmail|yahoo|outlook|hotmail|underscore|dash|hyphen|plus|period|point)\b/i.test(
+      s
+    )
+  )
+    return null;
+
+  const tokens = s.split(" ");
+  let out = "";
+
+  for (const rawTok of tokens) {
+    const tok = rawTok.replace(/[^a-z0-9-]/g, "");
+    if (!tok) continue;
+
+    if (tok === "at") out += "@";
+    else if (tok === "dot" || tok === "period" || tok === "point") out += ".";
+    else if (tok === "underscore") out += "_";
+    else if (tok === "dash" || tok === "hyphen") out += "-";
+    else if (tok === "plus") out += "+";
+    else out += deSpellToken(tok);
+  }
+
+  out = out.replace(/[^a-z0-9._%+\-@]/g, "");
+  const norm = normalizeHyphenSpelledEmail(out);
+  return norm || null;
+};
+
+const EXCLUDED_EMAILS = new Set(["support@getpiepay.com"]);
+
+const isExcludedEmail = (email) => {
+  if (!email) return false;
+  return EXCLUDED_EMAILS.has(String(email).trim().toLowerCase());
+};
+
+const extractConfirmedEmail = (pairs) => {
+  if (!Array.isArray(pairs) || !pairs.length) return null;
+
+  let lastConfirmed = null;
+  let lastSeenEmail = null;
+
+  const setSeen = (email) => {
+    if (!email) return;
+    const e = String(email).trim().toLowerCase();
+    if (!EMAIL_RE.test(e)) return;
+    if (isExcludedEmail(e)) return;
+    lastSeenEmail = e;
+  };
+
+  for (let i = 0; i < pairs.length; i++) {
+    const userUtter = String(pairs[i]?.q || "");
+    const agentUtter = String(pairs[i]?.a || "");
+
+    const userSaidYes = YES_RE.test(userUtter.toLowerCase());
+    const nextUser1 = String(pairs[i + 1]?.q || "");
+    const nextUser2 = String(pairs[i + 2]?.q || "");
+    const nextSaidYes =
+      YES_RE.test(nextUser1.toLowerCase()) ||
+      YES_RE.test(nextUser2.toLowerCase());
+
+    const userEmail = spokenToEmail(userUtter);
+    const agentEmail = spokenToEmail(agentUtter);
+
+    setSeen(userEmail);
+    setSeen(agentEmail);
+
+    if (looksLikeAgentReadback(agentUtter) && (agentEmail || lastSeenEmail)) {
+      if (userSaidYes || nextSaidYes) {
+        const picked = agentEmail || lastSeenEmail;
+        if (picked && !isExcludedEmail(picked)) lastConfirmed = picked;
+      }
+      continue;
+    }
+
+    if (userSaidYes && agentEmail) {
+      if (!isExcludedEmail(agentEmail)) lastConfirmed = agentEmail;
+      continue;
+    }
+
+    if (
+      userSaidYes &&
+      !agentEmail &&
+      lastSeenEmail &&
+      /\b(updated|i['’]?ve updated|i have updated|keep that email|i['’]?ll keep)\b/i.test(
+        agentUtter
+      )
+    ) {
+      if (!isExcludedEmail(lastSeenEmail)) lastConfirmed = lastSeenEmail;
+      continue;
+    }
+
+    if (userSaidYes && userEmail) {
+      if (!isExcludedEmail(userEmail)) lastConfirmed = userEmail;
+      continue;
+    }
+  }
+
+  return lastConfirmed;
+};
+
+const shouldForceUnsatisfiedIfTicketFlow = (pairs) => {
+  const text = (pairs || [])
+    .map((p) => `${p?.q ?? ""} ${p?.a ?? ""}`)
     .join(" ")
     .toLowerCase();
 
-/**
- * Try to pull a 1–5 rating from the Q/A text (fallback if LLM misses it).
- * Looks for patterns like "4", "4/5", "4 out of 5", "4 stars".
- */
-function extractRatingFromPairs(qaPairs) {
-  if (!Array.isArray(qaPairs)) {
-    return { rating: null, comment: null };
-  }
+  return /\b(escalat\w*|open(?:ed|ing)?\s+(?:a\s+)?(?:\w+\s+){0,3}ticket|creat(?:e|ed|ing)\s+(?:a\s+)?(?:\w+\s+){0,3}ticket|log(?:ged|ging)?\s+(?:a\s+)?ticket|case\s+number|follow\s*up|technician\s+(?:will|to)\s+(?:call|contact)|we(?:'ll| will)\s+(?:call|contact)\s+you)\b/i.test(
+    text
+  );
+};
 
-  const RATING_REGEX =
-    /\b([1-5])\b\s*(?:stars?|star|out of 5|\/5)?/i;
+const normalizeLanguages = (arr, pairs) => {
+  const out = [];
+  const add = (v) => {
+    if (!v) return;
+    if (!out.includes(v)) out.push(v);
+  };
 
-  // search from last pair backwards (most recent answer first)
-  for (let i = qaPairs.length - 1; i >= 0; i--) {
-    const p = qaPairs[i] || {};
-    const candidates = [
-      p.q != null ? String(p.q) : "",
-      p.a != null ? String(p.a) : "",
-    ];
-    for (const txt of candidates) {
-      const m = txt.match(RATING_REGEX);
-      if (m) {
-        const rating = parseInt(m[1], 10);
-        if (!Number.isNaN(rating) && rating >= 1 && rating <= 5) {
-          return {
-            rating,
-            comment: txt.trim() || null,
-          };
-        }
+  if (Array.isArray(arr)) {
+    for (const raw of arr) {
+      const s = String(raw || "").trim();
+      if (!s) continue;
+
+      if (ARABIC_SCRIPT_RE.test(s)) {
+        add("Urdu");
+        continue;
+      }
+
+      const low = s.toLowerCase();
+      if (low.includes("urdu")) add("Urdu");
+      else if (low.includes("english")) add("English");
+      else if (low.includes("punjabi")) add("Punjabi");
+      else if (low.includes("pashto")) add("Pashto");
+      else if (low.includes("arabic")) add("Arabic");
+      else {
+        if (s.length <= 20 && !/[،,]/.test(s)) add(normalizeName(s));
       }
     }
   }
 
-  return { rating: null, comment: null };
-}
+  const text = (pairs || [])
+    .map((p) => `${p?.q ?? ""} ${p?.a ?? ""}`)
+    .join(" ");
+  if (ARABIC_SCRIPT_RE.test(text)) add("Urdu");
 
-/** ---------------- OUTCOME DETECTORS (RULE-BASED FALLBACK) ---------------- */
-function detectSatisfactionCase(qaPairs) {
-  const t = textOfPairs(qaPairs);
-
-  const yesSatisfied =
-    /\b(i'?m|i am|am)\s+(ok|okay|fine|good|satisfied|happy)\b/.test(t) ||
-    /\bthis (solves|fixed|works)\b/.test(t) ||
-    /\bresolved\b/.test(t);
-
-  const explicitNo =
-    /\bnot\s+(ok|okay|happy|satisfied)\b/.test(t) ||
-    /\bnot\s+resolved\b/.test(t) ||
-    /\bstill (failing|broken)\b/.test(t) ||
-    /\b(unhappy|unsatisfied|dissatisfied)\b/.test(t);
-
-  const noResponseOrCut =
-    /\b(call\s*(got)?\s*cut|hang\s*up|hung\s*up|prefer not to say|no comment|no response|silent|silence)\b/.test(
-      t
-    );
-
-  if (yesSatisfied) return "satisfied";
-  if (explicitNo) return "not_satisfied";
-  if (noResponseOrCut) return "no_response";
-
-  const issue =
-    /\b(refund|charge|error|bug|fail|declined|problem|issue|login|shipment|lost|delay)\b/.test(
-      t
-    );
-  return issue ? "not_satisfied" : "no_response";
-}
-
-function detectUpsellCase(qaPairs) {
-  const t = textOfPairs(qaPairs);
-
-  const interested =
-    /\b(yes|yeah|yep|sure|ok|okay|interested|sounds good|let'?s do|book|schedule|set up)\b.*\b(demo|call|meeting|follow\s*up|trial|plan|offer)\b/.test(
-      t
-    ) ||
-    /\b(send|share)\b.*\b(details|info|information|proposal|quote|pricing)\b/.test(
-      t
-    );
-
-  const notInterested =
-    /\b(not\s+interested|no\s+thanks|no thank you|maybe later|not now)\b/.test(
-      t
-    ) || /\b(stop\s+calling|remove me|do not contact)\b/.test(t);
-
-  const noResponseOrCut =
-    /\b(call\s*(got)?\s*cut|hang\s*up|hung\s*up|prefer not to say|no comment|no response|silent|silence)\b/.test(
-      t
-    );
-
-  if (interested) return "interested";
-  if (notInterested) return "not_interested";
-  if (noResponseOrCut) return "no_response";
-  return "no_response";
-}
-
-/** ---------------- FOLLOW-UP LOGIC ---------------- */
-function computeFollowup(campaignType, outcomeCase) {
-  const nowDate = now();
-  if (campaignType === "satisfaction" && outcomeCase === "satisfied") {
-    return addDays(nowDate, 7);
-  }
-  if (campaignType === "upsell" && outcomeCase === "interested") {
-    return addDays(nowDate, 21);
-  }
-  return null;
-}
-
-function buildFollowupPatch(campaignType, followupAt) {
-  if (!followupAt) return {};
-  const hasNextSat = !!Call?.rawAttributes?.nextSatisfactionAt;
-  const hasNextUps = !!Call?.rawAttributes?.nextUpsellAt;
-  const hasGeneric = !!Call?.rawAttributes?.followUpAt;
-
-  if (campaignType === "satisfaction") {
-    if (hasNextSat) return { nextSatisfactionAt: followupAt };
-    if (hasGeneric) return { followUpAt: followupAt };
-  } else if (campaignType === "upsell") {
-    if (hasNextUps) return { nextUpsellAt: followupAt };
-    if (hasGeneric) return { followUpAt: followupAt };
-  }
-  return {};
-}
-
-/** ---------------- MISC HELPERS ---------------- */
-const cleanLanguages = (arr) => {
-  if (!Array.isArray(arr)) return [];
-  return Array.from(
-    new Set(
-      arr.map((v) => (v == null ? "" : String(v).trim())).filter((v) => v)
-    )
-  );
+  return out;
 };
 
-/** ---------------- MOCK OUTCOME (NO LLM) ---------------- */
-function mockOutcomeExtract(qaPairs, campaignType) {
-  const outcome_case =
-    campaignType === "satisfaction"
-      ? detectSatisfactionCase(qaPairs)
-      : detectUpsellCase(qaPairs);
+function mockExtract(pairs) {
+  const text = pairs.map((p) => `${p.q ?? ""} ${p.a ?? ""}`).join(" ");
+  const lower = text.toLowerCase();
+
+  const confirmedEmail = extractConfirmedEmail(pairs);
+
+  const nameMatch = text.match(
+    /\b(?:my name is|it's|i am)\s+([A-Za-z][A-Za-z\s'-]{1,40})/i
+  );
+  const name = nameMatch
+    ? nameMatch[1]
+    : (text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b/) || [null])[0];
+
+  const satisfied =
+    /(i'?m\s+satisfied|this solves it|works now|resolved)/i.test(lower);
+  const unsatisfied =
+    /(not satisfied|not happy|still failing|doesn'?t work|not resolved)/i.test(
+      lower
+    );
+
+  const contactInfoOnly =
+    /\b(register (my )?details|no issue( right)? now|only (my )?(name|email)|just (my )?details)\b/i.test(
+      lower
+    );
+
+  const hasIssueKeyword =
+    /\binvoice|payment|charge|refund|login|reset|error|ticket|order|shipment|crash|declined|fail|lost|track|pos|inventory\b/i.test(
+      lower
+    );
+
+  const greetingsOnly =
+    !contactInfoOnly &&
+    !satisfied &&
+    !unsatisfied &&
+    !hasIssueKeyword &&
+    /\b(hello|hi|salam|assalam|testing the line|bye)\b/i.test(lower);
+
+  let ticketType = null;
+  if (/\b(invoice|billing|charge|refund|card|declined|payment)\b/i.test(lower))
+    ticketType = "billing";
+  else if (/\b(pricing|buy|purchase|quote|plan)\b/i.test(lower))
+    ticketType = "sales";
+  else if (
+    /\b(login|reset|error|bug|crash|shipping|order|shipment|track|lost|pos|inventory)\b/i.test(
+      lower
+    )
+  )
+    ticketType = "support";
+
+  const agentHints = pairs
+    .filter((p) => /agent/i.test(p.q || ""))
+    .map((p) => p.a || "");
+  const proposedSolution =
+    agentHints
+      .reverse()
+      .find((s) =>
+        /\b(try|sent|do|please|clear|different browser|we will|we'll|opened a case|creating a)\b/i.test(
+          s
+        )
+      ) || "not specified";
 
   const customerLine = (
-    qaPairs.find((p) => /customer/i.test(p.q || ""))?.a || ""
+    pairs.find((p) => /customer/i.test(p.q || ""))?.a || ""
   ).slice(0, 160);
+  const summary = customerLine || "not specified";
 
-  const summary =
-    customerLine ||
-    (campaignType === "satisfaction"
-      ? outcome_case === "satisfied"
-        ? "Customer appears satisfied with the resolution."
-        : outcome_case === "not_satisfied"
-        ? "Customer appears not satisfied with the resolution."
-        : "No clear response from customer; call may have been cut or unclear."
-      : outcome_case === "interested"
-      ? "Customer appears interested in the upsell offer."
-      : outcome_case === "not_interested"
-      ? "Customer is not interested in the upsell offer."
-      : "No clear response to upsell offer; call may have been cut or unclear.");
-
-  // rating fallback in mock mode (only for satisfaction)
-  let rating_score = "not_specified";
-  let rating_comment = "not_specified";
-  if (campaignType === "satisfaction") {
-    const { rating, comment } = extractRatingFromPairs(qaPairs);
-    if (rating != null) {
-      rating_score = rating;
-      rating_comment = comment || "not_specified";
-    }
-  }
+  const forceUnsatisfied = shouldForceUnsatisfiedIfTicketFlow(pairs);
 
   return {
-    outcome_case,
+    customer: {
+      name: name ? normalizeName(name) : "not specified",
+      name_raw: name || "not specified",
+      email: confirmedEmail || "not specified",
+    },
+    ticket: {
+      ticketType: ticketType || "not specified",
+      status: satisfied && !forceUnsatisfied ? "resolved" : "open",
+      priority: /critical|p1|high/.test(lower) ? "high" : "medium",
+      proposedSolution,
+      isSatisfied: forceUnsatisfied
+        ? false
+        : satisfied
+        ? true
+        : unsatisfied
+        ? false
+        : "not specified",
+    },
     summary,
-    non_english_detected: [],
+    has_meaningful_conversation: !greetingsOnly,
+    contact_info_only: contactInfoOnly,
+    non_english_detected: normalizeLanguages([], pairs),
     clarifications_needed: [],
     mishears_or_typos: [],
-    rating_score,
-    rating_comment,
   };
 }
 
-/** ---------------- LLM OUTCOME EXTRACTOR ---------------- */
-async function extractOutcomeWithLLM(qaPairs, campaignType) {
+const extractWithOpenAI = async (pairs, { timeoutMs = 60000 } = {}) => {
   const system = [
-    "You are an accurate, terse extractor for GETPIE outbound customer calls.",
-    "English only. Output ONLY JSON, no extra words.",
-    "If a value is unknown/unclear, set it to the string 'not_specified'.",
-    "Correct obvious misspellings when you summarize.",
-    "Do not invent facts. Prefer 'not_specified' over guessing.",
-    "Keep the summary <= 80 words.",
-    "Classify the outcome using fixed string values exactly as requested.",
-    "For satisfaction campaigns: outcome_case must be one of 'satisfied', 'not_satisfied', or 'no_response'.",
-    "For upsell campaigns: outcome_case must be one of 'interested', 'not_interested', or 'no_response'.",
-    "If this is a satisfaction campaign and the customer provides a rating for the agent, extract rating_score as an integer 1-5 and rating_comment as a short sentence.",
-    "If there is no clear rating, set rating_score to 'not_specified' and rating_comment to 'not_specified'.",
-    "For upsell campaigns, always set rating_score to 'not_specified' and rating_comment to 'not_specified'.",
-    "Languages list must be real-world names (e.g., English, Urdu, Punjabi).",
+    "You are an accurate, terse extractor for GETPIE customer support call logs.",
+    "English only. Output ONLY JSON matching the provided JSON Schema.",
+    "If unknown/unclear, set the value to the string 'not specified'. Do not invent facts.",
+    "Transcription can be wrong. Prefer facts explicitly CONFIRMED in the call.",
+    "EMAIL RULES (important):",
+    "- The transcript may mis-spell an email and may add hyphens between letters when user spells it (e.g., m-i-r-z-a...). Those hyphens are NOT part of the email; remove them.",
+    "- The transcript may spell emails with spaces (e.g., m i r z a ... @ gmail.com). Reconstruct it.",
+    "- If the user explicitly says 'underscore' or 'dash/hyphen', keep those characters in the email.",
+    "- If agent reads an email back and user confirms yes/correct, that confirmed email is the truth.",
+    "- If there is ANY doubt which email is correct, set customer.email = 'not specified'.",
+    "SATISFACTION RULES (important):",
+    "- If agent/customer agree to create/escalate/open a ticket or schedule technician follow-up, set ticket.isSatisfied = false.",
+    "- Only set ticket.isSatisfied = true if customer explicitly says solved/resolved/works and NO escalation/ticket flow exists.",
+    "Keep summary <= 80 words.",
   ].join(" ");
 
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "customer",
+      "ticket",
+      "summary",
+      "has_meaningful_conversation",
+      "contact_info_only",
+      "non_english_detected",
+      "clarifications_needed",
+      "mishears_or_typos",
+    ],
+    properties: {
+      customer: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "name_raw", "email"],
+        properties: {
+          name: { type: "string" },
+          name_raw: { type: "string" },
+          email: { type: "string" },
+        },
+      },
+      ticket: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "ticketType",
+          "status",
+          "priority",
+          "proposedSolution",
+          "isSatisfied",
+        ],
+        properties: {
+          ticketType: {
+            type: "string",
+            enum: ["support", "sales", "billing", "not specified"],
+          },
+          status: { type: "string", enum: ["open", "resolved"] },
+          priority: {
+            type: "string",
+            enum: ["low", "medium", "high", "critical"],
+          },
+          proposedSolution: { type: "string" },
+          isSatisfied: {
+            anyOf: [
+              { type: "boolean" },
+              { type: "string", enum: ["not specified"] },
+            ],
+          },
+        },
+      },
+      summary: { type: "string" },
+      has_meaningful_conversation: { type: "boolean" },
+      contact_info_only: { type: "boolean" },
+      non_english_detected: { type: "array", items: { type: "string" } },
+      clarifications_needed: { type: "array", items: { type: "string" } },
+      mishears_or_typos: { type: "array", items: { type: "string" } },
+    },
+  };
+
   const userMsg = `
-You are analyzing an OUTBOUND "${campaignType}" campaign call.
+Extract fields from these Q/A pairs.
 
-From these Q/A pairs, return ONLY this JSON:
-
-{
-  "qa_log": Array<{ "q": string, "a": string }>,
-  "summary": string,
-  "campaignType": "satisfaction" | "upsell",
-  "outcome_case": "satisfied" | "not_satisfied" | "no_response" | "interested" | "not_interested",
-  "rating_score": 1 | 2 | 3 | 4 | 5 | "not_specified",
-  "rating_comment": string | "not_specified",
-  "non_english_detected": string[],
-  "clarifications_needed": string[],
-  "mishears_or_typos": string[]
-}
-
-Rules:
-- If campaignType is "satisfaction", ONLY use: "satisfied", "not_satisfied", "no_response" for outcome_case.
-- If campaignType is "upsell", ONLY use: "interested", "not_interested", "no_response" for outcome_case.
-- rating_score must be an integer in [1,5] when provided.
-- Only infer a rating if the customer clearly states it (for example "5 out of 5", "4 stars", "I give 3").
-- The summary should briefly describe what happened in the call.
+Return JSON ONLY (no markdown, no extra text).
 
 Q/A PAIRS:
-${JSON.stringify(qaPairs, null, 2)}
-`.trim();
+${JSON.stringify(pairs, null, 2)}
+  `.trim();
 
   const ctrl = new AbortController();
-  const timeoutId = setTimeout(() => ctrl.abort(), 20000);
+  const timeoutId = setTimeout(() => ctrl.abort(), timeoutMs);
 
   let r;
   let raw;
@@ -294,8 +482,15 @@ ${JSON.stringify(qaPairs, null, 2)}
     const payload = {
       model: "gpt-4o-mini",
       temperature: 0.2,
-      max_output_tokens: 600,
-      text: { format: { type: "json_object" } },
+      max_output_tokens: 450,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "getpie_ticket_extract",
+          strict: true,
+          schema,
+        },
+      },
       input: [
         { role: "system", content: [{ type: "input_text", text: system }] },
         { role: "user", content: [{ type: "input_text", text: userMsg }] },
@@ -316,288 +511,395 @@ ${JSON.stringify(qaPairs, null, 2)}
     clearTimeout(timeoutId);
   }
 
-  if (!r.ok) {
-    return { error: "openai", status: r.status, body: raw };
+  if (!r.ok) return { error: "openai", status: r.status, body: raw };
+
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return { error: "openai_bad_json", body: raw };
+  }
+
+  if (data?.status && data.status !== "completed") {
+    return {
+      error: "openai_incomplete",
+      status: data.status,
+      incomplete_details: data.incomplete_details,
+      body: raw,
+    };
   }
 
   let outText = null;
-  try {
-    const data = JSON.parse(raw);
-    if (typeof data.output_text === "string") {
-      outText = data.output_text;
-    } else if (Array.isArray(data.output)) {
-      const msgItem = data.output.find((item) => item.type === "message");
-      const contentText = msgItem?.content?.find?.(
-        (c) => c.type === "output_text"
-      )?.text;
-      if (typeof contentText === "string") outText = contentText;
-    }
-  } catch (e) {}
+  if (typeof data.output_text === "string") outText = data.output_text;
+  else if (Array.isArray(data.output)) {
+    const msgItem = data.output.find((item) => item.type === "message");
+    const contentText = msgItem?.content?.find?.(
+      (c) => c.type === "output_text"
+    )?.text;
+    if (typeof contentText === "string") outText = contentText;
+  }
 
   if (!outText) return { error: "openai_no_text", body: raw };
 
   try {
-    const parsed = JSON.parse(outText);
-    return parsed;
-  } catch (e) {
-    return { error: "parse", text: outText };
+    return JSON.parse(outText);
+  } catch {
+    return { error: "parse", text: outText, body: raw };
   }
-}
+};
 
-/** ---------------- MAIN ENTRY ---------------- */
-export async function processCallOutcome({
-  qaPairs,
-  userId,
-  callSid,
-  campaignType,
-}) {
-  if (!Array.isArray(qaPairs) || !qaPairs.length)
-    return { error: "qa_pairs_empty" };
-  if (!callSid || typeof callSid !== "string")
-    return { error: "missing_callSid" };
-  if (campaignType !== "satisfaction" && campaignType !== "upsell")
-    return { error: "invalid_campaign", detail: campaignType };
-
+export const summarizer = async (pairs, callSid, phone) => {
   try {
-    const user = await User.findByPk(userId);
-    if (!user) return { error: "user_not_found", detail: { userId } };
+    if (!Array.isArray(pairs) || pairs.length === 0)
+      return { error: "no_pairs" };
+    if (!callSid) return { error: "missing_callSid" };
 
     const useMock = String(process.env.SUMMARIZER_MOCK || "").trim() === "1";
     let parsed;
+
     if (useMock) {
-      parsed = mockOutcomeExtract(qaPairs, campaignType);
+      parsed = mockExtract(pairs);
     } else {
-      const llmResult = await extractOutcomeWithLLM(qaPairs, campaignType);
-      if (llmResult && !llmResult.error) {
-        parsed = llmResult;
-      } else {
-        parsed = mockOutcomeExtract(qaPairs, campaignType);
-      }
-    }
+      parsed = await extractWithOpenAI(pairs, { timeoutMs: 60000 });
 
-    const allowedSatisfaction = ["satisfied", "not_satisfied", "no_response"];
-    const allowedUpsell = ["interested", "not_interested", "no_response"];
-
-    const rawOutcome = parsed?.outcome_case;
-    const normOutcome =
-      typeof rawOutcome === "string"
-        ? rawOutcome.trim().toLowerCase().replace(/\s+/g, "_")
-        : "";
-
-    let outcomeCase = null;
-    if (campaignType === "satisfaction") {
-      outcomeCase = allowedSatisfaction.includes(normOutcome)
-        ? normOutcome
-        : detectSatisfactionCase(qaPairs);
-    } else {
-      outcomeCase = allowedUpsell.includes(normOutcome)
-        ? normOutcome
-        : detectUpsellCase(qaPairs);
-    }
-
-    const summary =
-      typeof parsed?.summary === "string" && parsed.summary.trim().length
-        ? parsed.summary.trim()
-        : campaignType === "satisfaction"
-        ? outcomeCase === "satisfied"
-          ? "CSAT: satisfied."
-          : outcomeCase === "not_satisfied"
-          ? "CSAT: not satisfied."
-          : "CSAT: no response / call cut."
-        : outcomeCase === "interested"
-        ? "Upsell: interested."
-        : outcomeCase === "not_interested"
-        ? "Upsell: not interested."
-        : "Upsell: no response / call cut.";
-
-    const languages = cleanLanguages(parsed?.non_english_detected);
-
-    /** ---- Rating parsing (primary LLM, fallback regex) ---- */
-    const rawScore = parsed?.rating_score;
-    let ratingScore = null;
-    if (campaignType === "satisfaction") {
-      if (typeof rawScore === "number") {
-        const s = Math.round(rawScore);
-        if (s >= 1 && s <= 5) ratingScore = s;
-      } else if (typeof rawScore === "string") {
-        const trimmed = rawScore.trim().toLowerCase();
-        if (trimmed !== "not_specified" && trimmed !== "not specified") {
-          const n = parseInt(trimmed, 10);
-          if (!Number.isNaN(n) && n >= 1 && n <= 5) ratingScore = n;
-        }
+      if (parsed?.error) {
+        const retry = await extractWithOpenAI(pairs, { timeoutMs: 60000 });
+        if (!retry?.error) parsed = retry;
       }
 
-      // fallback: regex on raw conversation if LLM didn't give rating
-      if (ratingScore == null) {
-        const { rating, comment } = extractRatingFromPairs(qaPairs);
-        if (rating != null) {
-          ratingScore = rating;
-          if (!parsed.rating_comment && comment) {
-            parsed.rating_comment = comment;
-          }
-        }
-      }
+      if (parsed?.error) return parsed;
     }
 
-    const rawComment = parsed?.rating_comment;
-    const ratingComment =
-      typeof rawComment === "string" &&
-      rawComment.trim().length &&
-      rawComment.trim().toLowerCase() !== "not_specified" &&
-      rawComment.trim().toLowerCase() !== "not specified"
-        ? rawComment.trim()
+    const ns = (v) => {
+      if (v == null) return null;
+      if (typeof v !== "string") return v;
+      const trimmed = v.trim();
+      if (!trimmed) return null;
+      return trimmed.toLowerCase() === "not specified" ? null : trimmed;
+    };
+
+    const confirmedEmail = extractConfirmedEmail(pairs);
+    const rawEmail = ns(confirmedEmail || parsed?.customer?.email);
+    const safeEmail =
+      typeof rawEmail === "string" && EMAIL_RE.test(rawEmail)
+        ? rawEmail.toLowerCase()
         : null;
 
-    const followupAt = computeFollowup(campaignType, outcomeCase);
+    const safePhone = normalizePhone(phone);
 
-    // Normalized booleans for satisfaction / upsell
-    const customerSatisfied =
-      campaignType === "satisfaction"
-        ? outcomeCase === "satisfied"
-          ? true
-          : outcomeCase === "not_satisfied"
-          ? false
-          : null
+    const rawName =
+      ns(parsed?.customer?.name) || ns(parsed?.customer?.name_raw);
+    const safeName = normalizeName(rawName);
+
+    const forceUnsatisfied = shouldForceUnsatisfiedIfTicketFlow(pairs);
+
+    const parsedIsSat = parsed?.ticket?.isSatisfied;
+    let isSatisfied = null;
+    if (parsedIsSat === true) isSatisfied = true;
+    else if (parsedIsSat === false) isSatisfied = false;
+    if (forceUnsatisfied) isSatisfied = false;
+
+    const priorityRaw = ns(parsed?.ticket?.priority);
+    const priorityNorm =
+      typeof priorityRaw === "string" ? priorityRaw.toLowerCase() : null;
+    const ticketPriority = ["low", "medium", "high", "critical"].includes(
+      priorityNorm
+    )
+      ? priorityNorm
+      : "medium";
+
+    const typeRaw = ns(parsed?.ticket?.ticketType);
+    const typeNorm = typeof typeRaw === "string" ? typeRaw.toLowerCase() : null;
+    const ticketType = ["support", "sales", "billing"].includes(typeNorm)
+      ? typeNorm
+      : null;
+
+    const proposedSolutionRaw = ns(parsed?.ticket?.proposedSolution);
+    const proposedSolution =
+      typeof proposedSolutionRaw === "string" && proposedSolutionRaw.length
+        ? proposedSolutionRaw
         : null;
 
-    const customerInterestedInUpsell =
-      campaignType === "upsell"
-        ? outcomeCase === "interested"
-          ? true
-          : outcomeCase === "not_interested"
-          ? false
-          : null
-        : null;
+    const hasConversation = !!parsed?.has_meaningful_conversation;
+    const contactInfoOnly = !!parsed?.contact_info_only;
 
-    let makeSupportTicket = false;
-    let makeSalesTicket = false;
+    const qaLog = Array.isArray(pairs) ? pairs : [];
 
-    if (campaignType === "satisfaction") {
-      if (outcomeCase === "not_satisfied" || outcomeCase === "no_response") {
-        makeSupportTicket = true;
-      }
-    } else {
-      if (outcomeCase === "interested") {
-        makeSalesTicket = true;
-      }
+    const summary = typeof parsed?.summary === "string" ? parsed.summary : "";
+
+    const languages = normalizeLanguages(parsed?.non_english_detected, pairs);
+
+    if (!hasConversation && !contactInfoOnly) {
+      return { skipped: "no_conversation", extracted: { summary, qaLog } };
     }
 
-    const result = await sequelize.transaction(async (t) => {
-      // update user flags for campaign
-      const userPatch = {};
-      if (campaignType === "satisfaction") userPatch.isSatisfactionCall = true;
-      if (campaignType === "upsell") userPatch.isUpSellCall = true;
-      if (Object.keys(userPatch).length) {
-        await user.update(userPatch, { transaction: t });
-      }
+    if (contactInfoOnly) {
+      const userResult = await sequelize.transaction(async (t) => {
+        let userRecord = null;
+        let userCreated = false;
 
-      // create Rating row if we have a rating (satisfaction only)
-      let ratingRecord = null;
-      if (campaignType === "satisfaction" && ratingScore != null) {
-        const latestTicket = await Ticket.findOne({
-          where: { userId },
-          order: [["createdAt", "DESC"]],
-          transaction: t,
-        });
-        if (latestTicket && latestTicket.id && latestTicket.agentId != null) {
-          ratingRecord = await Rating.create(
+        if (safePhone)
+          userRecord = await User.findOne({
+            where: { phone: safePhone },
+            transaction: t,
+          });
+        if (!userRecord && safeEmail)
+          userRecord = await User.findOne({
+            where: { email: safeEmail },
+            transaction: t,
+          });
+
+        if (!userRecord) {
+          userRecord = await User.create(
             {
-              score: ratingScore,
-              comments: ratingComment,
-              userId,
-              ticketId: latestTicket.id,
-              agentId: latestTicket.agentId,
+              name: safeName || null,
+              email: safeEmail,
+              phone: safePhone,
+              status: "active",
             },
             { transaction: t }
           );
-          // sendEmail(...)
+          userCreated = true;
+        } else {
+          const patch = {};
+          if (safeName && userRecord.name !== safeName) patch.name = safeName;
+          if (safeEmail && userRecord.email !== safeEmail)
+            patch.email = safeEmail;
+          if (safePhone && !userRecord.phone) patch.phone = safePhone;
+          if (userRecord.status !== "active") patch.status = "active";
+          if (Object.keys(patch).length)
+            await userRecord.update(patch, { transaction: t });
         }
+
+        return { user: userRecord, _flags: { userCreated } };
+      });
+
+      if (userResult?._flags?.userCreated) {
+        await safeSendEmail({
+          to: ADMIN_EMAIL,
+          subject: "GETPIE: New user created (contact-info call)",
+          text: `A new user was created.\nName: ${safeName || "N/A"}\nEmail: ${
+            safeEmail || "N/A"
+          }\nPhone: ${safePhone || "N/A"}\nCallSid: ${callSid}`,
+        });
       }
 
-      // create ticket for follow-up if needed
-      let ticket = null;
-      if (makeSupportTicket || makeSalesTicket) {
-        const { agentId } = await getLeastLoadedAgentSafe();
-        const ticketSummary =
-          campaignType === "satisfaction"
-            ? `CSAT: ${summary}`
-            : `Upsell: ${summary}`;
+      return {
+        user: userResult.user,
+        note: "contact_info_only_user_created",
+        extracted: {
+          name: safeName,
+          email: safeEmail,
+          phone: safePhone,
+          summary,
+          languages,
+          qa_log: qaLog,
+        },
+      };
+    }
 
-        ticket = await Ticket.create(
+    const shouldCreateTicket = isSatisfied === false;
+
+    const result = await sequelize.transaction(async (t) => {
+      let userRecord = null;
+      let userCreated = false;
+
+      if (safePhone)
+        userRecord = await User.findOne({
+          where: { phone: safePhone },
+          transaction: t,
+        });
+      if (!userRecord && safeEmail)
+        userRecord = await User.findOne({
+          where: { email: safeEmail },
+          transaction: t,
+        });
+
+      if (!userRecord) {
+        userRecord = await User.create(
           {
-            status: "open",
-            ticketType: makeSupportTicket ? "support" : "sales",
-            priority: "medium",
-            proposedSolution: null,
-            isSatisfied: makeSupportTicket ? false : null,
-            summary: ticketSummary,
-            userId,
-            agentId: agentId || null,
+            name: safeName || null,
+            email: safeEmail,
+            phone: safePhone,
+            status: "active",
           },
           { transaction: t }
         );
-        // sendEmail(...)
+        userCreated = true;
+      } else {
+        const patch = {};
+        if (safeName && userRecord.name !== safeName) patch.name = safeName;
+        if (safeEmail && userRecord.email !== safeEmail)
+          patch.email = safeEmail;
+        if (safePhone && !userRecord.phone) patch.phone = safePhone;
+        if (userRecord.status !== "active") patch.status = "active";
+        if (Object.keys(patch).length)
+          await userRecord.update(patch, { transaction: t });
       }
 
-      const basePatch = {
-        type: "outbound",
-        userId,
-        ticketId: ticket ? ticket.id : null,
-        QuestionsAnswers: qaPairs.slice(0, 200),
-        languages,
-        isResolvedByAi: null,
-        summary,
-        callSid,
-        outboundDetails: null,
-        callCategory: campaignType,
-        customerSatisfied,
-        customerInterestedInUpsell,
-      };
+      let ticketRecord = null;
+      let ticketCreated = false;
+      let assignedAgentId = null;
 
-      const followupPatch = buildFollowupPatch(campaignType, followupAt);
-      const callPatch = { ...basePatch, ...followupPatch };
+      if (shouldCreateTicket) {
+        try {
+          const hasIsActive = !!Agent?.rawAttributes?.isActive;
+          const hasTicketType = !!Agent?.rawAttributes?.ticketType;
+
+          const whereAgents = {};
+          if (hasIsActive) whereAgents.isActive = true;
+          if (hasTicketType && ticketType) {
+            whereAgents[Op.or] = [{ ticketType }, { ticketType: null }];
+          }
+
+          const agents = await Agent.findAll({
+            where: whereAgents,
+            transaction: t,
+          });
+
+          if (agents.length) {
+            const openCounts = await Ticket.findAll({
+              attributes: [
+                "agentId",
+                [sequelize.fn("COUNT", sequelize.col("id")), "cnt"],
+              ],
+              where: { status: "open", agentId: { [Op.ne]: null } },
+              group: ["agentId"],
+              transaction: t,
+            });
+
+            const map = new Map(
+              openCounts.map((r) => [
+                String(r.get("agentId")),
+                Number(r.get("cnt")),
+              ])
+            );
+
+            let best = null;
+            let bestCnt = Infinity;
+            for (const a of agents) {
+              const cnt = map.get(String(a.id)) ?? 0;
+              if (cnt < bestCnt) {
+                best = a;
+                bestCnt = cnt;
+              }
+            }
+            assignedAgentId = best?.id ?? null;
+          }
+        } catch (e) {}
+
+        ticketRecord = await Ticket.create(
+          {
+            status: "open",
+            isSatisfied: false,
+            priority: ticketPriority,
+            proposedSolution,
+            ticketType,
+            summary,
+            userId: userRecord.id,
+            agentId: assignedAgentId ?? null,
+          },
+          { transaction: t }
+        );
+        ticketCreated = true;
+      }
+
+      const callPatch = {
+        userId: userRecord.id,
+        ticketId: ticketRecord?.id ?? null,
+        QuestionsAnswers: qaLog,
+        isResolvedByAi: isSatisfied === true ? true : false,
+        languages,
+        summary,
+        type: "inbound",
+      };
 
       const [affected] = await Call.update(callPatch, {
         where: { callSid },
         transaction: t,
       });
 
-      let callRow;
+      let callRecord = null;
+      let callCreated = false;
+
       if (affected === 0) {
-        callRow = await Call.create(callPatch, { transaction: t });
-        // sendEmail(...)
+        callRecord = await Call.create(
+          { callSid, ...callPatch },
+          { transaction: t }
+        );
+        callCreated = true;
       } else {
-        callRow = await Call.findOne({ where: { callSid }, transaction: t });
+        callRecord = await Call.findOne({ where: { callSid }, transaction: t });
       }
 
-      const reloadedUser = await user.reload({ transaction: t });
-
       return {
-        user: reloadedUser.toJSON(),
-        ticket: ticket ? ticket.toJSON() : null,
-        call: callRow ? callRow.toJSON() : null,
-        rating: ratingRecord ? ratingRecord.toJSON() : null,
-        outcome: {
-          campaignType,
-          case: outcomeCase,
-          followupAt: followupAt ? followupAt.toISOString() : null,
-          customerSatisfied,
-          customerInterestedInUpsell,
-          ratingScore: ratingScore ?? null,
-          ratingComment,
+        user: userRecord,
+        ticket: ticketRecord,
+        call: callRecord,
+        agentId: assignedAgentId,
+        _flags: { userCreated, ticketCreated, callCreated },
+        extracted: {
+          name: safeName,
+          email: safeEmail,
+          phone: safePhone,
+          qa_log: qaLog,
+          summary,
+          languages,
+          isSatisfied,
+          hasConversation,
+          contactInfoOnly: false,
         },
       };
     });
 
+    try {
+      const flags = result?._flags || {};
+      const events = [];
+      if (flags.userCreated) events.push("New user created");
+      if (flags.callCreated) events.push("New call created");
+      if (flags.ticketCreated) events.push("New ticket created");
+
+      if (events.length) {
+        await safeSendEmail({
+          to: ADMIN_EMAIL,
+          subject: `GETPIE: ${events.join(" + ")}`,
+          text:
+            `Events:\n- ${events.join("\n- ")}\n\n` +
+            `CallSid: ${callSid}\n` +
+            `User: ${result.user?.id || "N/A"} | ${safeName || "N/A"}\n` +
+            `Email: ${safeEmail || "N/A"}\n` +
+            `Phone: ${safePhone || "N/A"}\n` +
+            `Ticket: ${result.ticket?.id || "N/A"}\n` +
+            `Type: ${result.ticket?.ticketType || ticketType || "N/A"}\n` +
+            `Priority: ${result.ticket?.priority || ticketPriority}\n` +
+            `Summary: ${summary || "N/A"}`,
+        });
+      }
+
+      if (flags.ticketCreated && safeEmail) {
+        await safeSendEmail({
+          to: safeEmail,
+          subject: "Your GETPIE support ticket has been created",
+          text:
+            `Hi ${safeName || "there"},\n\n` +
+            `We created a support ticket for you.\n` +
+            `Ticket ID: ${result.ticket?.id || "N/A"}\n` +
+            `Priority: ${result.ticket?.priority || ticketPriority}\n` +
+            `Summary: ${summary || "N/A"}\n\n` +
+            `We’ll contact you soon.\n\n` +
+            `— GETPIE Support`,
+        });
+      }
+    } catch (e) {}
+
+    if (isSatisfied === true) result.note = "satisfied_no_ticket";
     return result;
   } catch (e) {
     const msg = String(e?.message || e);
     if (/aborted|The user aborted a request/i.test(msg))
-      return { error: "openai_timeout", detail: msg };
+      return { error: "openai_timeout", message: msg };
     if (/unique constraint|duplicate key/i.test(msg))
-      return { error: "db_conflict", detail: msg };
-    return { error: "process_exception", detail: msg };
+      return { error: "db_conflict", message: msg };
+    return { error: "summarizer_exception", message: msg };
   }
-}
-
-export default processCallOutcome;
+};
