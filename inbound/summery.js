@@ -129,8 +129,26 @@ const spokenToEmail = (text) => {
 
   const direct = s0.match(EMAIL_FIND_RE) || [];
   for (let i = direct.length - 1; i >= 0; i--) {
-    const norm = normalizeHyphenSpelledEmail(direct[i]);
-    if (norm) return norm;
+    const m = direct[i].toLowerCase();
+    const norm = normalizeHyphenSpelledEmail(m);
+    if (!norm) continue;
+
+    const [local, domain] = norm.split("@");
+    if (local.length <= 4) {
+      const idx = s0.toLowerCase().lastIndexOf(m);
+      const prefix = s0
+        .slice(Math.max(0, idx - 120), idx)
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ");
+      const letters = (prefix.match(/\b[a-z0-9]\b/g) || []).join("");
+      if (letters.length >= 4) {
+        const merged = `${letters}${local}@${domain}`;
+        const mergedNorm = normalizeHyphenSpelledEmail(merged);
+        if (mergedNorm) return mergedNorm;
+      }
+    }
+
+    return norm;
   }
 
   const s = s0
