@@ -8,8 +8,7 @@ import sendEmail from "../utils/Email.js";
 
 const ADMIN_EMAIL = "ahmedsarwar7575@gmail.com";
 
-const EMAIL_STORE_RE =
-  /^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,253}\.[a-z]{2,24}$/i;
+const EMAIL_STORE_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,253}\.[a-z]{2,24}$/i;
 
 const EXCLUDED_EMAILS = new Set(["support@getpiepay.com"]);
 
@@ -22,7 +21,7 @@ const sendEmailFlexible = async ({ to, subject, html }) => {
   } catch (err) {
     console.error("Error sending email:", err);
   }
- 
+
   return null;
 };
 
@@ -73,7 +72,8 @@ const normalizeConfirmedEmail = (email) => {
     .map((label) => {
       const parts = label.split("-").filter(Boolean);
       const single = parts.filter((p) => /^[a-z0-9]$/.test(p)).length;
-      if (parts.length >= 4 && single / parts.length >= 0.8) return parts.join("");
+      if (parts.length >= 4 && single / parts.length >= 0.8)
+        return parts.join("");
       return label;
     })
     .join(".");
@@ -134,7 +134,9 @@ const renderHtml = ({ title, rows = [], footer = "" }) => {
       ([k, v]) => `
 <tr>
   <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#64748b;font-weight:600;width:170px;">${k}</td>
-  <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#0f172a;">${v ?? ""}</td>
+  <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#0f172a;">${
+    v ?? ""
+  }</td>
 </tr>`
     )
     .join("");
@@ -347,7 +349,8 @@ export const summarizer = async (pairs, callSid, phone) => {
     const rawName = ns(parsed?.customer?.name);
 
     const cleanedEmail = normalizeConfirmedEmail(rawEmail);
-    const safeEmail = cleanedEmail && !isBadEmail(cleanedEmail) ? cleanedEmail : null;
+    const safeEmail =
+      cleanedEmail && !isBadEmail(cleanedEmail) ? cleanedEmail : null;
 
     const safeName = normalizeName(rawName);
     const safePhone = normalizePhone(phone);
@@ -360,13 +363,19 @@ export const summarizer = async (pairs, callSid, phone) => {
     else if (parsedIsSat === false) isSatisfied = false;
     if (forceUnsatisfied) isSatisfied = false;
 
-    const priority = String(ns(parsed?.ticket?.priority) || "medium").toLowerCase();
-    const ticketPriority = ["low", "medium", "high", "critical"].includes(priority)
+    const priority = String(
+      ns(parsed?.ticket?.priority) || "medium"
+    ).toLowerCase();
+    const ticketPriority = ["low", "medium", "high", "critical"].includes(
+      priority
+    )
       ? priority
       : "medium";
 
     const type = String(ns(parsed?.ticket?.ticketType) || "").toLowerCase();
-    const ticketType = ["support", "sales", "billing"].includes(type) ? type : null;
+    const ticketType = ["support", "sales", "billing"].includes(type)
+      ? type
+      : null;
 
     const proposedSolutionRaw = ns(parsed?.ticket?.proposedSolution);
     const proposedSolution =
@@ -416,7 +425,8 @@ export const summarizer = async (pairs, callSid, phone) => {
       } else {
         const patch = {};
         if (safeName && userRecord.name !== safeName) patch.name = safeName;
-        if (safeEmail && userRecord.email !== safeEmail) patch.email = safeEmail;
+        if (safeEmail && userRecord.email !== safeEmail)
+          patch.email = safeEmail;
         if (safePhone && !userRecord.phone) patch.phone = safePhone;
         if (userRecord.status !== "active") patch.status = "active";
         if (Object.keys(patch).length)
@@ -565,14 +575,14 @@ export const summarizer = async (pairs, callSid, phone) => {
           footer: "This is an automated notification from GETPIE.",
         });
 
-        await sendEmailFlexible({
-          to: ADMIN_EMAIL,
-          subject: `GETPIE: ${events.join(" + ")}`,
-          html,
-        });
+        await sendEmail(ADMIN_EMAIL, `GETPIE: ${events.join(" + ")}`, html);
       }
 
-      if (flags.ticketCreated && finalUserEmail && !isBadEmail(finalUserEmail)) {
+      if (
+        flags.ticketCreated &&
+        finalUserEmail &&
+        !isBadEmail(finalUserEmail)
+      ) {
         const html = renderHtml({
           title: `Your support ticket is created`,
           rows: [
@@ -585,11 +595,11 @@ export const summarizer = async (pairs, callSid, phone) => {
             "If you reply to this email, our team will follow up as soon as possible.",
         });
 
-        await sendEmailFlexible({
-          to: finalUserEmail,
-          subject: "Your GETPIE support ticket has been created",
-          html,
-        });
+        await sendEmail(
+          finalUserEmail,
+          "Your GETPIE support ticket has been created",
+          html
+        );
       }
     } catch {}
 
