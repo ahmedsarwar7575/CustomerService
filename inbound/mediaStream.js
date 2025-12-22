@@ -2,7 +2,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
 import dotenv from "dotenv";
 import Call from "../models/Call.js";
-import User from "../models/user.js"; // 👈 adjust path/model name as needed
+import User from "../models/user.js";
 import { SYSTEM_MESSAGE } from "./prompt.js";
 import { summarizer } from "./summery.js";
 
@@ -20,10 +20,7 @@ const MODEL = "gpt-realtime-2025-08-28";
 
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// --- Realtime helpers ---
-
 function createOpenAIWebSocket() {
-  if (!OPENAI_API_KEY) console.error("OPENAI_API_KEY missing");
   const url = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
   return new WebSocket(url, {
     headers: {
@@ -34,40 +31,38 @@ function createOpenAIWebSocket() {
 }
 
 function buildSessionUpdate(userProfile = null) {
-  // Dynamic instructions depending on whether the caller exists in DB
   const dynamicContext = userProfile
     ? `CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
-    - Name on file: ${userProfile.name || "Unknown"}
-    - Email on file: ${userProfile.email || "Unknown"}
-    
-    FOR THIS CALL
-    - Treat the caller as returning.
-    - In your first reply, greet them warmly using their name "${
-      userProfile.name || ""
-    }" and ask how you can help today.
-    - Do NOT ask for their name unless they say the name on file is wrong or they want to update it.
-    
-    RETURNING CUSTOMER FLOW (HARD)
-    - Confirm issue first.
-    - Give the solution and next steps immediately after confirming the issue.
-    - Ask keep/change email only near the end, after the solution.
-    
-    EMAIL ON FILE VALIDATION (HARD)
-    - Validate email on file: one "@", no spaces, dot in domain, not containing “let me confirm” or “is that correct”.
-    - If invalid/Unknown, collect a new email with strict spell-and-confirm.
-    
-    KEEP/CHANGE QUESTION (ASK NEAR END ONLY)
-    “So our team can reach you, I have your email as ${
-      userProfile.email || ""
-    }. Do you want to keep it or change it? Please say keep or change.”
-    
-    IF KEEP
-    - “Got it—I’ll keep that email.”
-    
-    IF CHANGE
-    - Collect a new email letter by letter; spell back; confirm.
-    - After confirmed: “Got it—I’ve updated that email.”
-      
+- Name on file: ${userProfile.name || "Unknown"}
+- Email on file: ${userProfile.email || "Unknown"}
+
+FOR THIS CALL
+- Treat the caller as returning.
+- In your first reply, greet them warmly using their name "${
+        userProfile.name || ""
+      }" and ask how you can help today.
+- Do NOT ask for their name unless they say the name on file is wrong or they want to update it.
+
+RETURNING CUSTOMER FLOW (HARD)
+- Confirm issue first.
+- Give the solution and next steps immediately after confirming the issue.
+- Ask keep/change email only near the end, after the solution.
+
+EMAIL ON FILE VALIDATION (HARD)
+- Validate email on file: one "@", no spaces, dot in domain, not containing “let me confirm” or “is that correct”.
+- If invalid/Unknown, collect a new email with strict spell-and-confirm.
+
+KEEP/CHANGE QUESTION (ASK NEAR END ONLY)
+“So our team can reach you, I have your email as ${
+        userProfile.email || ""
+      }. Do you want to keep it or change it? Please say keep or change.”
+
+IF KEEP
+- “Got it—I’ll keep that email.”
+
+IF CHANGE
+- Collect a new email letter by letter; spell back; confirm.
+- After confirmed: “Got it—I’ve updated that email.”
 `
     : `
 =
@@ -78,11 +73,10 @@ function buildSessionUpdate(userProfile = null) {
     session: {
       turn_detection: {
         type: "server_vad",
-        threshold: 0.85,
+        threshold: 0.6,
         prefix_padding_ms: 300,
-        silence_duration_ms: 700,
+        silence_duration_ms: 900,
         create_response: false,
-        silence_duration_ms: 700,
         interrupt_response: false,
       },
       input_audio_format: "g711_ulaw",
@@ -101,7 +95,6 @@ function buildSessionUpdate(userProfile = null) {
   };
 }
 
-// detect when assistant is saying goodbye
 function isGoodbye(text = "") {
   const t = text.toLowerCase();
   return t.includes("goodbye") || /\bbye\b/.test(t);
@@ -125,43 +118,29 @@ export function attachMediaStreamServer(server) {
       let greetingSent = false;
       let hangupScheduled = false;
 
-      // returning-customer info
       let knownUser = null;
       let openAiReady = false;
       let userLookupDone = false;
       let twilioStarted = false;
 
-      // For summarizer
       let qaPairs = [];
       let pendingUserQ = null;
 
-      // response state
       let hasActiveResponse = false;
-
-      // ✅ FIX: queue user turn if they speak while assistant is responding
+      let responseStartedAt = 0;
       let pendingUserTurn = false;
 
       const started = new Set();
       const openAiWs = createOpenAIWebSocket();
 
-      const initializeSession = () => {
+      const safeSendOpenAI = (payload) => {
+        if (openAiWs.readyState !== WebSocket.OPEN) return;
         try {
-          openAiWs.send(JSON.stringify(buildSessionUpdate(knownUser)));
-          sessionInitialized = true;
-          maybeSendGreeting();
-        } catch (e) {
-          console.error("session.update error", e);
-        }
+          openAiWs.send(JSON.stringify(payload));
+        } catch {}
       };
 
-      function maybeInitializeSession() {
-        if (sessionInitialized) return;
-        if (!openAiReady || !twilioStarted || !userLookupDone) return;
-        initializeSession();
-      }
-
-      function maybeSendGreeting() {
-        // only greet once, after session + call are ready
+      const maybeSendGreeting = () => {
         if (
           greetingSent ||
           !sessionInitialized ||
@@ -172,31 +151,30 @@ export function attachMediaStreamServer(server) {
 
         greetingSent = true;
 
-        let greetingInstruction;
-        if (knownUser && knownUser.name) {
-          greetingInstruction =
-            `In this first reply, greet the caller warmly in English using their name "${knownUser.name}", and ask how you can help today. ` +
-            `Keep it to one or two short sentences. Do NOT ask for their name or email yet.`;
-        } else {
-          greetingInstruction =
-            "In this first reply, greet the caller warmly in English and ask how you can help today. Keep it to one or two short sentences, and do not ask for their name or email yet. Wait for their answer first.";
-        }
+        const greetingInstruction =
+          knownUser && knownUser.name
+            ? `In this first reply, greet the caller warmly in English using their name "${knownUser.name}", and ask how you can help today. Keep it to one or two short sentences. Do NOT ask for their name or email yet.`
+            : `In this first reply, greet the caller warmly in English and ask how you can help today. Keep it to one or two short sentences, and do not ask for their name or email yet. Wait for their answer first.`;
 
-        try {
-          openAiWs.send(
-            JSON.stringify({
-              type: "response.create",
-              response: {
-                instructions: greetingInstruction,
-              },
-            })
-          );
-        } catch (e) {
-          console.error("greeting response.create error", e);
-        }
-      }
+        safeSendOpenAI({
+          type: "response.create",
+          response: { instructions: greetingInstruction },
+        });
+      };
 
-      function scheduleHangup() {
+      const initializeSession = () => {
+        safeSendOpenAI(buildSessionUpdate(knownUser));
+        sessionInitialized = true;
+        maybeSendGreeting();
+      };
+
+      const maybeInitializeSession = () => {
+        if (sessionInitialized) return;
+        if (!openAiReady || !twilioStarted || !userLookupDone) return;
+        initializeSession();
+      };
+
+      const scheduleHangup = () => {
         if (hangupScheduled || !callSid) return;
         hangupScheduled = true;
 
@@ -204,72 +182,99 @@ export function attachMediaStreamServer(server) {
           twilioClient
             .calls(callSid)
             .update({ status: "completed" })
-            .then(() => {
-              console.log(`☎️ Hung up call ${callSid} 5s after goodbye.`);
-            })
-            .catch((err) => {
-              console.error("Failed to hang up call:", err?.message || err);
-            });
+            .catch(() => {});
         }, 5000);
-      }
+      };
 
-      // OpenAI WS events
+      const flushQueuedTurn = () => {
+        if (!pendingUserTurn) return;
+        pendingUserTurn = false;
+        safeSendOpenAI({ type: "response.create" });
+      };
+
+      const watchdog = setInterval(() => {
+        if (!hasActiveResponse) return;
+        if (!responseStartedAt) return;
+
+        if (Date.now() - responseStartedAt > 20000) {
+          hasActiveResponse = false;
+          responseStartedAt = 0;
+          safeSendOpenAI({ type: "response.cancel" });
+          flushQueuedTurn();
+        }
+      }, 1000);
+
       openAiWs.on("open", () => {
         openAiReady = true;
         maybeInitializeSession();
       });
 
       openAiWs.on("message", (data) => {
+        let msg;
         try {
-          const msg = JSON.parse(data);
+          msg = JSON.parse(data);
+        } catch {
+          return;
+        }
 
-          // track response state
-          if (msg.type === "response.created") {
-            hasActiveResponse = true;
+        if (msg.type === "response.created") {
+          hasActiveResponse = true;
+          responseStartedAt = Date.now();
+        }
+
+        if (
+          msg.type === "response.failed" ||
+          msg.type === "response.canceled" ||
+          msg.type === "error"
+        ) {
+          hasActiveResponse = false;
+          responseStartedAt = 0;
+          flushQueuedTurn();
+        }
+
+        if (msg.type === "input_audio_buffer.speech_started") {
+          if (hasActiveResponse) {
+            safeSendOpenAI({ type: "response.cancel" });
+            hasActiveResponse = false;
+            responseStartedAt = 0;
           }
+        }
 
-          // --- 1) Capture user questions from transcription for summarizer ---
-          if (
-            msg.type === "conversation.item.input_audio_transcription.completed"
-          ) {
-            const q =
-              (typeof msg.transcript === "string" && msg.transcript.trim()) ||
-              (
-                msg.item?.content?.find?.(
-                  (c) => typeof c?.transcript === "string"
-                )?.transcript || ""
-              ).trim();
+        if (
+          msg.type === "conversation.item.input_audio_transcription.completed"
+        ) {
+          const q =
+            (typeof msg.transcript === "string" && msg.transcript.trim()) ||
+            (
+              msg.item?.content?.find?.(
+                (c) => typeof c?.transcript === "string"
+              )?.transcript || ""
+            ).trim();
 
-            if (q) {
-              pendingUserQ = q;
-            }
+          if (q) pendingUserQ = q;
+        }
+
+        if (msg.type === "input_audio_buffer.speech_stopped") {
+          if (hasActiveResponse) {
+            pendingUserTurn = true;
+          } else {
+            safeSendOpenAI({ type: "input_audio_buffer.commit" });
+            safeSendOpenAI({ type: "response.create" });
           }
+        }
 
-          // --- 1b) Manual turn handling: when user stops talking, trigger response ---
-          if (msg.type === "input_audio_buffer.speech_stopped") {
-            // ✅ FIX: if user spoke while assistant was talking, queue it
-            if (hasActiveResponse) {
-              pendingUserTurn = true;
-            } else if (openAiWs.readyState === WebSocket.OPEN) {
-              try {
-                openAiWs.send(JSON.stringify({ type: "response.create" }));
-              } catch (e) {
-                console.error("manual response.create error", e);
-              }
-            }
-          }
+        if (
+          (msg.type === "response.audio.delta" ||
+            msg.type === "response.output_audio.delta") &&
+          msg.delta
+        ) {
+          try {
+            const payload =
+              typeof msg.delta === "string"
+                ? msg.delta
+                : Buffer.from(msg.delta).toString("base64");
 
-          // --- 2) Stream assistant audio back to Twilio ---
-          if (
-            (msg.type === "response.audio.delta" ||
-              msg.type === "response.output_audio.delta") &&
-            msg.delta
-          ) {
-            try {
-              const payload =
-                typeof msg.delta === "string"
-                  ? msg.delta
-                  : Buffer.from(msg.delta).toString("base64");
+            if (streamSid) {
               connection.send(
                 JSON.stringify({
                   event: "media",
@@ -277,225 +282,147 @@ export function attachMediaStreamServer(server) {
                   media: { payload },
                 })
               );
-            } catch (e) {
-              console.error("twilio.media send error", e);
             }
+          } catch {}
+        }
+
+        if (msg.type === "response.done") {
+          hasActiveResponse = false;
+          responseStartedAt = 0;
+
+          const outputs = msg.response?.output || [];
+          for (const out of outputs) {
+            if (out?.role !== "assistant") continue;
+
+            const part = Array.isArray(out.content)
+              ? out.content.find(
+                  (c) =>
+                    typeof c?.transcript === "string" && c.transcript.trim()
+                )
+              : null;
+
+            const a = (part?.transcript || "").trim();
+            if (!a) continue;
+
+            if (pendingUserQ) {
+              qaPairs.push({ q: pendingUserQ, a });
+              pendingUserQ = null;
+            } else {
+              qaPairs.push({ q: null, a });
+            }
+
+            if (isGoodbye(a)) scheduleHangup();
           }
 
-          // --- 3) On completed assistant response: build QA pairs + detect goodbye ---
-          if (msg.type === "response.done") {
-            hasActiveResponse = false; // response finished
-
-            const outputs = msg.response?.output || [];
-            for (const out of outputs) {
-              if (out?.role !== "assistant") continue;
-
-              const part = Array.isArray(out.content)
-                ? out.content.find(
-                    (c) =>
-                      typeof c?.transcript === "string" && c.transcript.trim()
-                  )
-                : null;
-              const a = (part?.transcript || "").trim();
-
-              if (!a) continue;
-
-              // build Q/A pairs for summarizer
-              if (pendingUserQ) {
-                qaPairs.push({ q: pendingUserQ, a });
-                pendingUserQ = null;
-              } else {
-                // no explicit question (could be greeting, follow-ups)
-                qaPairs.push({ q: null, a });
-              }
-
-              // goodbye detection
-              if (isGoodbye(a)) {
-                scheduleHangup();
-              }
-            }
-
-            // ✅ FIX: if caller spoke during the assistant response, answer now
-            if (pendingUserTurn && openAiWs.readyState === WebSocket.OPEN) {
-              pendingUserTurn = false;
-              try {
-                openAiWs.send(JSON.stringify({ type: "response.create" }));
-              } catch (e) {
-                console.error("queued response.create error", e);
-              }
-            }
-          }
-        } catch (e) {
-          console.error(
-            "openai.message parse error",
-            e,
-            String(data).slice(0, 200)
-          );
+          flushQueuedTurn();
         }
       });
 
-      openAiWs.on("error", (err) => {
-        console.error("OpenAI WS error", err);
-      });
+      openAiWs.on("error", () => {});
 
-      // Twilio Media Stream events
       const onTwilioMessage = async (message) => {
+        let data;
         try {
-          const data = JSON.parse(message);
+          data = JSON.parse(message);
+        } catch {
+          return;
+        }
 
-          switch (data.event) {
-            case "connected":
-              break;
+        switch (data.event) {
+          case "start": {
+            streamSid = data.start.streamSid;
+            callSid = data.start.callSid || null;
 
-            case "start":
-              streamSid = data.start.streamSid;
-              callSid = data.start.callSid || null;
+            callerFrom =
+              data.start?.customParameters?.from ||
+              data.start?.callFrom ||
+              data.start?.from ||
+              callerFrom;
 
-              // try multiple places to get the caller's phone (adapt as needed)
-              callerFrom =
-                data.start?.customParameters?.from ||
-                data.start?.callFrom ||
-                data.start?.from ||
-                callerFrom;
+            calledTo =
+              data.start?.customParameters?.to || data.start?.to || calledTo;
 
-              calledTo =
-                data.start?.customParameters?.to || data.start?.to || calledTo;
-
+            try {
               await Call.findOrCreate({
                 where: { callSid },
                 defaults: { callSid },
               });
+            } catch {}
 
-              if (!callSid || started.has(callSid)) return;
-              started.add(callSid);
+            if (!callSid || started.has(callSid)) break;
+            started.add(callSid);
 
-              // Start Twilio dual-channel recording (optional)
-              if (PUBLIC_BASE_URL && TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
-                try {
-                  const rec = await twilioClient
-                    .calls(callSid)
-                    .recordings.create({
-                      recordingStatusCallback: `${PUBLIC_BASE_URL}/recording-status`,
-                      recordingStatusCallbackEvent: [
-                        "in-progress",
-                        "completed",
-                        "absent",
-                      ],
-                      recordingChannels: "dual",
-                      recordingTrack: "both",
-                    });
-                  console.log("▶️ recording started:", rec.sid);
-                } catch (e) {
-                  console.error("start recording failed:", e.message);
-                }
-              }
-
-              callStarted = true;
-              twilioStarted = true;
-
-              // --- Look up user by phone BEFORE initializing session ---
+            if (PUBLIC_BASE_URL && TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
               try {
-                if (callerFrom) {
-                  knownUser = await User.findOne({
-                    where: { phone: callerFrom },
-                  });
-                  if (knownUser) {
-                    console.log(
-                      "Returning user found for phone:",
-                      callerFrom,
-                      "->",
-                      knownUser.name,
-                      knownUser.email
-                    );
-                  } else {
-                    console.log(
-                      "No existing user found for phone:",
-                      callerFrom
-                    );
-                  }
-                } else {
-                  console.log("No callerFrom phone number available");
-                }
-              } catch (e) {
-                console.error("User lookup error:", e?.message || e);
+                await twilioClient.calls(callSid).recordings.create({
+                  recordingStatusCallback: `${PUBLIC_BASE_URL}/recording-status`,
+                  recordingStatusCallbackEvent: [
+                    "in-progress",
+                    "completed",
+                    "absent",
+                  ],
+                  recordingChannels: "dual",
+                  recordingTrack: "both",
+                });
+              } catch {}
+            }
+
+            callStarted = true;
+            twilioStarted = true;
+
+            try {
+              if (callerFrom) {
+                knownUser = await User.findOne({
+                  where: { phone: callerFrom },
+                });
               }
+            } catch {}
 
-              userLookupDone = true;
-              maybeInitializeSession();
-              break;
-
-            case "media":
-              if (openAiWs.readyState === WebSocket.OPEN) {
-                try {
-                  openAiWs.send(
-                    JSON.stringify({
-                      type: "input_audio_buffer.append",
-                      audio: data.media.payload,
-                    })
-                  );
-                } catch (e) {
-                  console.error("openai.append error", e);
-                }
-              }
-              break;
-
-            case "stop":
-              if (openAiWs.readyState === WebSocket.OPEN) {
-                try {
-                  openAiWs.close();
-                } catch (e) {
-                  console.error("openai.close error", e);
-                }
-              }
-              break;
-
-            default:
-              break;
+            userLookupDone = true;
+            maybeInitializeSession();
+            maybeSendGreeting();
+            break;
           }
-        } catch (e) {
-          console.error(
-            "twilio.message parse error",
-            e,
-            String(message).slice(0, 200)
-          );
+
+          case "media": {
+            if (openAiWs.readyState === WebSocket.OPEN) {
+              safeSendOpenAI({
+                type: "input_audio_buffer.append",
+                audio: data.media.payload,
+              });
+            }
+            break;
+          }
+
+          case "stop": {
+            try {
+              if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+            } catch {}
+            break;
+          }
+
+          default:
+            break;
         }
       };
 
       connection.on("message", onTwilioMessage);
 
       connection.on("close", async () => {
-        // close OpenAI WS if still open
-        if (openAiWs.readyState === WebSocket.OPEN) {
-          try {
-            openAiWs.close();
-          } catch (e) {
-            console.error("openai.close error", e);
-          }
-        }
+        clearInterval(watchdog);
 
-        console.log(
-          "Call closed. From",
-          callerFrom,
-          "To",
-          calledTo,
-          "Call SID",
-          callSid,
-          "Stream SID",
-          streamSid
-        );
-
-        // --- Call your summarizer with all Q/A pairs ---
         try {
-          const allData = await summarizer(qaPairs, callSid, callerFrom);
-          console.log("📄 Summarizer result:", JSON.stringify({ allData }));
-        } catch (e) {
-          console.error("summarizer error:", e?.message || e);
-        }
+          if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+        } catch {}
+
+        try {
+          await summarizer(qaPairs, callSid, callerFrom);
+        } catch {}
       });
     });
 
     return wss;
-  } catch (error) {
-    console.error("attachMediaStreamServer error", error);
+  } catch {
+    return null;
   }
 }
