@@ -8,26 +8,20 @@ import sendEmail from "../utils/Email.js";
 
 const ADMIN_EMAIL = "ahmedsarwar7575@gmail.com";
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
-const EMAIL_FIND_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const EMAIL_STORE_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,253}\.[a-z]{2,24}$/i;
 
-const YES_RE =
-  /\b(yes|yeah|yep|yup|correct|that's right|that is right|right|sure|ok(?:ay)?|affirmative|exactly)\b/i;
+const EXCLUDED_EMAILS = new Set(["support@getpiepay.com"]);
+const isExcludedEmail = (email) => {
+  if (!email) return true;
+  const e = String(email).trim().toLowerCase();
+  if (!EMAIL_STORE_RE.test(e)) return true;
+  if (EXCLUDED_EMAILS.has(e)) return true;
+  if (e.endsWith("@getpiepay.com")) return true;
+  if (e.includes("getpiepay.com") && !e.includes("@")) return true;
+  return false;
+};
 
 const ARABIC_SCRIPT_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
-
-const NUM_WORD = {
-  zero: "0",
-  one: "1",
-  two: "2",
-  three: "3",
-  four: "4",
-  five: "5",
-  six: "6",
-  seven: "7",
-  eight: "8",
-  nine: "9",
-};
 
 const safeSendEmail = async ({ to, subject, text, html }) => {
   try {
@@ -57,214 +51,13 @@ const normalizeName = (n) => {
   return trimmed.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
-const looksLikeAgentReadback = (s) =>
-  /\b(let me repeat|repeat that|make sure i have it|is that correct|correct\?|let me confirm|to confirm|confirm:)\b/i.test(
-    String(s || "")
-  );
-
-const deSpellToken = (tok) => {
-  if (!tok) return "";
-  const t = String(tok).toLowerCase();
-
-  if (t.includes("-")) {
-    const parts = t.split("-").filter(Boolean);
-
-    if (parts.length >= 2 && parts.every((p) => NUM_WORD[p] != null)) {
-      return parts.map((p) => NUM_WORD[p]).join("");
-    }
-
-    const singleCount = parts.filter((p) => /^[a-z0-9]$/.test(p)).length;
-    if (parts.length >= 6 && singleCount / parts.length >= 0.8) {
-      return parts.join("");
-    }
-
-    return t;
-  }
-
-  if (NUM_WORD[t] != null) return NUM_WORD[t];
-  return t;
-};
-
-const normalizeHyphenSpelledEmail = (email) => {
-  if (!email) return null;
-  let e = String(email).trim().toLowerCase();
-  e = e.replace(/[>,.)]+$/g, "");
-
-  if (!e.includes("@")) return EMAIL_RE.test(e) ? e : null;
-
-  const [local0, domain0] = e.split("@");
-  if (!local0 || !domain0) return null;
-
-  let local = local0;
-  let domain = domain0;
-
-  const localParts = local.split("-").filter(Boolean);
-  const singleCount = localParts.filter((p) => /^[a-z0-9]$/.test(p)).length;
-
-  if (localParts.length >= 6 && singleCount / localParts.length >= 0.8) {
-    local = localParts.join("");
-  }
-
-  if (/\d-\d-\d/.test(local)) {
-    local = local.replace(/(\d)-(?=\d)/g, "$1");
-  }
-
-  domain = domain
-    .split(".")
-    .map((label) => {
-      const parts = label.split("-").filter(Boolean);
-      if (parts.length >= 4 && parts.every((p) => /^[a-z]$/.test(p)))
-        return parts.join("");
-      return label;
-    })
-    .join(".");
-
-  const out = `${local}@${domain}`;
-  return EMAIL_RE.test(out) ? out : null;
-};
-
-const spokenToEmail = (text) => {
-  if (!text) return null;
-  const s0 = String(text).toLowerCase();
-
-  const direct = s0.match(EMAIL_FIND_RE) || [];
-  for (let i = direct.length - 1; i >= 0; i--) {
-    const m = direct[i].toLowerCase();
-    const norm = normalizeHyphenSpelledEmail(m);
-    if (!norm) continue;
-
-    const [local, domain] = norm.split("@");
-    if (local.length <= 4) {
-      const idx = s0.toLowerCase().lastIndexOf(m);
-      const prefix = s0
-        .slice(Math.max(0, idx - 120), idx)
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, " ");
-      const letters = (prefix.match(/\b[a-z0-9]\b/g) || []).join("");
-      if (letters.length >= 4) {
-        const merged = `${letters}${local}@${domain}`;
-        const mergedNorm = normalizeHyphenSpelledEmail(merged);
-        if (mergedNorm) return mergedNorm;
-      }
-    }
-
-    return norm;
-  }
-
-  const s = s0
-    .replace(/\bat\s*the\s*rate\b/g, " at ")
-    .replace(/@/g, " at ")
-    .replace(/\./g, " dot ")
-    .replace(/[(),;:]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (
-    !/\b(at|dot|gmail|yahoo|outlook|hotmail|underscore|dash|hyphen|plus|period|point)\b/i.test(
-      s
-    )
-  )
-    return null;
-
-  const tokens = s.split(" ");
-  let out = "";
-
-  for (const rawTok of tokens) {
-    const tok = rawTok.replace(/[^a-z0-9-]/g, "");
-    if (!tok) continue;
-
-    if (tok === "at") out += "@";
-    else if (tok === "dot" || tok === "period" || tok === "point") out += ".";
-    else if (tok === "underscore") out += "_";
-    else if (tok === "dash" || tok === "hyphen") out += "-";
-    else if (tok === "plus") out += "+";
-    else out += deSpellToken(tok);
-  }
-
-  out = out.replace(/[^a-z0-9._%+\-@]/g, "");
-  const norm = normalizeHyphenSpelledEmail(out);
-  return norm || null;
-};
-
-const EXCLUDED_EMAILS = new Set(["support@getpiepay.com"]);
-
-const isExcludedEmail = (email) => {
-  if (!email) return false;
-  return EXCLUDED_EMAILS.has(String(email).trim().toLowerCase());
-};
-
-const extractConfirmedEmail = (pairs) => {
-  if (!Array.isArray(pairs) || !pairs.length) return null;
-
-  let lastConfirmed = null;
-  let lastSeenEmail = null;
-
-  const setSeen = (email) => {
-    if (!email) return;
-    const e = String(email).trim().toLowerCase();
-    if (!EMAIL_RE.test(e)) return;
-    if (isExcludedEmail(e)) return;
-    lastSeenEmail = e;
-  };
-
-  for (let i = 0; i < pairs.length; i++) {
-    const userUtter = String(pairs[i]?.q || "");
-    const agentUtter = String(pairs[i]?.a || "");
-
-    const userSaidYes = YES_RE.test(userUtter.toLowerCase());
-    const nextUser1 = String(pairs[i + 1]?.q || "");
-    const nextUser2 = String(pairs[i + 2]?.q || "");
-    const nextSaidYes =
-      YES_RE.test(nextUser1.toLowerCase()) ||
-      YES_RE.test(nextUser2.toLowerCase());
-
-    const userEmail = spokenToEmail(userUtter);
-    const agentEmail = spokenToEmail(agentUtter);
-
-    setSeen(userEmail);
-    setSeen(agentEmail);
-
-    if (looksLikeAgentReadback(agentUtter) && (agentEmail || lastSeenEmail)) {
-      if (userSaidYes || nextSaidYes) {
-        const picked = agentEmail || lastSeenEmail;
-        if (picked && !isExcludedEmail(picked)) lastConfirmed = picked;
-      }
-      continue;
-    }
-
-    if (userSaidYes && agentEmail) {
-      if (!isExcludedEmail(agentEmail)) lastConfirmed = agentEmail;
-      continue;
-    }
-
-    if (
-      userSaidYes &&
-      !agentEmail &&
-      lastSeenEmail &&
-      /\b(updated|i['’]?ve updated|i have updated|keep that email|i['’]?ll keep)\b/i.test(
-        agentUtter
-      )
-    ) {
-      if (!isExcludedEmail(lastSeenEmail)) lastConfirmed = lastSeenEmail;
-      continue;
-    }
-
-    if (userSaidYes && userEmail) {
-      if (!isExcludedEmail(userEmail)) lastConfirmed = userEmail;
-      continue;
-    }
-  }
-
-  return lastConfirmed;
-};
-
 const shouldForceUnsatisfiedIfTicketFlow = (pairs) => {
   const text = (pairs || [])
     .map((p) => `${p?.q ?? ""} ${p?.a ?? ""}`)
     .join(" ")
     .toLowerCase();
 
-  return /\b(escalat\w*|open(?:ed|ing)?\s+(?:a\s+)?(?:\w+\s+){0,3}ticket|creat(?:e|ed|ing)\s+(?:a\s+)?(?:\w+\s+){0,3}ticket|log(?:ged|ging)?\s+(?:a\s+)?ticket|case\s+number|follow\s*up|technician\s+(?:will|to)\s+(?:call|contact)|we(?:'ll| will)\s+(?:call|contact)\s+you)\b/i.test(
+  return /\b(escalat\w*|open(?:ed|ing)?\s+(?:a\s+)?(?:\w+\s+){0,4}ticket|creat(?:e|ed|ing)\s+(?:a\s+)?(?:\w+\s+){0,4}ticket|log(?:ged|ging)?\s+(?:a\s+)?(?:\w+\s+){0,3}ticket|case\s+number|follow\s*up|technician\s+(?:will|to)\s+(?:call|contact)|we(?:'ll| will)\s+(?:call|contact)\s+you|priority\s+ticket)\b/i.test(
     text
   );
 };
@@ -306,119 +99,26 @@ const normalizeLanguages = (arr, pairs) => {
   return out;
 };
 
-function mockExtract(pairs) {
-  const text = pairs.map((p) => `${p.q ?? ""} ${p.a ?? ""}`).join(" ");
-  const lower = text.toLowerCase();
-
-  const confirmedEmail = extractConfirmedEmail(pairs);
-
-  const nameMatch = text.match(
-    /\b(?:my name is|it's|i am)\s+([A-Za-z][A-Za-z\s'-]{1,40})/i
-  );
-  const name = nameMatch
-    ? nameMatch[1]
-    : (text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b/) || [null])[0];
-
-  const satisfied =
-    /(i'?m\s+satisfied|this solves it|works now|resolved)/i.test(lower);
-  const unsatisfied =
-    /(not satisfied|not happy|still failing|doesn'?t work|not resolved)/i.test(
-      lower
-    );
-
-  const contactInfoOnly =
-    /\b(register (my )?details|no issue( right)? now|only (my )?(name|email)|just (my )?details)\b/i.test(
-      lower
-    );
-
-  const hasIssueKeyword =
-    /\binvoice|payment|charge|refund|login|reset|error|ticket|order|shipment|crash|declined|fail|lost|track|pos|inventory\b/i.test(
-      lower
-    );
-
-  const greetingsOnly =
-    !contactInfoOnly &&
-    !satisfied &&
-    !unsatisfied &&
-    !hasIssueKeyword &&
-    /\b(hello|hi|salam|assalam|testing the line|bye)\b/i.test(lower);
-
-  let ticketType = null;
-  if (/\b(invoice|billing|charge|refund|card|declined|payment)\b/i.test(lower))
-    ticketType = "billing";
-  else if (/\b(pricing|buy|purchase|quote|plan)\b/i.test(lower))
-    ticketType = "sales";
-  else if (
-    /\b(login|reset|error|bug|crash|shipping|order|shipment|track|lost|pos|inventory)\b/i.test(
-      lower
-    )
-  )
-    ticketType = "support";
-
-  const agentHints = pairs
-    .filter((p) => /agent/i.test(p.q || ""))
-    .map((p) => p.a || "");
-  const proposedSolution =
-    agentHints
-      .reverse()
-      .find((s) =>
-        /\b(try|sent|do|please|clear|different browser|we will|we'll|opened a case|creating a)\b/i.test(
-          s
-        )
-      ) || "not specified";
-
-  const customerLine = (
-    pairs.find((p) => /customer/i.test(p.q || ""))?.a || ""
-  ).slice(0, 160);
-  const summary = customerLine || "not specified";
-
-  const forceUnsatisfied = shouldForceUnsatisfiedIfTicketFlow(pairs);
-
-  return {
-    customer: {
-      name: name ? normalizeName(name) : "not specified",
-      name_raw: name || "not specified",
-      email: confirmedEmail || "not specified",
-    },
-    ticket: {
-      ticketType: ticketType || "not specified",
-      status: satisfied && !forceUnsatisfied ? "resolved" : "open",
-      priority: /critical|p1|high/.test(lower) ? "high" : "medium",
-      proposedSolution,
-      isSatisfied: forceUnsatisfied
-        ? false
-        : satisfied
-        ? true
-        : unsatisfied
-        ? false
-        : "not specified",
-    },
-    summary,
-    has_meaningful_conversation: !greetingsOnly,
-    contact_info_only: contactInfoOnly,
-    non_english_detected: normalizeLanguages([], pairs),
-    clarifications_needed: [],
-    mishears_or_typos: [],
-  };
-}
-
 const extractWithOpenAI = async (pairs, { timeoutMs = 60000 } = {}) => {
-  const system = [
-    "You are an accurate, terse extractor for GETPIE customer support call logs.",
-    "English only. Output ONLY JSON matching the provided JSON Schema.",
-    "If unknown/unclear, set the value to the string 'not specified'. Do not invent facts.",
-    "Transcription can be wrong. Prefer facts explicitly CONFIRMED in the call.",
-    "EMAIL RULES (important):",
-    "- The transcript may mis-spell an email and may add hyphens between letters when user spells it (e.g., m-i-r-z-a...). Those hyphens are NOT part of the email; remove them.",
-    "- The transcript may spell emails with spaces (e.g., m i r z a ... @ gmail.com). Reconstruct it.",
-    "- If the user explicitly says 'underscore' or 'dash/hyphen', keep those characters in the email.",
-    "- If agent reads an email back and user confirms yes/correct, that confirmed email is the truth.",
-    "- If there is ANY doubt which email is correct, set customer.email = 'not specified'.",
-    "SATISFACTION RULES (important):",
-    "- If agent/customer agree to create/escalate/open a ticket or schedule technician follow-up, set ticket.isSatisfied = false.",
-    "- Only set ticket.isSatisfied = true if customer explicitly says solved/resolved/works and NO escalation/ticket flow exists.",
-    "Keep summary <= 80 words.",
-  ].join(" ");
+  const system = `
+You are an extractor for GETPIE call logs.
+
+Return ONLY JSON matching the provided schema (no markdown, no extra text).
+If unknown/unclear, output the string "not specified". Do not guess.
+
+CRITICAL CONFIRMATION RULE (HARD):
+- The transcript can be messy. ONLY accept the user's name/email if the assistant/agent READS IT BACK and the user CONFIRMS with an explicit yes/correct/yeah/right.
+- If the user spells something but the agent never reads it back and the user never confirms, then it is NOT confirmed.
+- If multiple confirmed values exist, take the LAST confirmed one.
+
+EMAIL RULES (HARD):
+- NEVER output support@getpiepay.com or any email at getpiepay.com as the user's email.
+- Ignore any company/support emails. Only output the user's personal/business email.
+- Output email as a clean email string (example: mirzatayyab033@gmail.com) without extra words.
+
+NAME RULES (HARD):
+- ONLY output a name if it is read back by the agent and the user confirms yes/correct.
+`.trim();
 
   const schema = {
     type: "object",
@@ -437,10 +137,9 @@ const extractWithOpenAI = async (pairs, { timeoutMs = 60000 } = {}) => {
       customer: {
         type: "object",
         additionalProperties: false,
-        required: ["name", "name_raw", "email"],
+        required: ["name", "email"],
         properties: {
           name: { type: "string" },
-          name_raw: { type: "string" },
           email: { type: "string" },
         },
       },
@@ -485,8 +184,6 @@ const extractWithOpenAI = async (pairs, { timeoutMs = 60000 } = {}) => {
   const userMsg = `
 Extract fields from these Q/A pairs.
 
-Return JSON ONLY (no markdown, no extra text).
-
 Q/A PAIRS:
 ${JSON.stringify(pairs, null, 2)}
   `.trim();
@@ -499,12 +196,12 @@ ${JSON.stringify(pairs, null, 2)}
   try {
     const payload = {
       model: "gpt-4o-mini",
-      temperature: 0.2,
-      max_output_tokens: 450,
+      temperature: 0.1,
+      max_output_tokens: 500,
       text: {
         format: {
           type: "json_schema",
-          name: "getpie_ticket_extract",
+          name: "getpie_extract_v2_confirmed_only",
           strict: true,
           schema,
         },
@@ -572,20 +269,11 @@ export const summarizer = async (pairs, callSid, phone) => {
       return { error: "no_pairs" };
     if (!callSid) return { error: "missing_callSid" };
 
-    const useMock = String(process.env.SUMMARIZER_MOCK || "").trim() === "1";
-    let parsed;
-
-    if (useMock) {
-      parsed = mockExtract(pairs);
-    } else {
-      parsed = await extractWithOpenAI(pairs, { timeoutMs: 60000 });
-
-      if (parsed?.error) {
-        const retry = await extractWithOpenAI(pairs, { timeoutMs: 60000 });
-        if (!retry?.error) parsed = retry;
-      }
-
-      if (parsed?.error) return parsed;
+    let parsed = await extractWithOpenAI(pairs, { timeoutMs: 60000 });
+    if (parsed?.error) {
+      const retry = await extractWithOpenAI(pairs, { timeoutMs: 60000 });
+      if (!retry?.error) parsed = retry;
+      else return parsed;
     }
 
     const ns = (v) => {
@@ -596,18 +284,15 @@ export const summarizer = async (pairs, callSid, phone) => {
       return trimmed.toLowerCase() === "not specified" ? null : trimmed;
     };
 
-    const confirmedEmail = extractConfirmedEmail(pairs);
-    const rawEmail = ns(confirmedEmail || parsed?.customer?.email);
+    const rawEmail = ns(parsed?.customer?.email);
+    const rawName = ns(parsed?.customer?.name);
+
     const safeEmail =
-      typeof rawEmail === "string" && EMAIL_RE.test(rawEmail)
-        ? rawEmail.toLowerCase()
-        : null;
+      rawEmail && !isExcludedEmail(rawEmail) ? rawEmail.toLowerCase() : null;
+
+    const safeName = normalizeName(rawName);
 
     const safePhone = normalizePhone(phone);
-
-    const rawName =
-      ns(parsed?.customer?.name) || ns(parsed?.customer?.name_raw);
-    const safeName = normalizeName(rawName);
 
     const forceUnsatisfied = shouldForceUnsatisfiedIfTicketFlow(pairs);
 
@@ -642,78 +327,11 @@ export const summarizer = async (pairs, callSid, phone) => {
     const contactInfoOnly = !!parsed?.contact_info_only;
 
     const qaLog = Array.isArray(pairs) ? pairs : [];
-
     const summary = typeof parsed?.summary === "string" ? parsed.summary : "";
-
     const languages = normalizeLanguages(parsed?.non_english_detected, pairs);
 
     if (!hasConversation && !contactInfoOnly) {
       return { skipped: "no_conversation", extracted: { summary, qaLog } };
-    }
-
-    if (contactInfoOnly) {
-      const userResult = await sequelize.transaction(async (t) => {
-        let userRecord = null;
-        let userCreated = false;
-
-        if (safePhone)
-          userRecord = await User.findOne({
-            where: { phone: safePhone },
-            transaction: t,
-          });
-        if (!userRecord && safeEmail)
-          userRecord = await User.findOne({
-            where: { email: safeEmail },
-            transaction: t,
-          });
-
-        if (!userRecord) {
-          userRecord = await User.create(
-            {
-              name: safeName || null,
-              email: safeEmail,
-              phone: safePhone,
-              status: "active",
-            },
-            { transaction: t }
-          );
-          userCreated = true;
-        } else {
-          const patch = {};
-          if (safeName && userRecord.name !== safeName) patch.name = safeName;
-          if (safeEmail && userRecord.email !== safeEmail)
-            patch.email = safeEmail;
-          if (safePhone && !userRecord.phone) patch.phone = safePhone;
-          if (userRecord.status !== "active") patch.status = "active";
-          if (Object.keys(patch).length)
-            await userRecord.update(patch, { transaction: t });
-        }
-
-        return { user: userRecord, _flags: { userCreated } };
-      });
-
-      if (userResult?._flags?.userCreated) {
-        await safeSendEmail({
-          to: ADMIN_EMAIL,
-          subject: "GETPIE: New user created (contact-info call)",
-          text: `A new user was created.\nName: ${safeName || "N/A"}\nEmail: ${
-            safeEmail || "N/A"
-          }\nPhone: ${safePhone || "N/A"}\nCallSid: ${callSid}`,
-        });
-      }
-
-      return {
-        user: userResult.user,
-        note: "contact_info_only_user_created",
-        extracted: {
-          name: safeName,
-          email: safeEmail,
-          phone: safePhone,
-          summary,
-          languages,
-          qa_log: qaLog,
-        },
-      };
     }
 
     const shouldCreateTicket = isSatisfied === false;
@@ -865,7 +483,7 @@ export const summarizer = async (pairs, callSid, phone) => {
           languages,
           isSatisfied,
           hasConversation,
-          contactInfoOnly: false,
+          contactInfoOnly,
         },
       };
     });
