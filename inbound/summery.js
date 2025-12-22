@@ -15,16 +15,14 @@ const EXCLUDED_EMAILS = new Set(["support@getpiepay.com"]);
 
 const ARABIC_SCRIPT_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
 
-const sendEmailFlexible = async ({ to, subject, text, html }) => {
+const sendEmailFlexible = async ({ to, subject, html }) => {
   try {
-    return await sendEmail({ to, subject, text, html });
-  } catch {}
-  try {
-    return await sendEmail(to, subject, text, html);
-  } catch {}
-  try {
-    return await sendEmail(to, subject, html || text || "");
-  } catch {}
+    return await sendEmail({ to, subject, html });
+    console.log("Email sent successfully");
+  } catch (err) {
+    console.error("Error sending email:", err);
+  }
+ 
   return null;
 };
 
@@ -570,14 +568,6 @@ export const summarizer = async (pairs, callSid, phone) => {
         await sendEmailFlexible({
           to: ADMIN_EMAIL,
           subject: `GETPIE: ${events.join(" + ")}`,
-          text:
-            `Events: ${events.join(" + ")}\n` +
-            `CallSid: ${callSid}\n` +
-            `User: ${result.user?.id || "N/A"} | ${finalUserName || "N/A"}\n` +
-            `Email: ${finalUserEmail || "N/A"}\n` +
-            `Phone: ${safePhone || "N/A"}\n` +
-            `Ticket: ${result.ticket?.id || "N/A"}\n` +
-            `Summary: ${summary || "N/A"}`,
           html,
         });
       }
@@ -598,13 +588,6 @@ export const summarizer = async (pairs, callSid, phone) => {
         await sendEmailFlexible({
           to: finalUserEmail,
           subject: "Your GETPIE support ticket has been created",
-          text:
-            `Hi ${finalUserName || "there"},\n\n` +
-            `We created a support ticket for you.\n` +
-            `Ticket ID: ${result.ticket?.id || "N/A"}\n` +
-            `Priority: ${result.ticket?.priority || ticketPriority}\n` +
-            `Summary: ${summary || "N/A"}\n\n` +
-            `— GETPIE Support`,
           html,
         });
       }
