@@ -246,7 +246,7 @@ const shouldForceUnsatisfiedIfTicketFlow = (pairs) => {
     .join(" ")
     .toLowerCase();
 
-  return /\b(escalat|open(?:ed)?\s+(a\s+)?ticket|create(?:d)?\s+(a\s+)?ticket|log(?:ged)?\s+(a\s+)?ticket|technician\s+(will|to)\s+(call|contact)|we('?ll| will)\s+(call|contact)\s+you|follow\s*up\s+(with\s+you)?|case\s+number)\b/i.test(
+  return /\b(escalat\w*|open(?:ed|ing)?\s+(?:a\s+)?(?:\w+\s+){0,3}ticket|creat(?:e|ed|ing)\s+(?:a\s+)?(?:\w+\s+){0,3}ticket|log(?:ged|ging)?\s+(?:a\s+)?ticket|case\s+number|follow\s*up|technician\s+(?:will|to)\s+(?:call|contact)|we(?:'ll| will)\s+(?:call|contact)\s+you)\b/i.test(
     text
   );
 };
@@ -314,7 +314,7 @@ function mockExtract(pairs) {
     );
 
   const hasIssueKeyword =
-    /\binvoice|payment|charge|refund|login|reset|error|ticket|order|shipment|crash|declined|fail|lost|track/i.test(
+    /\binvoice|payment|charge|refund|login|reset|error|ticket|order|shipment|crash|declined|fail|lost|track|pos|inventory\b/i.test(
       lower
     );
 
@@ -331,7 +331,7 @@ function mockExtract(pairs) {
   else if (/\b(pricing|buy|purchase|quote|plan)\b/i.test(lower))
     ticketType = "sales";
   else if (
-    /\b(login|reset|error|bug|crash|shipping|order|shipment|track|lost)\b/i.test(
+    /\b(login|reset|error|bug|crash|shipping|order|shipment|track|lost|pos|inventory)\b/i.test(
       lower
     )
   )
@@ -344,7 +344,7 @@ function mockExtract(pairs) {
     agentHints
       .reverse()
       .find((s) =>
-        /\b(try|sent|do|please|clear|different browser|we will|we'll|opened a case)\b/i.test(
+        /\b(try|sent|do|please|clear|different browser|we will|we'll|opened a case|creating a)\b/i.test(
           s
         )
       ) || "not specified";
