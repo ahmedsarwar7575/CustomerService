@@ -18,6 +18,9 @@ const {
 
 const MODEL = "gpt-realtime-2025-08-28";
 
+// Helps prevent the assistant from replying during tiny pauses (“uh…”, “umm…”, etc.)
+const USER_PAUSE_GRACE_MS = 350;
+
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 function createOpenAIWebSocket() {
@@ -71,20 +74,26 @@ IF CHANGE
   return {
     type: "session.update",
     session: {
+      // Key: make VAD less aggressive so it doesn’t “end the turn” on tiny pauses.
       turn_detection: {
         type: "server_vad",
-        threshold: 0.6,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 200,
+        threshold: 0.5,
+        prefix_padding_ms: 500,
+        silence_duration_ms: 500, // was 200 -> too aggressive for phone calls
         create_response: false,
         interrupt_response: false,
       },
+
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
       voice: REALTIME_VOICE,
+
       instructions: SYSTEM_MESSAGE + dynamicContext,
       modalities: ["text", "audio"],
       temperature: 0.8,
+
+      // If you want better phone-call transcription, try:
+      // model: "gpt-4o-mini-transcribe"
       input_audio_transcription: {
         model: "whisper-1",
         language: "en",
@@ -98,6 +107,50 @@ IF CHANGE
 function isGoodbye(text = "") {
   const t = text.toLowerCase();
   return t.includes("goodbye") || /\bbye\b/.test(t);
+}
+
+function extractTranscriptFromTranscriptionMsg(msg) {
+  const direct =
+    (typeof msg.transcript === "string" && msg.transcript.trim()) || "";
+
+  if (direct) return direct;
+
+  const fromItem = (
+    msg.item?.content?.find?.((c) => typeof c?.transcript === "string")
+      ?.transcript || ""
+  ).trim();
+
+  return fromItem || "";
+}
+
+function extractAssistantTextFromResponseDone(msg) {
+  const outputs = msg.response?.output || [];
+
+  for (const out of outputs) {
+    // Some payloads use out.type/message; some include role directly.
+    const role = out?.role || out?.message?.role;
+    if (role !== "assistant") continue;
+
+    const content = Array.isArray(out.content)
+      ? out.content
+      : Array.isArray(out.message?.content)
+      ? out.message.content
+      : [];
+
+    // Prefer transcript if present (voice responses)
+    const transcriptPart = content.find(
+      (c) => typeof c?.transcript === "string" && c.transcript.trim()
+    );
+    if (transcriptPart?.transcript) return transcriptPart.transcript.trim();
+
+    // Otherwise fallback to text if present
+    const textPart = content.find(
+      (c) => typeof c?.text === "string" && c.text.trim()
+    );
+    if (textPart?.text) return textPart.text.trim();
+  }
+
+  return "";
 }
 
 export function attachMediaStreamServer(server) {
@@ -123,12 +176,26 @@ export function attachMediaStreamServer(server) {
       let userLookupDone = false;
       let twilioStarted = false;
 
+      // Q/A storage
       let qaPairs = [];
-      let pendingUserQ = null;
 
+      // Out-of-order safe pairing by item_id
+      const transcriptsByItemId = new Map(); // item_id -> user transcript
+      const assistantByItemId = new Map(); // item_id -> assistant text
+
+      // Which user audio item the assistant is currently responding to
+      let currentUserItemId = null;
+
+      // If user speaks while assistant is responding, we queue the next item_id here
+      let pendingUserItemId = null;
+
+      // Debounce to avoid responding to tiny pauses
+      let scheduledResponseTimer = null;
+      let scheduledUserItemId = null;
+
+      // Response state watchdog
       let hasActiveResponse = false;
       let responseStartedAt = 0;
-      let pendingUserTurn = false;
 
       const started = new Set();
       const openAiWs = createOpenAIWebSocket();
@@ -138,6 +205,66 @@ export function attachMediaStreamServer(server) {
         try {
           openAiWs.send(JSON.stringify(payload));
         } catch {}
+      };
+
+      const clearScheduledResponse = () => {
+        if (scheduledResponseTimer) {
+          clearTimeout(scheduledResponseTimer);
+          scheduledResponseTimer = null;
+        }
+        scheduledUserItemId = null;
+      };
+
+      const tryFinalizePair = (itemId) => {
+        if (!itemId) return;
+
+        const a = assistantByItemId.get(itemId);
+        if (!a) return;
+
+        const q = transcriptsByItemId.get(itemId) || null;
+
+        qaPairs.push({ q, a });
+
+        // cleanup
+        assistantByItemId.delete(itemId);
+        transcriptsByItemId.delete(itemId);
+      };
+
+      const startResponseForItem = (itemId) => {
+        // If we somehow try to respond while active, queue it
+        if (hasActiveResponse) {
+          pendingUserItemId = itemId;
+          return;
+        }
+
+        currentUserItemId = itemId || null;
+        safeSendOpenAI({ type: "response.create" });
+      };
+
+      const scheduleResponseForItem = (itemId) => {
+        clearScheduledResponse();
+        scheduledUserItemId = itemId;
+
+        scheduledResponseTimer = setTimeout(() => {
+          scheduledResponseTimer = null;
+          const id = scheduledUserItemId;
+          scheduledUserItemId = null;
+
+          // If assistant started speaking in the meantime, queue
+          if (hasActiveResponse) {
+            pendingUserItemId = id;
+            return;
+          }
+
+          startResponseForItem(id);
+        }, USER_PAUSE_GRACE_MS);
+      };
+
+      const maybeStartPendingTurn = () => {
+        if (!pendingUserItemId) return;
+        const id = pendingUserItemId;
+        pendingUserItemId = null;
+        scheduleResponseForItem(id);
       };
 
       const maybeSendGreeting = () => {
@@ -155,6 +282,9 @@ export function attachMediaStreamServer(server) {
           knownUser && knownUser.name
             ? `In this first reply, greet the caller warmly in English using their name "${knownUser.name}", and ask how you can help today. Keep it to one or two short sentences. Do NOT ask for their name or email yet.`
             : `In this first reply, greet the caller warmly in English and ask how you can help today. Keep it to one or two short sentences, and do not ask for their name or email yet. Wait for their answer first.`;
+
+        // Greeting is not tied to a user item_id
+        currentUserItemId = null;
 
         safeSendOpenAI({
           type: "response.create",
@@ -186,12 +316,6 @@ export function attachMediaStreamServer(server) {
         }, 5000);
       };
 
-      const flushQueuedTurn = () => {
-        if (!pendingUserTurn) return;
-        pendingUserTurn = false;
-        safeSendOpenAI({ type: "response.create" });
-      };
-
       const watchdog = setInterval(() => {
         if (!hasActiveResponse) return;
         if (!responseStartedAt) return;
@@ -200,7 +324,8 @@ export function attachMediaStreamServer(server) {
           hasActiveResponse = false;
           responseStartedAt = 0;
           safeSendOpenAI({ type: "response.cancel" });
-          flushQueuedTurn();
+          clearScheduledResponse();
+          maybeStartPendingTurn();
         }
       }, 1000);
 
@@ -217,6 +342,7 @@ export function attachMediaStreamServer(server) {
           return;
         }
 
+        // Assistant response lifecycle
         if (msg.type === "response.created") {
           hasActiveResponse = true;
           responseStartedAt = Date.now();
@@ -229,10 +355,16 @@ export function attachMediaStreamServer(server) {
         ) {
           hasActiveResponse = false;
           responseStartedAt = 0;
-          flushQueuedTurn();
+          clearScheduledResponse();
+          maybeStartPendingTurn();
         }
 
+        // User started speaking -> do NOT talk over them.
         if (msg.type === "input_audio_buffer.speech_started") {
+          // If we were about to respond because of a tiny pause, cancel that response scheduling
+          clearScheduledResponse();
+
+          // If assistant is currently speaking, stop immediately
           if (hasActiveResponse) {
             safeSendOpenAI({ type: "response.cancel" });
             hasActiveResponse = false;
@@ -240,29 +372,35 @@ export function attachMediaStreamServer(server) {
           }
         }
 
-        if (
-          msg.type === "conversation.item.input_audio_transcription.completed"
-        ) {
-          const q =
-            (typeof msg.transcript === "string" && msg.transcript.trim()) ||
-            (
-              msg.item?.content?.find?.(
-                (c) => typeof c?.transcript === "string"
-              )?.transcript || ""
-            ).trim();
+        // IMPORTANT: In server_vad, the server commits automatically.
+        // Use the committed event as the real "end of user turn".
+        if (msg.type === "input_audio_buffer.committed") {
+          const itemId = msg.item_id || msg.item?.id;
+          if (!itemId) return;
 
-          if (q) pendingUserQ = q;
-        }
-
-        if (msg.type === "input_audio_buffer.speech_stopped") {
+          // If assistant still active, queue the turn; otherwise schedule with grace
           if (hasActiveResponse) {
-            pendingUserTurn = true;
+            pendingUserItemId = itemId;
           } else {
-            safeSendOpenAI({ type: "input_audio_buffer.commit" });
-            safeSendOpenAI({ type: "response.create" });
+            scheduleResponseForItem(itemId);
           }
         }
 
+        // Transcription completed (can arrive out of order)
+        if (
+          msg.type === "conversation.item.input_audio_transcription.completed"
+        ) {
+          const itemId = msg.item_id || msg.item?.id;
+          if (!itemId) return;
+
+          const q = extractTranscriptFromTranscriptionMsg(msg);
+          if (q) transcriptsByItemId.set(itemId, q);
+
+          // If assistant answer already arrived first, finalize now
+          tryFinalizePair(itemId);
+        }
+
+        // Stream assistant audio to Twilio
         if (
           (msg.type === "response.audio.delta" ||
             msg.type === "response.output_audio.delta") &&
@@ -286,35 +424,29 @@ export function attachMediaStreamServer(server) {
           } catch {}
         }
 
+        // Response completed -> capture assistant text and pair with the correct user item_id
         if (msg.type === "response.done") {
           hasActiveResponse = false;
           responseStartedAt = 0;
 
-          const outputs = msg.response?.output || [];
-          for (const out of outputs) {
-            if (out?.role !== "assistant") continue;
+          const a = extractAssistantTextFromResponseDone(msg);
 
-            const part = Array.isArray(out.content)
-              ? out.content.find(
-                  (c) =>
-                    typeof c?.transcript === "string" && c.transcript.trim()
-                )
-              : null;
-
-            const a = (part?.transcript || "").trim();
-            if (!a) continue;
-
-            if (pendingUserQ) {
-              qaPairs.push({ q: pendingUserQ, a });
-              pendingUserQ = null;
+          if (a) {
+            if (currentUserItemId) {
+              assistantByItemId.set(currentUserItemId, a);
+              tryFinalizePair(currentUserItemId);
             } else {
+              // greeting or system-generated response not tied to a user item
               qaPairs.push({ q: null, a });
             }
 
             if (isGoodbye(a)) scheduleHangup();
           }
 
-          flushQueuedTurn();
+          currentUserItemId = null;
+
+          // If user talked while assistant was responding, handle that next
+          maybeStartPendingTurn();
         }
       });
 
@@ -410,6 +542,7 @@ export function attachMediaStreamServer(server) {
 
       connection.on("close", async () => {
         clearInterval(watchdog);
+        clearScheduledResponse();
 
         try {
           if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
