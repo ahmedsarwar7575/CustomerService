@@ -18,7 +18,6 @@ const {
   PUBLIC_BASE_URL,
 } = process.env;
 
-// ✅ CHANGE #4 (agent delay): same pause grace as inbound
 const USER_PAUSE_GRACE_MS = 350;
 
 const twilioClient =
@@ -65,7 +64,6 @@ function buildSessionUpdate(instructions) {
     session: {
       turn_detection: {
         type: "server_vad",
-        // ✅ CHANGE #3 (user delay): match inbound behavior (less aggressive)
         threshold: 0.5,
         prefix_padding_ms: 500,
         silence_duration_ms: 500,
@@ -91,13 +89,6 @@ function getDisplayName(user) {
   return (user && (user.name || user.firstName)) || "there";
 }
 
-// ❌ old strict goodbye (kept but no longer used)
-// function endsWithGoodbye(a = "") {
-//   const t = String(a).trim().replace(/\s+/g, " ");
-//   return t.endsWith("Goodbye.") || t.endsWith("Goodbye");
-// }
-
-// ✅ CHANGE #1 (hangup like inbound): detect goodbye/bye anywhere
 function isGoodbye(text = "") {
   const t = String(text).toLowerCase();
   return t.includes("goodbye") || /\bbye\b/.test(t);
@@ -109,6 +100,7 @@ function shouldIgnoreTranscript(t = "") {
   if (/^transcribe\s+only\s+english/i.test(s)) return true;
   if (s.includes("You will receive additional context/instructions"))
     return true;
+  if (/^the caller is speaking english\.?$/i.test(s)) return true;
   return false;
 }
 
@@ -117,7 +109,7 @@ export function createUpsellWSS() {
 
   wss.on("connection", async (connection, req) => {
     let userId = null;
-    let kind = null; // "satisfaction" | "upsell"
+    let kind = null;
     let user = null;
 
     let streamSid = null;
@@ -137,19 +129,25 @@ export function createUpsellWSS() {
     const qaPairs = [];
 
     let hangupTimer = null;
+    let callEnding = false;
 
-    // ✅ CHANGE #4 (agent delay): debounce timer for response.create
     let scheduledResponseTimer = null;
+
+    const openAiWs = createOpenAIWs();
+
     function clearScheduledResponse() {
       if (scheduledResponseTimer) {
         clearTimeout(scheduledResponseTimer);
         scheduledResponseTimer = null;
       }
     }
+
     function scheduleAgentResponse() {
+      if (callEnding) return;
       clearScheduledResponse();
       scheduledResponseTimer = setTimeout(() => {
         scheduledResponseTimer = null;
+        if (callEnding) return;
         if (!hasActiveResponse && openAiWs.readyState === WebSocket.OPEN) {
           try {
             openAiWs.send(JSON.stringify({ type: "response.create" }));
@@ -158,10 +156,10 @@ export function createUpsellWSS() {
       }, USER_PAUSE_GRACE_MS);
     }
 
-    const openAiWs = createOpenAIWs();
-
     function scheduleHangupFixed() {
       if (hangupTimer || !callSid || !twilioClient) return;
+      callEnding = true;
+      clearScheduledResponse();
       hangupTimer = setTimeout(async () => {
         try {
           await twilioClient.calls(callSid).update({ status: "completed" });
@@ -175,9 +173,6 @@ export function createUpsellWSS() {
     }
 
     function maybeSendGreeting() {
-      // ✅ CHANGE #2 (greet first like inbound):
-      // Your greeting already speaks FIRST and is gated properly.
-      // No other functionality changed here.
       if (greetingSent) return;
       if (!sessionInitialized || !callStarted) return;
       if (!streamSid) return;
@@ -277,7 +272,6 @@ RULES:
 
         if (msg.type === "response.created") {
           hasActiveResponse = true;
-          // ✅ (part of CHANGE #4) avoid firing a queued response once assistant started
           clearScheduledResponse();
         }
 
@@ -295,13 +289,10 @@ RULES:
           if (!shouldIgnoreTranscript(t)) pendingUserQ = t;
         }
 
-        // ✅ CHANGE #4 (agent delay): cancel any queued response when user starts speaking again
         if (msg.type === "input_audio_buffer.speech_started") {
           clearScheduledResponse();
         }
 
-        // ✅ CHANGE #4 (agent delay): schedule response AFTER grace (inbound-style)
-        // Prefer committed (server_vad end-of-turn). Keep speech_stopped as fallback.
         if (msg.type === "input_audio_buffer.committed") {
           if (!hasActiveResponse && openAiWs.readyState === WebSocket.OPEN) {
             scheduleAgentResponse();
@@ -355,7 +346,6 @@ RULES:
               qaPairs.push({ q: null, a });
             }
 
-            // ✅ CHANGE #1 (hangup like inbound)
             if (isGoodbye(a)) scheduleHangupFixed();
           }
         }
@@ -451,7 +441,6 @@ RULES:
     });
 
     connection.on("close", async () => {
-      // ✅ (part of CHANGE #4) cleanup the debounce timer
       clearScheduledResponse();
 
       try {
