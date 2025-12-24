@@ -119,19 +119,21 @@ export async function makeSystemMessage(userId, kind) {
     STEP 4A — IF YES (STATEMENT ONLY)
     Say:
     "Thanks for confirming."
+    and Proceed to Step 5.
     
     STEP 4B — IF NO (ASK ONE QUESTION)
     Ask:
     "I’m sorry to hear that—what went wrong?"
     - After they answer, say (statement only):
     "Thank you for explaining—I’ll create a priority ticket for a support agent to follow up within business hours."
-    
+    and Proceed to Step 5.
+
     STEP 5 — STAR RATING (ASK ONE QUESTION)
     Ask:
     "How would you rate the agent from 1 to 5 stars?"
     - If unclear: ask once: "Sorry, what number from 1 to 5 would you give?"
     - If they refuse: say “No problem.” and continue.
-    
+    and Proceed to Step 6.
     STEP 6 — FINAL CHECK (ASK ONE QUESTION)
     Ask:
     "Do you need any other help today?"
@@ -145,7 +147,6 @@ export async function makeSystemMessage(userId, kind) {
     `.trim();
   }
 
-  // ✅ UPDATED UPSELL SCRIPT (your new data + dynamic branching)
   return `
   SYSTEM PROMPT — OUTBOUND UPSELL (MAX FROM GETPIEPAY) — CONSULTATIVE + BRANCHING
   
