@@ -253,10 +253,10 @@ export function attachMediaStreamServer(server) {
 
         greetingSent = true;
 
-        const greetingInstruction =
-          knownUser && knownUser.name
-            ? `In this first reply, greet the caller warmly in English using their name "${knownUser.name}", and ask how you can help today. Keep it to one or two short sentences. Do NOT ask for their name or email yet.`
-            : `In this first reply, greet the caller warmly in English and ask how you can help today. Keep it to one or two short sentences, and do not ask for their name or email yet. Wait for their answer first.`;
+        const greetingInstruction = useName
+        ? `FIRST REPLY MUST BE EXACTLY THIS SENTENCE, WORD FOR WORD: "Hey ${name}, I am Max from Get Pie Pay. How can I help you today?" Do not add or remove words. Do not say Hello.`
+        : `FIRST REPLY MUST BE EXACTLY THIS SENTENCE, WORD FOR WORD: "Hey, I am Max from Get Pie Pay. How can I help you today?" Do not add or remove words. Do not say Hello.`;
+      
 
         // Greeting is not tied to a user item_id
         currentUserItemId = null;
