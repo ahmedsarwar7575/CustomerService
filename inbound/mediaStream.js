@@ -36,40 +36,15 @@ function createOpenAIWebSocket() {
 function buildSessionUpdate(userProfile = null) {
   const dynamicContext = userProfile
     ? `CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
-- Name on file: ${userProfile.name || "Unknown"}
-- Email on file: ${userProfile.email || "Unknown"}
+- Name on file: ${safeName || "Unknown"}
+- Email on file: ${safeEmail}
 
 FOR THIS CALL
 - Treat the caller as returning.
-- In your first reply, greet them warmly using their name "${
-        userProfile.name || ""
-      }" and ask how you can help today.
+- In your first reply, greet them warmly using their name only if it is longer than 2 characters ("${greetName}").
 - Do NOT ask for their name unless they say the name on file is wrong or they want to update it.
-
-RETURNING CUSTOMER FLOW (HARD)
-- Confirm issue first.
-- Give the solution and next steps immediately after confirming the issue.
-- Ask keep/change email only near the end, after the solution.
-
-EMAIL ON FILE VALIDATION (HARD)
-- Validate email on file: one "@", no spaces, dot in domain, not containing “let me confirm” or “is that correct”.
-- If invalid/Unknown, collect a new email with strict spell-and-confirm.
-
-KEEP/CHANGE QUESTION (ASK NEAR END ONLY)
-“So our team can reach you, I have your email as ${
-        userProfile.email || ""
-      }. Do you want to keep it or change it? Please say keep or change.”
-
-IF KEEP
-- “Got it—I’ll keep that email.”
-
-IF CHANGE
-- Collect a new email letter by letter; spell back; confirm.
-- After confirmed: “Got it—I’ve updated that email.”
 `
-    : `
-=
-`;
+    : ``;
 
   return {
     type: "session.update",

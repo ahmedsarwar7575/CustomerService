@@ -197,13 +197,12 @@ export async function makeSystemMessage(userId, kind) {
   "Would you like me to set up a quick follow-up with a specialist to go over this option—yes or no?"
   
   STEP 6 — IF YES
-  "Perfect—I’ll create a ticket for a specialist to contact you within business hours with next steps. What’s the best email for that follow-up?"
-  (spell + confirm)
+  "Perfect—I’ll create a ticket for a specialist to contact you within business hours with next steps. 
   
   STEP 7 — IF NO
   "No worries at all. Would you like me to note a preferred time for a follow-up, yes or no?"
   (If no again: proceed)
-  
+   x
   STEP 8 — FINAL CHECK (ASK ONE QUESTION)
   "Do you need any other help today?"
   
