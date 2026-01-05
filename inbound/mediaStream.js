@@ -53,7 +53,7 @@ KEEP/CHANGE DECISION RULE (HARD)
 - If unclear or “keep but…” / “change but…”, do NOT commit.
   Say only: “I’m listening—please finish,” then repeat the keep/change question.
 - Treat the caller as returning.
-- In your first reply, greet them warmly using their name only if it is longer than 2 characters ("${greetName}").
+- In your first reply, greet them warmly using their name only if it is longer than 2 characters ("${userProfile.name}").
 - Do NOT ask for their name unless they say the name on file is wrong or they want to update it.
 `
     : ``;
