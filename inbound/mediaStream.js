@@ -36,8 +36,8 @@ function createOpenAIWebSocket() {
 function buildSessionUpdate(userProfile = null) {
   const dynamicContext = userProfile
     ? `CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
-- Name on file: ${safeName || "Unknown"}
-- Email on file: ${safeEmail}
+- Name on file: ${userProfile.name || "Unknown"}
+- Email on file: ${userProfile.email}
 RETURNING CUSTOMER SEQUENCE (HARD)
 1) Confirm issue (one sentence + one question).
 2) Provide the playbook solution + next step immediately.
