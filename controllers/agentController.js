@@ -7,6 +7,67 @@ import dotenv from "dotenv";
 import User from "../models/user.js";
 import Call from "../models/Call.js";
 dotenv.config();
+// Reuse this (light + dark friendly)
+const renderHtml = ({ brand = "Get Pie Pay", title, rows = [], footer = "" }) => {
+  const tableRows = rows
+    .map(
+      ([k, v]) => `
+<tr>
+  <td class="k" style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#64748b;font-weight:600;width:170px;
+    background:#f8fafc;background-image:linear-gradient(#f8fafc,#f8fafc);">${k}</td>
+  <td class="v" style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#0f172a;
+    background:#ffffff;background-image:linear-gradient(#ffffff,#ffffff);">${v ?? ""}</td>
+</tr>`
+    )
+    .join("");
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="supported-color-schemes" content="light dark" />
+  <style>
+    :root{color-scheme:light dark;supported-color-schemes:light dark;}
+    @media (prefers-color-scheme: dark){
+      .page{background:#0b1220!important;background-image:linear-gradient(#0b1220,#0b1220)!important;}
+      .card{background:#0f172a!important;background-image:linear-gradient(#0f172a,#0f172a)!important;}
+      .table{border-color:#1f2937!important;background:#0f172a!important;background-image:linear-gradient(#0f172a,#0f172a)!important;}
+      .k{background:#111827!important;background-image:linear-gradient(#111827,#111827)!important;color:#cbd5e1!important;border-bottom-color:#1f2937!important;}
+      .v{background:#0f172a!important;background-image:linear-gradient(#0f172a,#0f172a)!important;color:#e5e7eb!important;border-bottom-color:#1f2937!important;}
+      .footer{color:#94a3b8!important;}
+      a{color:#93c5fd!important;}
+    }
+    [data-ogsc] .page{background:#0b1220!important;}
+    [data-ogsc] .card{background:#0f172a!important;}
+    [data-ogsc] .table{border-color:#1f2937!important;background:#0f172a!important;}
+    [data-ogsc] .k{background:#111827!important;color:#cbd5e1!important;border-bottom-color:#1f2937!important;}
+    [data-ogsc] .v{background:#0f172a!important;color:#e5e7eb!important;border-bottom-color:#1f2937!important;}
+    [data-ogsc] .footer{color:#94a3b8!important;}
+  </style>
+</head>
+<body style="margin:0;padding:0;">
+  <div class="page" style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+    background:#f6f7fb;background-image:linear-gradient(#f6f7fb,#f6f7fb);padding:24px;">
+    <div class="card" style="max-width:640px;margin:0 auto;background:#ffffff;background-image:linear-gradient(#ffffff,#ffffff);
+      border-radius:14px;box-shadow:0 8px 24px rgba(15,23,42,0.08);overflow:hidden;">
+      <div style="padding:18px 20px;background:linear-gradient(135deg,#111827,#334155);color:#fff;">
+        <div style="font-size:16px;opacity:0.9;">${brand}</div>
+        <div style="font-size:22px;font-weight:800;margin-top:4px;">${title}</div>
+      </div>
+      <div style="padding:18px 20px;">
+        <table class="table" role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #eef2f7;
+          border-radius:12px;overflow:hidden;background:#ffffff;background-image:linear-gradient(#ffffff,#ffffff);">
+          ${tableRows}
+        </table>
+        <div class="footer" style="margin-top:14px;color:#64748b;font-size:12px;line-height:1.5;">${footer}</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`.trim();
+};
 
 // Agent authentication
 export const login = async (req, res) => {
@@ -71,6 +132,19 @@ export const createAgent = async (req, res) => {
       ...req.body,
       password: hashedPassword,
     });
+    const html = renderHtml({
+      brand: "Get Pie Pay",
+      title: "Your Agent Account",
+      rows: [
+        ["Email", agent.email],
+        ["Password", plainPassword],
+        ["Role", "Agent"],
+        ["Login", loginUrl ? `<a href="${loginUrl}">${loginUrl}</a>` : "Use the app login screen"],
+      ],
+      footer: "An admin created this account for you. Please change your password after you log in.",
+    });
+
+    await sendEmail(agent.email, "Your Get Pie Pay agent account", html);
     const token = jwt.sign(
       { id: agent.id, role: "agent" },
       process.env.JWT_SECRET,

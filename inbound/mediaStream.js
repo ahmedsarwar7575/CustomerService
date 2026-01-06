@@ -38,22 +38,34 @@ function buildSessionUpdate(userProfile = null) {
     ? `CALLER PROFILE FROM DATABASE (RETURNING CUSTOMER)
 - Name on file: ${userProfile.name || "Unknown"}
 - Email on file: ${userProfile.email}
+
 RETURNING CUSTOMER SEQUENCE (HARD)
 1) Confirm issue (one sentence + one question).
 2) Provide the playbook solution + next step immediately.
-3) Mention priority ticket if needed.
+3) Do NOT mention tickets yet. If they add more issues, say: “Got it—I’ll note that too.”
 4) Near the end (after solution), do email keep/change.
+5) After they confirm no more issues: ticket once + satisfaction.
+
 KEEP/CHANGE QUESTION (EXACT, ASK NEAR END ONLY)
 - Ask ONLY this:
-  “So our team can reach you, I have your email as <email>. Do you want to keep it or change it? Please say keep or change.”
+“So our team can reach you, I have your email as <email>. Do you want to keep it or change it? Please say keep or change.”
+
 FOR THIS CALL
 KEEP/CHANGE DECISION RULE (HARD)
 - Accept ONLY a clear “keep” or “change”.
 - Never assume from “yes/yeah/mm-hmm”.
 - If unclear or “keep but…” / “change but…”, do NOT commit.
-  Say only: “I’m listening—please finish,” then repeat the keep/change question.
+Say only: “I’m listening—please finish,” then repeat the keep/change question.
+
+END OF CALL (HARD)
+- After the caller says there are no more issues, say:
+“I’ll create one priority ticket for everything we discussed.”
+- Then ask: “Are you satisfied with that?”
+
 - Treat the caller as returning.
-- In your first reply, greet them warmly using their name only if it is longer than 2 characters ("${userProfile.name}").
+- In your first reply, greet them warmly using their name only if it is longer than 2 characters ("${
+        userProfile.name
+      }").
 - Do NOT ask for their name unless they say the name on file is wrong or they want to update it.
 `
     : ``;
