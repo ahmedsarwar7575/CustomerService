@@ -9,7 +9,12 @@ import Call from "../models/Call.js";
 import sendEmail from "../Email/Sender.js";
 dotenv.config();
 // Reuse this (light + dark friendly)
-const renderHtml = ({ brand = "Get Pie Pay", title, rows = [], footer = "" }) => {
+const renderHtml = ({
+  brand = "Get Pie Pay",
+  title,
+  rows = [],
+  footer = "",
+}) => {
   const tableRows = rows
     .map(
       ([k, v]) => `
@@ -17,7 +22,9 @@ const renderHtml = ({ brand = "Get Pie Pay", title, rows = [], footer = "" }) =>
   <td class="k" style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#64748b;font-weight:600;width:170px;
     background:#f8fafc;background-image:linear-gradient(#f8fafc,#f8fafc);">${k}</td>
   <td class="v" style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#0f172a;
-    background:#ffffff;background-image:linear-gradient(#ffffff,#ffffff);">${v ?? ""}</td>
+    background:#ffffff;background-image:linear-gradient(#ffffff,#ffffff);">${
+      v ?? ""
+    }</td>
 </tr>`
     )
     .join("");
@@ -141,9 +148,15 @@ export const createAgent = async (req, res) => {
         ["Email", agent.email],
         ["Password", req.body.password],
         ["Role", "Agent"],
-        ["Login", loginUrl ? `<a href="${loginUrl}">${loginUrl}</a>` : "Use the app login screen"],
+        [
+          "Login",
+          loginUrl
+            ? `<a href="${loginUrl}">${loginUrl}</a>`
+            : "Use the app login screen",
+        ],
       ],
-      footer: "An admin created this account for you. Please change your password after you log in.",
+      footer:
+        "An admin created this account for you. Please change your password after you log in.",
     });
 
     await sendEmail(agent.email, "Your Get Pie Pay agent account", html);
@@ -152,7 +165,7 @@ export const createAgent = async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: "10d" }
     );
-    res.status(201).json({
+    return res.status(201).json({
       message: "Agent created successfully",
       agent: {
         id: agent.id,
