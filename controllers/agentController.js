@@ -6,7 +6,7 @@ import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import User from "../models/user.js";
 import Call from "../models/Call.js";
-import sendEmail from "../Email/Sender.js";
+import sendEmail from "../utils/Email.js";
 dotenv.config();
 // Reuse this (light + dark friendly)
 const renderHtml = ({
