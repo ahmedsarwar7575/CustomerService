@@ -132,6 +132,7 @@ export const createAgent = async (req, res) => {
       ...req.body,
       password: hashedPassword,
     });
+    const loginUrl = "https://cs.getpie.io/login";
     const html = renderHtml({
       brand: "Get Pie Pay",
       title: "Your Agent Account",
