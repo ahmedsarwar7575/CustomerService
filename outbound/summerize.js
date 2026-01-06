@@ -6,7 +6,7 @@ import Agent from "../models/agent.js";
 import Call from "../models/Call.js";
 import Ticket from "../models/ticket.js";
 import Rating from "../models/rating.js";
-// import sendEmail from "../utils/Email.js";
+import sendEmail from "../utils/Email.js";
 
 const now = () => new Date();
 const addDays = (d, n) => new Date(d.getTime() + n * 24 * 60 * 60 * 1000);
@@ -69,8 +69,7 @@ function extractRatingFromPairs(qaPairs) {
     return { rating: null, comment: null };
   }
 
-  const RATING_REGEX =
-    /\b([1-5])\b\s*(?:stars?|star|out of 5|\/5)?/i;
+  const RATING_REGEX = /\b([1-5])\b\s*(?:stars?|star|out of 5|\/5)?/i;
 
   // search from last pair backwards (most recent answer first)
   for (let i = qaPairs.length - 1; i >= 0; i--) {
@@ -538,6 +537,30 @@ export async function processCallOutcome({
         );
         // sendEmail(...)
       }
+      // User
+      sendEmail(
+        user.email,
+        "Your support ticket is created",
+        `<div style="font-family:Arial,sans-serif;font-size:14px;color:#111">
+     <p style="margin:0 0 8px;">Hi${user.name ? ` ${user.name}` : ""},</p>
+     <p style="margin:0 0 8px;">Your ticket has been created. Our team will contact you shortly.</p>
+     <p style="margin:0;color:#666;font-size:12px;">GETPIE Support</p>
+   </div>`
+      );
+
+      // Admin
+      sendEmail(
+        "ahmedsarwar7575@gmail.com",
+        "New ticket created",
+        `<div style="font-family:Arial,sans-serif;font-size:14px;color:#111">
+     <p style="margin:0 0 8px;"><b>New ticket created</b></p>
+     <p style="margin:0;">A new support ticket has been created for ${
+       user.name ? ` ${user.name}` : ""
+     }. Here is the summary of the ticket: ${
+          ticket ? ticket.summary : ""
+        }</p></p>
+   </div>`
+      );
 
       const basePatch = {
         type: "outbound",

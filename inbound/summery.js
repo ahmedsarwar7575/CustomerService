@@ -133,31 +133,85 @@ const renderHtml = ({ title, rows = [], footer = "" }) => {
     .map(
       ([k, v]) => `
 <tr>
-  <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#64748b;font-weight:600;width:170px;">${k}</td>
-  <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#0f172a;">${
-    v ?? ""
-  }</td>
+  <td class="k" style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#64748b;font-weight:600;width:170px;
+    background:#f8fafc;background-image:linear-gradient(#f8fafc,#f8fafc);">
+    ${k}
+  </td>
+  <td class="v" style="padding:10px 12px;border-bottom:1px solid #eef2f7;color:#0f172a;
+    background:#ffffff;background-image:linear-gradient(#ffffff,#ffffff);">
+    ${v ?? ""}
+  </td>
 </tr>`
     )
     .join("");
 
   return `
-<div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; background:#f6f7fb; padding:24px;">
-  <div style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:14px;box-shadow:0 8px 24px rgba(15,23,42,0.08);overflow:hidden;">
-    <div style="padding:18px 20px;background:linear-gradient(135deg,#111827,#334155);color:#fff;">
-      <div style="font-size:16px;letter-spacing:0.2px;opacity:0.9;">GETPIE</div>
-      <div style="font-size:22px;font-weight:800;margin-top:4px;">${title}</div>
-    </div>
-    <div style="padding:18px 20px;">
-      <table style="width:100%;border-collapse:collapse;border:1px solid #eef2f7;border-radius:12px;overflow:hidden;">
-        ${tableRows}
-      </table>
-      <div style="margin-top:14px;color:#64748b;font-size:12px;line-height:1.5;">
-        ${footer}
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+
+  <!-- declare support for both -->
+  <meta name="color-scheme" content="light dark" />
+  <meta name="supported-color-schemes" content="light dark" />
+
+  <style>
+    :root { color-scheme: light dark; supported-color-schemes: light dark; }
+
+    /* Dark mode (Apple Mail / iOS Mail / some clients) */
+    @media (prefers-color-scheme: dark) {
+      .page { background:#0b1220 !important; background-image:linear-gradient(#0b1220,#0b1220) !important; }
+      .card { background:#0f172a !important; background-image:linear-gradient(#0f172a,#0f172a) !important; }
+      .table { border-color:#1f2937 !important; background:#0f172a !important; background-image:linear-gradient(#0f172a,#0f172a) !important; }
+      .k {
+        background:#111827 !important; background-image:linear-gradient(#111827,#111827) !important;
+        color:#cbd5e1 !important; border-bottom-color:#1f2937 !important;
+      }
+      .v {
+        background:#0f172a !important; background-image:linear-gradient(#0f172a,#0f172a) !important;
+        color:#e5e7eb !important; border-bottom-color:#1f2937 !important;
+      }
+      .footer { color:#94a3b8 !important; }
+      a { color:#93c5fd !important; }
+    }
+
+    /* Outlook web (best effort) */
+    [data-ogsc] .page { background:#0b1220 !important; }
+    [data-ogsc] .card { background:#0f172a !important; }
+    [data-ogsc] .table { border-color:#1f2937 !important; background:#0f172a !important; }
+    [data-ogsc] .k { background:#111827 !important; color:#cbd5e1 !important; border-bottom-color:#1f2937 !important; }
+    [data-ogsc] .v { background:#0f172a !important; color:#e5e7eb !important; border-bottom-color:#1f2937 !important; }
+    [data-ogsc] .footer { color:#94a3b8 !important; }
+  </style>
+</head>
+
+<body style="margin:0;padding:0;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%;">
+  <div class="page" style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+    background:#f6f7fb;background-image:linear-gradient(#f6f7fb,#f6f7fb); padding:24px;">
+
+    <div class="card" style="max-width:640px;margin:0 auto;background:#ffffff;background-image:linear-gradient(#ffffff,#ffffff);
+      border-radius:14px;box-shadow:0 8px 24px rgba(15,23,42,0.08);overflow:hidden;">
+
+      <div style="padding:18px 20px;background:linear-gradient(135deg,#111827,#334155);color:#fff;">
+        <div style="font-size:16px;letter-spacing:0.2px;opacity:0.9;">GETPIE</div>
+        <div style="font-size:22px;font-weight:800;margin-top:4px;">${title}</div>
+      </div>
+
+      <div style="padding:18px 20px;">
+        <table class="table" role="presentation" style="width:100%;border-collapse:collapse;border:1px solid #eef2f7;
+          border-radius:12px;overflow:hidden;background:#ffffff;background-image:linear-gradient(#ffffff,#ffffff);">
+          ${tableRows}
+        </table>
+
+        <div class="footer" style="margin-top:14px;color:#64748b;font-size:12px;line-height:1.5;">
+          ${footer}
+        </div>
       </div>
     </div>
   </div>
-</div>
+</body>
+</html>
 `.trim();
 };
 
