@@ -137,7 +137,7 @@ export const createAgent = async (req, res) => {
       title: "Your Agent Account",
       rows: [
         ["Email", agent.email],
-        ["Password", plainPassword],
+        ["Password", req.body.password],
         ["Role", "Agent"],
         ["Login", loginUrl ? `<a href="${loginUrl}">${loginUrl}</a>` : "Use the app login screen"],
       ],
