@@ -19,7 +19,7 @@ const {
 const MODEL = "gpt-realtime-2025-08-28";
 
 // Helps prevent the assistant from replying during tiny pauses (“uh…”, “umm…”, etc.)
-const USER_PAUSE_GRACE_MS = 350;
+const USER_PAUSE_GRACE_MS = 250;
 
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
