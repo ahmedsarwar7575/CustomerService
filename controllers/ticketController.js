@@ -9,12 +9,10 @@ const nz = (arr) => (Array.isArray(arr) ? arr : []);
 // Create new ticket
 export const createTicket = async (req, res) => {
   try {
-    // Generate unique ticket ID (5-10 words)
-    const ticketId = generateTicketId();
+    // Generate unique ticket ID (5-10 words)=
 
     const ticket = await Ticket.create({
       ...req.body,
-      id: ticketId,
       userId: req.body.userId,
       status: "open",
     });
