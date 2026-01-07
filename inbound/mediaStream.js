@@ -312,7 +312,7 @@ export function attachMediaStreamServer(server) {
             .calls(callSid)
             .update({ status: "completed" })
             .catch(() => {});
-        }, 5000);
+        }, 7000);
       };
 
       const watchdog = setInterval(() => {
