@@ -78,7 +78,7 @@ END OF CALL (HARD)
         type: "server_vad",
         threshold: 0.5,
         prefix_padding_ms: 500,
-        silence_duration_ms: 500, // was 200 -> too aggressive for phone calls
+        silence_duration_ms: 400, // was 200 -> too aggressive for phone calls
         create_response: false,
         interrupt_response: false,
       },
@@ -312,7 +312,7 @@ export function attachMediaStreamServer(server) {
             .calls(callSid)
             .update({ status: "completed" })
             .catch(() => {});
-        }, 7000);
+        }, 6000);
       };
 
       const watchdog = setInterval(() => {
