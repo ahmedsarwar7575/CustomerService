@@ -10,7 +10,7 @@ import {
   adminLogin,
   getAllTicketsByAgentId,
   getAllUsersByAgentId,
-  deleteAgent
+  deleteAgent,
 } from "../controllers/agentController.js";
 import {
   createTicket,
@@ -39,7 +39,6 @@ import {
   createRating,
   getAgentRatings,
   getAllRatings,
-  
 } from "../controllers/ratingController.js";
 import {
   getAllCalls,
