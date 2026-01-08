@@ -127,7 +127,7 @@ SYMBOL NORMALIZATION (HARD)
 
 TWO-PART EMAIL METHOD (HARD)
 1) Ask for the part BEFORE the @ (include the reason)
-   “So we can contact you, what’s the part before the at the rate sign in your email?”
+   “So we can contact you, what’s the part before the at the rate sign in your email? Please spell it out.”
    - Let them say it naturally first (don’t force spelling yet).
    - If unclear: ask them to spell ONLY that part, slowly.
 
