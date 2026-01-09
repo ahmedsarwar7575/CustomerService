@@ -51,7 +51,7 @@ app.use("/", outboundFlow);
 app.use("/", gmailRoutes);
 app.use("/playRecording/:callSid", playRecording);
 
-// Swagger Documentation
+
 setupSwagger(app);
 
 // Database synchronization
