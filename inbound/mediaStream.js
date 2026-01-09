@@ -10,7 +10,7 @@ dotenv.config();
 
 const {
   OPENAI_API_KEY,
-  REALTIME_VOICE = "echo",
+  REALTIME_VOICE = "cedar",
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   PUBLIC_BASE_URL,

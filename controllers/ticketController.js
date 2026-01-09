@@ -9,22 +9,35 @@ const nz = (arr) => (Array.isArray(arr) ? arr : []);
 // Create new ticket
 export const createTicket = async (req, res) => {
   try {
-    // Generate unique ticket ID (5-10 words)=
+    const { callId, userId, ...rest } = req.body;
+
+    const existingCall = await Call.findOne({ where: { id: callId } });
+    if (!existingCall) {
+      return res.status(404).json({ message: "Call not found" });
+    }
 
     const ticket = await Ticket.create({
-      ...req.body,
-      userId: req.body.userId,
+      ...rest,
+      userId,
       status: "open",
     });
 
-    res.status(201).json({
+    const callData = existingCall.get({ plain: true });
+    delete callData.id;                 // important
+    callData.ticketId = ticket.id;
+
+    const newCall = await Call.create(callData);
+
+    return res.status(201).json({
       message: "Ticket created successfully",
       ticket,
+      call: newCall.id,
     });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return res.status(400).json({ error: error.message });
   }
 };
+
 
 // Assign ticket to agent
 export const assignTicket = async (req, res) => {
