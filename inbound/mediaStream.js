@@ -73,31 +73,46 @@ END OF CALL (HARD)
   return {
     type: "session.update",
     session: {
-      // Key: make VAD less aggressive so it doesn’t “end the turn” on tiny pauses.
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.5,
-        prefix_padding_ms: 500,
-        silence_duration_ms: 400, // was 200 -> too aggressive for phone calls
-        create_response: false,
-        interrupt_response: false,
-      },
+      type: "realtime",
 
-      input_audio_format: "g711_ulaw",
-      output_audio_format: "g711_ulaw",
-      voice: REALTIME_VOICE,
+      // If you want both audio + text in response.done:
+      output_modalities: ["audio", "text"],
 
       instructions: SYSTEM_MESSAGE + dynamicContext,
-      modalities: ["text", "audio"],
       temperature: 0.8,
 
-      // If you want better phone-call transcription, try:
-      // model: "gpt-4o-mini-transcribe"
-      input_audio_transcription: {
-        model: "whisper-1",
-        language: "en",
-        prompt:
-          "The caller is speaking English (even with an accent). Always transcribe to English.",
+      audio: {
+        input: {
+          // Twilio media stream is μ-law
+          format: { type: "audio/pcmu" },
+
+          // Put VAD config here (same values you already tuned)
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 500,
+            silence_duration_ms: 400,
+            create_response: false,
+            interrupt_response: false,
+          },
+
+          transcription: {
+            model: "whisper-1",
+            language: "en",
+            prompt:
+              "The caller is speaking English (even with an accent). Always transcribe to English.",
+          },
+        },
+
+        output: {
+          // MUST match Twilio playback
+          format: { type: "audio/pcmu" },
+
+          voice: REALTIME_VOICE,
+
+          // 🔥 speed it up (1.0 default, max 1.5)
+          speed: 1.3,
+        },
       },
     },
   };
@@ -425,6 +440,7 @@ export function attachMediaStreamServer(server) {
 
         // Response completed -> capture assistant text and pair with the correct user item_id
         if (msg.type === "response.done") {
+          
           hasActiveResponse = false;
           responseStartedAt = 0;
 
