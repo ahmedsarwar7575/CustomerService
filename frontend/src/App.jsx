@@ -65,7 +65,9 @@ export default function Dialer() {
     if (starting || deviceRef.current) return;
     setStarting(true);
     try {
-      const { token } = await fetchToken();
+      const { token, identity  } = await fetchToken();
+      console.log("token", token);
+      console.log("identity", identity);
       const device = new Device(token, { logLevel: 1 });
       deviceRef.current = device;
 

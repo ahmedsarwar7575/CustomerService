@@ -32,7 +32,10 @@ router.get("/token", (req, res) => {
     outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID_SDK,
     incomingAllow: true,
   });
-
+  console.log("TOKEN ISSUED", {
+    accountSid: process.env.TWILIO_ACCOUNT_SID,
+    identity: req.query.identity
+  });
   token.addGrant(grant);
 
   res.json({ identity, token: token.toJwt() });
@@ -61,12 +64,24 @@ router.post("/voice", (req, res) => {
 
 // ✅ 3) TwiML for inbound calls to ring your web agent
 router.post("/incoming", (req, res) => {
-  console.log(req.body);
-  console.log("Incoming call");
   const twiml = new twilio.twiml.VoiceResponse();
-  const dial = twiml.dial();
+  const dial = twiml.dial({
+    timeout: 20,
+    action: "/twilio/dial-result",
+    method: "POST",
+    answerOnBridge: true
+  });
   dial.client("agent_demo");
   res.type("text/xml").send(twiml.toString());
+});
+
+router.post("/dial-result", (req, res) => {
+  console.log("DIAL RESULT", {
+    DialCallStatus: req.body.DialCallStatus,
+    DialCallSid: req.body.DialCallSid,
+    CallSid: req.body.CallSid
+  });
+  res.sendStatus(200);
 });
 
 export default router;
