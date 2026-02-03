@@ -11,6 +11,10 @@ import recording from "./routes/recording.js";
 import { playRecording } from "./controllers/Call.js";
 import outbound from "./outbound/outboundByAgent.js";
 import outboundFlow from "./outbound/outboundRoutes.js";
+import dailer from "./routes/dialer.js";
+
+import twilioVoiceRoutes from "./routes/twilioVoice.js";
+
 // import seedDatabase from "./config/seed.js";
 import gmailRoutes from "./routes/gmail.js";
 const app = express();
@@ -31,6 +35,7 @@ app.use(
 );
 app.options("*", cors()); // answer all preflights
 
+
 // (optional but helps when some middleware blocks OPTIONS)
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
@@ -49,6 +54,9 @@ app.use("/", recording);
 app.use("/", outbound);
 app.use("/", outboundFlow);
 app.use("/", gmailRoutes);
+app.use("/dialer", dailer);
+app.use("/twilio", twilioVoiceRoutes);
+
 app.use("/playRecording/:callSid", playRecording);
 
 
