@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Device } from "@twilio/voice-sdk";
 
-const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:3000";
+const API = import.meta.env.VITE_API_BASE_URL || "https://csagentbackend.getpie.io";
 
 export default function Dialer() {
   const deviceRef = useRef(null);

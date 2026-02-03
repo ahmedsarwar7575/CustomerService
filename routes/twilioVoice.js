@@ -61,6 +61,8 @@ router.post("/voice", (req, res) => {
 
 // ✅ 3) TwiML for inbound calls to ring your web agent
 router.post("/incoming", (req, res) => {
+  console.log(req.body);
+  console.log("Incoming call");
   const twiml = new twilio.twiml.VoiceResponse();
   const dial = twiml.dial();
   dial.client("agent_demo");
