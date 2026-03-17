@@ -62,6 +62,8 @@ import {
   
   export async function inboundVoiceWebhook(req, res) {
     try {
+      console.log("INBOUND VOICE WEBHOOK", req.body);
+      console.log("call ")
       const result = await handleInboundVoiceRequest(req.body);
   
       const twiml = buildInboundTwiml({
