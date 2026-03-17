@@ -2,7 +2,6 @@ import twilio from "twilio";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import sequelize from "../config/db.js";
-import Agent from "../models/agent.js";
 import Call from "../models/Call.js";
 import Ticket from "../models/ticket.js";
 import User from "../models/user.js";
@@ -86,28 +85,44 @@ export function isSafeClientIdentity(value) {
   return /^[a-zA-Z0-9_.-]{1,64}$/.test(str(value));
 }
 
-function getVoiceAccountSid() {
-  return str(
+function getVoiceConfig() {
+  const phoneAccountSid = str(process.env.TWILIO_ACCOUNT_SID);
+  const sdkAccountSid = str(
     process.env.TWILIO_ACCOUNT_SID_SDK || process.env.TWILIO_ACCOUNT_SID
   );
-}
 
-function getVoiceApiKeySid() {
-  return str(process.env.TWILIO_API_KEY_SID_SDK);
-}
-
-function getVoiceApiKeySecret() {
-  return str(process.env.TWILIO_API_KEY_SECRET_SDK);
-}
-
-function getVoiceAppSid() {
-  return str(
-    process.env.TWILIO_TWIML_APP_SID_SDK || process.env.TWILIO_TWIML_APP_SID
+  const apiKeySid = str(
+    process.env.TWILIO_API_KEY_SID || process.env.TWILIO_API_KEY_SID_SDK
   );
-}
+  const apiKeySecret = str(
+    process.env.TWILIO_API_KEY_SECRET || process.env.TWILIO_API_KEY_SECRET_SDK
+  );
+  const twimlAppSid = str(
+    process.env.TWILIO_TWIML_APP_SID || process.env.TWILIO_TWIML_APP_SID_SDK
+  );
+  const callerId = str(
+    process.env.TWILIO_CALLER_ID || process.env.TWILIO_CALLER_ID_SDK
+  );
 
-function getCallerId() {
-  return str(process.env.TWILIO_CALLER_ID_SDK || process.env.TWILIO_CALLER_ID);
+  if (!sdkAccountSid || !apiKeySid || !apiKeySecret || !twimlAppSid) {
+    throw new Error(
+      "Twilio Voice configuration is incomplete. Check account SID, API key SID, API key secret, and TwiML App SID."
+    );
+  }
+
+  if (phoneAccountSid && sdkAccountSid && phoneAccountSid !== sdkAccountSid) {
+    throw new Error(
+      "TWILIO_ACCOUNT_SID_SDK must match TWILIO_ACCOUNT_SID for inbound browser calls."
+    );
+  }
+
+  return {
+    accountSid: sdkAccountSid,
+    apiKeySid,
+    apiKeySecret,
+    twimlAppSid,
+    callerId,
+  };
 }
 
 function getModelFieldNames(Model) {
@@ -296,28 +311,22 @@ async function saveOrUpdateCall({
 
 export async function createVoiceAccessToken(req) {
   const agent = getAgentFromReq(req);
-
-  const accountSid = getVoiceAccountSid();
-  const apiKeySid = getVoiceApiKeySid();
-  const apiKeySecret = getVoiceApiKeySecret();
-  const twimlAppSid = getVoiceAppSid();
-
-  if (!accountSid || !apiKeySid || !apiKeySecret || !twimlAppSid) {
-    throw new Error(
-      "Twilio Voice token configuration is incomplete. Check account SID, API key SID, API key secret, and TwiML App SID."
-    );
-  }
-
+  const voice = getVoiceConfig();
   const identity = buildAgentIdentity(agent.id);
 
-  const token = new AccessToken(accountSid, apiKeySid, apiKeySecret, {
-    identity,
-    ttl: 3600,
-  });
+  const token = new AccessToken(
+    voice.accountSid,
+    voice.apiKeySid,
+    voice.apiKeySecret,
+    {
+      identity,
+      ttl: 3600,
+    }
+  );
 
   token.addGrant(
     new VoiceGrant({
-      outgoingApplicationSid: twimlAppSid,
+      outgoingApplicationSid: voice.twimlAppSid,
       incomingAllow: true,
     })
   );
@@ -341,9 +350,9 @@ export async function handleOutboundVoiceRequest(body) {
     throw new Error("Missing destination number or client identity.");
   }
 
-  const callerId = getCallerId();
+  const { callerId } = getVoiceConfig();
   if (!callerId) {
-    throw new Error("TWILIO_CALLER_ID_SDK or TWILIO_CALLER_ID is missing.");
+    throw new Error("TWILIO_CALLER_ID is missing.");
   }
 
   const callSid = str(body.CallSid);
