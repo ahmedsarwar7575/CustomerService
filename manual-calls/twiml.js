@@ -40,7 +40,12 @@ export function buildOutboundTwiml({
   );
 }
 
-export function buildInboundTwiml({ identity, fallbackMessage }) {
+export function buildInboundTwiml({
+  identity,
+  statusCallbackUrl,
+  recordingStatusCallbackUrl,
+  fallbackMessage,
+}) {
   const response = new twilio.twiml.VoiceResponse();
 
   if (!identity) {
@@ -52,9 +57,20 @@ export function buildInboundTwiml({ identity, fallbackMessage }) {
   const dial = response.dial({
     answerOnBridge: true,
     timeout: 25,
+    record: "record-from-answer-dual",
+    recordingTrack: "both",
+    recordingStatusCallback: recordingStatusCallbackUrl,
+    recordingStatusCallbackMethod: "POST",
   });
 
-  dial.client(identity);
+  dial.client(
+    {
+      statusCallbackEvent: "initiated ringing answered completed",
+      statusCallback: statusCallbackUrl,
+      statusCallbackMethod: "POST",
+    },
+    identity
+  );
 
   return response.toString();
 }
