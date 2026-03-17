@@ -47,6 +47,10 @@ const Ticket = sequelize.define(
       allowNull: true,
       defaultValue: [],
     },
+    isManualCall: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false
+    },
   },
   {
     tableName: "tickets",
