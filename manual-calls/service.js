@@ -36,6 +36,24 @@ function obj(value) {
     : {};
 }
 
+function debug(label, payload) {
+  try {
+    console.log(
+      `[MANUAL_CALLS_SERVICE] ${label}`,
+      JSON.stringify(payload, null, 2)
+    );
+  } catch {
+    console.log(`[MANUAL_CALLS_SERVICE] ${label}`, payload);
+  }
+}
+
+function mask(value) {
+  const text = str(value);
+  if (!text) return null;
+  if (text.length <= 8) return text;
+  return `${text.slice(0, 4)}...${text.slice(-4)}`;
+}
+
 export function getBaseUrl(req) {
   const envUrl = str(process.env.PUBLIC_BASE_URL);
   if (envUrl) {
@@ -85,44 +103,28 @@ export function isSafeClientIdentity(value) {
   return /^[a-zA-Z0-9_.-]{1,64}$/.test(str(value));
 }
 
-function getVoiceConfig() {
-  const phoneAccountSid = str(process.env.TWILIO_ACCOUNT_SID);
-  const sdkAccountSid = str(
+function getVoiceAccountSid() {
+  return str(
     process.env.TWILIO_ACCOUNT_SID_SDK || process.env.TWILIO_ACCOUNT_SID
   );
+}
 
-  const apiKeySid = str(
-    process.env.TWILIO_API_KEY_SID || process.env.TWILIO_API_KEY_SID_SDK
-  );
-  const apiKeySecret = str(
-    process.env.TWILIO_API_KEY_SECRET || process.env.TWILIO_API_KEY_SECRET_SDK
-  );
-  const twimlAppSid = str(
-    process.env.TWILIO_TWIML_APP_SID || process.env.TWILIO_TWIML_APP_SID_SDK
-  );
-  const callerId = str(
-    process.env.TWILIO_CALLER_ID || process.env.TWILIO_CALLER_ID_SDK
-  );
+function getVoiceApiKeySid() {
+  return str(process.env.TWILIO_API_KEY_SID_SDK);
+}
 
-  if (!sdkAccountSid || !apiKeySid || !apiKeySecret || !twimlAppSid) {
-    throw new Error(
-      "Twilio Voice configuration is incomplete. Check account SID, API key SID, API key secret, and TwiML App SID."
-    );
-  }
+function getVoiceApiKeySecret() {
+  return str(process.env.TWILIO_API_KEY_SECRET_SDK);
+}
 
-  if (phoneAccountSid && sdkAccountSid && phoneAccountSid !== sdkAccountSid) {
-    throw new Error(
-      "TWILIO_ACCOUNT_SID_SDK must match TWILIO_ACCOUNT_SID for inbound browser calls."
-    );
-  }
+function getVoiceAppSid() {
+  return str(
+    process.env.TWILIO_TWIML_APP_SID_SDK || process.env.TWILIO_TWIML_APP_SID
+  );
+}
 
-  return {
-    accountSid: sdkAccountSid,
-    apiKeySid,
-    apiKeySecret,
-    twimlAppSid,
-    callerId,
-  };
+function getCallerId() {
+  return str(process.env.TWILIO_CALLER_ID_SDK || process.env.TWILIO_CALLER_ID);
 }
 
 function getModelFieldNames(Model) {
@@ -300,6 +302,18 @@ async function saveOrUpdateCall({
     outboundDetails: nextMeta,
   });
 
+  debug("SAVE_OR_UPDATE_CALL", {
+    existingCallSid: existing?.callSid || null,
+    callSid,
+    direction,
+    from,
+    to,
+    agentId,
+    customerPhone,
+    type,
+    isManualCall: true,
+  });
+
   if (existing) {
     await existing.update(payload);
     return existing.reload();
@@ -311,22 +325,36 @@ async function saveOrUpdateCall({
 
 export async function createVoiceAccessToken(req) {
   const agent = getAgentFromReq(req);
-  const voice = getVoiceConfig();
+
+  const accountSid = getVoiceAccountSid();
+  const apiKeySid = getVoiceApiKeySid();
+  const apiKeySecret = getVoiceApiKeySecret();
+  const twimlAppSid = getVoiceAppSid();
+
+  if (!accountSid || !apiKeySid || !apiKeySecret || !twimlAppSid) {
+    throw new Error(
+      "Twilio Voice token configuration is incomplete. Check account SID, API key SID, API key secret, and TwiML App SID."
+    );
+  }
+
   const identity = buildAgentIdentity(agent.id);
 
-  const token = new AccessToken(
-    voice.accountSid,
-    voice.apiKeySid,
-    voice.apiKeySecret,
-    {
-      identity,
-      ttl: 3600,
-    }
-  );
+  debug("VOICE_TOKEN_CONFIG", {
+    accountSid: mask(accountSid),
+    apiKeySid: mask(apiKeySid),
+    twimlAppSid: mask(twimlAppSid),
+    identity,
+    baseUrl: getBaseUrl(req),
+  });
+
+  const token = new AccessToken(accountSid, apiKeySid, apiKeySecret, {
+    identity,
+    ttl: 3600,
+  });
 
   token.addGrant(
     new VoiceGrant({
-      outgoingApplicationSid: voice.twimlAppSid,
+      outgoingApplicationSid: twimlAppSid,
       incomingAllow: true,
     })
   );
@@ -350,14 +378,23 @@ export async function handleOutboundVoiceRequest(body) {
     throw new Error("Missing destination number or client identity.");
   }
 
-  const { callerId } = getVoiceConfig();
+  const callerId = getCallerId();
   if (!callerId) {
-    throw new Error("TWILIO_CALLER_ID is missing.");
+    throw new Error("TWILIO_CALLER_ID_SDK or TWILIO_CALLER_ID is missing.");
   }
 
   const callSid = str(body.CallSid);
   const from = str(body.From || body.Caller || "");
   const agentId = parseAgentIdFromIdentity(from);
+
+  debug("HANDLE_OUTBOUND_VOICE_REQUEST", {
+    callSid,
+    from,
+    to,
+    callerId,
+    agentId,
+    rawBody: body,
+  });
 
   await saveOrUpdateCall({
     callSid,
@@ -383,7 +420,13 @@ export async function handleInboundVoiceRequest(body) {
     process.env.MANUAL_INBOUND_AGENT_IDENTITY || "manual_agent_1"
   );
 
-  console.log("INBOUND TARGET IDENTITY", identity);
+  debug("HANDLE_INBOUND_VOICE_REQUEST", {
+    callSid,
+    from,
+    to,
+    identity,
+    rawBody: body,
+  });
 
   await saveOrUpdateCall({
     callSid,
@@ -409,11 +452,28 @@ export async function handleCallStatusWebhook(body) {
   const to = str(body.To || body.Called || "");
   const direction = inferDirection(from, to);
 
+  debug("HANDLE_CALL_STATUS_WEBHOOK_START", {
+    candidateSid,
+    callSid: str(body.CallSid),
+    parentCallSid: str(body.ParentCallSid),
+    dialCallSid: str(body.DialCallSid),
+    callStatus: str(body.CallStatus),
+    dialCallStatus: str(body.DialCallStatus),
+    from,
+    to,
+    direction,
+    rawBody: body,
+  });
+
   let call = await findCallByAnySid([
     body.ParentCallSid,
     body.CallSid,
     body.DialCallSid,
   ]);
+
+  debug("HANDLE_CALL_STATUS_WEBHOOK_LOOKUP", {
+    foundCallSid: call?.callSid || null,
+  });
 
   if (!call) {
     call = await saveOrUpdateCall({
@@ -465,6 +525,14 @@ export async function handleCallStatusWebhook(body) {
 
   await call.update(payload);
 
+  debug("HANDLE_CALL_STATUS_WEBHOOK_DONE", {
+    storedCallSid: call.callSid,
+    updatedStatus: nextMeta.status,
+    parentCallSid: str(body.ParentCallSid) || null,
+    currentWebhookCallSid: str(body.CallSid) || null,
+    dialCallSid: str(body.DialCallSid) || null,
+  });
+
   return {
     callSid: call.callSid,
   };
@@ -475,6 +543,14 @@ export async function handleRecordingWebhook(body) {
   const recordingStatus = str(body.RecordingStatus);
   const recordingUrl = str(body.RecordingUrl);
   const recordingSid = str(body.RecordingSid);
+
+  debug("HANDLE_RECORDING_WEBHOOK_START", {
+    callSid,
+    recordingSid,
+    recordingStatus,
+    recordingUrl,
+    rawBody: body,
+  });
 
   if (!callSid) {
     throw new Error("Recording webhook is missing CallSid.");
@@ -519,7 +595,7 @@ export async function handleRecordingWebhook(body) {
     })
   );
 
-  return {
+  const result = {
     shouldProcess:
       recordingStatus.toLowerCase() === "completed" &&
       Boolean(recordingUrl) &&
@@ -531,6 +607,10 @@ export async function handleRecordingWebhook(body) {
     recordingDuration: parseIntSafe(body.RecordingDuration),
     recordingChannels: parseIntSafe(body.RecordingChannels),
   };
+
+  debug("HANDLE_RECORDING_WEBHOOK_DONE", result);
+
+  return result;
 }
 
 export async function updateCallRecordingMeta(callSid, patch) {
