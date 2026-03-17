@@ -61,7 +61,11 @@ const Call = sequelize.define('Call', {
     // only meaningful for upsell calls
     type: DataTypes.BOOLEAN,
     allowNull: true,
-  }
+  },
+  isManualCall: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
 }, {
   tableName: 'calls',
   timestamps: true

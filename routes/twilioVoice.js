@@ -3,21 +3,43 @@ import twilio from "twilio";
 
 const router = express.Router();
 
-// For Twilio webhooks (POST form-encoded)
 router.use(express.urlencoded({ extended: false }));
 
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
+const DEFAULT_IDENTITY = "agent_demo";
 
 function getIdentity(req) {
-  return req.query.identity || "agent_demo";
+  return String(req.query.identity || DEFAULT_IDENTITY).trim();
 }
 
-function isE164(str = "") {
-  return /^\+?[1-9]\d{6,14}$/.test(str.replace(/\s+/g, ""));
+function isE164(value = "") {
+  const normalized = String(value).replace(/\s+/g, "");
+  return /^\+[1-9]\d{6,14}$/.test(normalized);
 }
 
-// ✅ 1) Token endpoint for browser
+function isSafeClientIdentity(value = "") {
+  return /^[a-zA-Z0-9_.-]{1,64}$/.test(String(value).trim());
+}
+
+function getBaseUrl(req) {
+  const envUrl = String(process.env.PUBLIC_BASE_URL || "").trim();
+  if (envUrl) {
+    return envUrl.replace(/\/+$/, "");
+  }
+
+  const proto =
+    String(req.headers["x-forwarded-proto"] || "")
+      .split(",")[0]
+      .trim() || req.protocol;
+  const host = req.get("host");
+  return `${proto}://${host}`;
+}
+
+function absoluteUrl(req, path) {
+  return `${getBaseUrl(req)}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 router.get("/token", (req, res) => {
   const identity = getIdentity(req);
 
@@ -28,60 +50,89 @@ router.get("/token", (req, res) => {
     { identity, ttl: 3600 }
   );
 
-  const grant = new VoiceGrant({
-    outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID_SDK,
-    incomingAllow: true,
-  });
-  console.log("TOKEN ISSUED", {
-    accountSid: process.env.TWILIO_ACCOUNT_SID,
-    identity: req.query.identity
-  });
-  token.addGrant(grant);
+  token.addGrant(
+    new VoiceGrant({
+      outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID_SDK,
+      incomingAllow: true,
+    })
+  );
 
-  res.json({ identity, token: token.toJwt() });
+  res.json({
+    identity,
+    token: token.toJwt(),
+  });
 });
 
-// ✅ 2) TwiML for outbound calls from browser
 router.post("/voice", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
-  const to = req.body.To;
+  const to = String(req.body.To || "").trim();
 
   if (!to) {
-    twiml.say("Missing To.");
+    twiml.say("Missing destination.");
     return res.type("text/xml").send(twiml.toString());
   }
 
+  const dialOptions = {
+    callerId: process.env.TWILIO_CALLER_ID_SDK,
+    action: absoluteUrl(req, "/twilio/dial-result"),
+    method: "POST",
+    record: "record-from-answer-dual",
+    recordingTrack: "both",
+    recordingStatusCallback: absoluteUrl(req, "/twilio/recording-status"),
+    recordingStatusCallbackMethod: "POST",
+  };
+
   if (isE164(to)) {
-    const dial = twiml.dial({ callerId: process.env.TWILIO_CALLER_ID_SDK });
-    dial.number(to);
-  } else {
-    const dial = twiml.dial();
-    dial.client(to);
+    const dial = twiml.dial(dialOptions);
+    dial.number(to.replace(/\s+/g, ""));
+    return res.type("text/xml").send(twiml.toString());
   }
 
-  res.type("text/xml").send(twiml.toString());
+  if (isSafeClientIdentity(to)) {
+    const dial = twiml.dial({
+      action: absoluteUrl(req, "/twilio/dial-result"),
+      method: "POST",
+      record: "record-from-answer-dual",
+      recordingTrack: "both",
+      recordingStatusCallback: absoluteUrl(req, "/twilio/recording-status"),
+      recordingStatusCallbackMethod: "POST",
+    });
+    dial.client(to);
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  twiml.say("Invalid destination.");
+  return res.type("text/xml").send(twiml.toString());
 });
 
-// ✅ 3) TwiML for inbound calls to ring your web agent
 router.post("/incoming", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
+
   const dial = twiml.dial({
     timeout: 20,
-    action: "/twilio/dial-result",
+    answerOnBridge: true,
+    action: absoluteUrl(req, "/twilio/dial-result"),
     method: "POST",
-    answerOnBridge: true
+    record: "record-from-answer-dual",
+    recordingTrack: "both",
+    recordingStatusCallback: absoluteUrl(req, "/twilio/recording-status"),
+    recordingStatusCallbackMethod: "POST",
   });
-  dial.client("agent_demo");
-  res.type("text/xml").send(twiml.toString());
+
+  dial.client(DEFAULT_IDENTITY);
+
+  return res.type("text/xml").send(twiml.toString());
 });
 
 router.post("/dial-result", (req, res) => {
   console.log("DIAL RESULT", {
     DialCallStatus: req.body.DialCallStatus,
     DialCallSid: req.body.DialCallSid,
-    CallSid: req.body.CallSid
+    CallSid: req.body.CallSid,
   });
-  res.sendStatus(200);
+
+  const twiml = new twilio.twiml.VoiceResponse();
+  return res.type("text/xml").send(twiml.toString());
 });
 
 export default router;

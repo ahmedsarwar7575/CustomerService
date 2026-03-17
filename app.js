@@ -12,13 +12,13 @@ import { playRecording } from "./controllers/Call.js";
 import outbound from "./outbound/outboundByAgent.js";
 import outboundFlow from "./outbound/outboundRoutes.js";
 import dailer from "./routes/dialer.js";
-
+import manualCallsRouter from "./manual-calls/index.js";
 import twilioVoiceRoutes from "./routes/twilioVoice.js";
 
 // import seedDatabase from "./config/seed.js";
 import gmailRoutes from "./routes/gmail.js";
 const app = express();
-
+app.set("trust proxy", true);
 app.use(
   cors({
     origin: (origin, cb) => cb(null, true), // reflect any origin
@@ -56,6 +56,7 @@ app.use("/", outboundFlow);
 app.use("/", gmailRoutes);
 app.use("/dialer", dailer);
 app.use("/twilio", twilioVoiceRoutes);
+app.use("/manual-calls", manualCallsRouter);
 
 app.use("/playRecording/:callSid", playRecording);
 

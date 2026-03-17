@@ -43,6 +43,10 @@ const User = sequelize.define('User', {
     type: DataTypes.BOOLEAN,
     defaultValue: false
   },
+  isManualCall: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
 }, {
   tableName: 'users',
   timestamps: true
