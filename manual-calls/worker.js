@@ -38,6 +38,17 @@ function str(value) {
   return String(value || "").trim();
 }
 
+function log(label, payload) {
+  try {
+    console.log(
+      `[MANUAL_CALLS_WORKER] ${label}`,
+      JSON.stringify(payload, null, 2)
+    );
+  } catch {
+    console.log(`[MANUAL_CALLS_WORKER] ${label}`, payload);
+  }
+}
+
 function buildRecordingDownloadUrl(recordingUrl, recordingChannels) {
   let url = str(recordingUrl);
 
@@ -49,7 +60,10 @@ function buildRecordingDownloadUrl(recordingUrl, recordingChannels) {
     url = `${url}.mp3`;
   }
 
-  if (String(recordingChannels) === "2" && !url.includes("RequestedChannels=2")) {
+  if (
+    String(recordingChannels) === "2" &&
+    !url.includes("RequestedChannels=2")
+  ) {
     url += url.includes("?") ? "&RequestedChannels=2" : "?RequestedChannels=2";
   }
 
@@ -76,6 +90,12 @@ async function downloadRecordingToTemp({
 
   const url = buildRecordingDownloadUrl(recordingUrl, recordingChannels);
 
+  log("DOWNLOAD_RECORDING_START", {
+    url,
+    tempPath,
+    recordingChannels,
+  });
+
   const response = await axios.get(url, {
     responseType: "stream",
     auth: {
@@ -94,6 +114,11 @@ async function downloadRecordingToTemp({
     throw new Error("Downloaded recording file is empty.");
   }
 
+  log("DOWNLOAD_RECORDING_DONE", {
+    tempPath,
+    size: stats.size,
+  });
+
   return {
     tempPath,
     size: stats.size,
@@ -103,6 +128,12 @@ async function downloadRecordingToTemp({
 async function uploadToS3({ callSid, recordingSid, tempPath }) {
   const date = new Date().toISOString().slice(0, 10);
   const key = `manual-calls/${date}/${callSid}/${recordingSid}.mp3`;
+
+  log("UPLOAD_TO_S3_START", {
+    callSid,
+    recordingSid,
+    key,
+  });
 
   await new Upload({
     client: s3,
@@ -114,11 +145,22 @@ async function uploadToS3({ callSid, recordingSid, tempPath }) {
     },
   }).done();
 
+  log("UPLOAD_TO_S3_DONE", {
+    callSid,
+    recordingSid,
+    key,
+  });
+
   return key;
 }
 
 async function transcribeAudio(tempPath) {
   const stats = await fs.promises.stat(tempPath);
+
+  log("TRANSCRIBE_AUDIO_START", {
+    tempPath,
+    size: stats.size,
+  });
 
   if (stats.size > MAX_TRANSCRIPTION_BYTES) {
     throw new Error(
@@ -137,11 +179,18 @@ async function transcribeAudio(tempPath) {
     throw new Error("Transcription returned empty text.");
   }
 
+  log("TRANSCRIBE_AUDIO_DONE", {
+    transcriptLength: text.trim().length,
+  });
+
   return text.trim();
 }
 
 function extractResponseText(response) {
-  if (typeof response?.output_text === "string" && response.output_text.trim()) {
+  if (
+    typeof response?.output_text === "string" &&
+    response.output_text.trim()
+  ) {
     return response.output_text.trim();
   }
 
@@ -160,6 +209,10 @@ function extractResponseText(response) {
 }
 
 async function analyzeTranscript(transcriptText) {
+  log("ANALYZE_TRANSCRIPT_START", {
+    transcriptLength: str(transcriptText).length,
+  });
+
   const response = await openai.responses.create({
     model: process.env.OPENAI_ANALYSIS_MODEL || "gpt-4o-mini",
     input: [
@@ -194,6 +247,15 @@ async function analyzeTranscript(transcriptText) {
     throw new Error("OpenAI analysis returned invalid JSON.");
   }
 
+  log("ANALYZE_TRANSCRIPT_DONE", {
+    isMeaningfulConversation: parsed.isMeaningfulConversation,
+    issueResolved: parsed.issueResolved,
+    ticketType: parsed.ticketType,
+    priority: parsed.priority,
+    callCategory: parsed.callCategory,
+    languages: parsed.languages,
+  });
+
   return parsed;
 }
 
@@ -202,6 +264,7 @@ async function cleanupTempFile(tempPath) {
 
   try {
     await fs.promises.unlink(tempPath);
+    log("CLEANUP_TEMP_FILE_DONE", { tempPath });
   } catch {}
 }
 
@@ -215,6 +278,16 @@ export async function runPostCallPipeline({
 }) {
   const tempPath = buildTempFilePath(callSid, recordingSid);
 
+  log("RUN_POST_CALL_PIPELINE_START", {
+    callSid,
+    recordingSid,
+    recordingUrl,
+    recordingChannels,
+    recordingDuration,
+    recordingStatus,
+    tempPath,
+  });
+
   try {
     await updateCallRecordingMeta(callSid, {
       recordingSid,
@@ -223,6 +296,10 @@ export async function runPostCallPipeline({
       recordingChannels: recordingChannels || null,
       transcriptionStatus: "processing",
       analysisStatus: "pending",
+    });
+
+    log("RUN_POST_CALL_PIPELINE_META_UPDATED_1", {
+      callSid,
     });
 
     await downloadRecordingToTemp({
@@ -243,11 +320,20 @@ export async function runPostCallPipeline({
       analysisStatus: "pending",
     });
 
+    log("RUN_POST_CALL_PIPELINE_META_UPDATED_2", {
+      callSid,
+      s3Key,
+    });
+
     const transcriptText = await transcribeAudio(tempPath);
 
     await updateCallRecordingMeta(callSid, {
       transcriptionStatus: "completed",
       analysisStatus: "processing",
+    });
+
+    log("RUN_POST_CALL_PIPELINE_META_UPDATED_3", {
+      callSid,
     });
 
     const analysis = await analyzeTranscript(transcriptText);
@@ -265,18 +351,29 @@ export async function runPostCallPipeline({
       },
     });
 
+    log("RUN_POST_CALL_PIPELINE_DONE", {
+      callSid,
+      result,
+    });
+
     return {
       success: true,
       callSid,
       ...result,
     };
   } catch (error) {
-    const stage =
-      /transcription/i.test(error?.message || "")
-        ? "transcription"
-        : /analysis/i.test(error?.message || "")
-        ? "analysis"
-        : "pipeline";
+    const stage = /transcription/i.test(error?.message || "")
+      ? "transcription"
+      : /analysis/i.test(error?.message || "")
+      ? "analysis"
+      : "pipeline";
+
+    log("RUN_POST_CALL_PIPELINE_ERROR", {
+      callSid,
+      stage,
+      message: error?.message || String(error),
+      stack: error?.stack || null,
+    });
 
     await markManualCallProcessingFailed(callSid, stage, error);
 

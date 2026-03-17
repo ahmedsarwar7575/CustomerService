@@ -36,7 +36,7 @@ function obj(value) {
     : {};
 }
 
-function debug(label, payload) {
+function log(label, payload) {
   try {
     console.log(
       `[MANUAL_CALLS_SERVICE] ${label}`,
@@ -302,16 +302,16 @@ async function saveOrUpdateCall({
     outboundDetails: nextMeta,
   });
 
-  debug("SAVE_OR_UPDATE_CALL", {
-    existingCallSid: existing?.callSid || null,
+  log("SAVE_OR_UPDATE_CALL", {
     callSid,
     direction,
     from,
     to,
     agentId,
-    customerPhone,
     type,
-    isManualCall: true,
+    customerPhone,
+    existing: Boolean(existing),
+    payloadKeys: Object.keys(payload),
   });
 
   if (existing) {
@@ -339,7 +339,7 @@ export async function createVoiceAccessToken(req) {
 
   const identity = buildAgentIdentity(agent.id);
 
-  debug("VOICE_TOKEN_CONFIG", {
+  log("VOICE_TOKEN_CONFIG", {
     accountSid: mask(accountSid),
     apiKeySid: mask(apiKeySid),
     twimlAppSid: mask(twimlAppSid),
@@ -387,13 +387,12 @@ export async function handleOutboundVoiceRequest(body) {
   const from = str(body.From || body.Caller || "");
   const agentId = parseAgentIdFromIdentity(from);
 
-  debug("HANDLE_OUTBOUND_VOICE_REQUEST", {
+  log("HANDLE_OUTBOUND_VOICE_REQUEST", {
     callSid,
     from,
     to,
     callerId,
     agentId,
-    rawBody: body,
   });
 
   await saveOrUpdateCall({
@@ -420,12 +419,11 @@ export async function handleInboundVoiceRequest(body) {
     process.env.MANUAL_INBOUND_AGENT_IDENTITY || "manual_agent_1"
   );
 
-  debug("HANDLE_INBOUND_VOICE_REQUEST", {
+  log("HANDLE_INBOUND_VOICE_REQUEST", {
     callSid,
     from,
     to,
     identity,
-    rawBody: body,
   });
 
   await saveOrUpdateCall({
@@ -452,7 +450,7 @@ export async function handleCallStatusWebhook(body) {
   const to = str(body.To || body.Called || "");
   const direction = inferDirection(from, to);
 
-  debug("HANDLE_CALL_STATUS_WEBHOOK_START", {
+  log("HANDLE_CALL_STATUS_WEBHOOK_START", {
     candidateSid,
     callSid: str(body.CallSid),
     parentCallSid: str(body.ParentCallSid),
@@ -462,7 +460,6 @@ export async function handleCallStatusWebhook(body) {
     from,
     to,
     direction,
-    rawBody: body,
   });
 
   let call = await findCallByAnySid([
@@ -471,7 +468,7 @@ export async function handleCallStatusWebhook(body) {
     body.DialCallSid,
   ]);
 
-  debug("HANDLE_CALL_STATUS_WEBHOOK_LOOKUP", {
+  log("HANDLE_CALL_STATUS_WEBHOOK_LOOKUP", {
     foundCallSid: call?.callSid || null,
   });
 
@@ -525,12 +522,9 @@ export async function handleCallStatusWebhook(body) {
 
   await call.update(payload);
 
-  debug("HANDLE_CALL_STATUS_WEBHOOK_DONE", {
+  log("HANDLE_CALL_STATUS_WEBHOOK_DONE", {
     storedCallSid: call.callSid,
     updatedStatus: nextMeta.status,
-    parentCallSid: str(body.ParentCallSid) || null,
-    currentWebhookCallSid: str(body.CallSid) || null,
-    dialCallSid: str(body.DialCallSid) || null,
   });
 
   return {
@@ -544,12 +538,13 @@ export async function handleRecordingWebhook(body) {
   const recordingUrl = str(body.RecordingUrl);
   const recordingSid = str(body.RecordingSid);
 
-  debug("HANDLE_RECORDING_WEBHOOK_START", {
+  log("HANDLE_RECORDING_WEBHOOK_START", {
     callSid,
     recordingSid,
     recordingStatus,
     recordingUrl,
-    rawBody: body,
+    recordingDuration: parseIntSafe(body.RecordingDuration),
+    recordingChannels: parseIntSafe(body.RecordingChannels),
   });
 
   if (!callSid) {
@@ -608,7 +603,7 @@ export async function handleRecordingWebhook(body) {
     recordingChannels: parseIntSafe(body.RecordingChannels),
   };
 
-  debug("HANDLE_RECORDING_WEBHOOK_DONE", result);
+  log("HANDLE_RECORDING_WEBHOOK_DONE", result);
 
   return result;
 }
@@ -620,6 +615,11 @@ export async function updateCallRecordingMeta(callSid, patch) {
   }
 
   const nextMeta = buildManualMeta(call.outboundDetails, patch);
+
+  log("UPDATE_CALL_RECORDING_META", {
+    callSid,
+    patch,
+  });
 
   await call.update(
     pickAllowedFields(Call, {
@@ -635,6 +635,12 @@ export async function updateCallRecordingMeta(callSid, patch) {
 export async function markManualCallProcessingFailed(callSid, stage, error) {
   const call = await findCallByAnySid([callSid]);
   if (!call) return null;
+
+  log("MARK_MANUAL_CALL_PROCESSING_FAILED", {
+    callSid,
+    stage,
+    message: error?.message || String(error),
+  });
 
   const meta = buildManualMeta(call.outboundDetails, {
     transcriptionStatus:
@@ -684,7 +690,24 @@ export async function finalizeManualCallProcessing({
     Boolean(analysis?.isMeaningfulConversation) &&
     str(transcriptText).length >= 15;
 
+  log("FINALIZE_MANUAL_CALL_PROCESSING_START", {
+    callSid,
+    s3Key,
+    transcriptLength: str(transcriptText).length,
+    meaningful,
+    issueResolved: analysis?.issueResolved,
+    customerName: analysis?.customerName || "",
+    languages: analysis?.languages || [],
+    ticketType: analysis?.ticketType || null,
+    priority: analysis?.priority || null,
+    callCategory: analysis?.callCategory || null,
+  });
+
   return sequelize.transaction(async (transaction) => {
+    log("FINALIZE_MANUAL_CALL_PROCESSING_TRANSACTION_BEGIN", {
+      callSid,
+    });
+
     const currentMeta = obj(call.outboundDetails);
     const customerPhone = str(currentMeta.customerPhone) || null;
     const agentId = currentMeta.agentId || null;
@@ -697,6 +720,12 @@ export async function finalizeManualCallProcessing({
         transaction,
       });
 
+      log("FINALIZE_USER_LOOKUP", {
+        callSid,
+        customerPhone,
+        foundUserId: user?.id || null,
+      });
+
       if (!user) {
         const userPayload = pickAllowedFields(User, {
           name: normalizeName(analysis?.customerName),
@@ -705,8 +734,19 @@ export async function finalizeManualCallProcessing({
           status: "active",
         });
 
+        log("FINALIZE_USER_CREATE", {
+          callSid,
+          userPayload,
+        });
+
         user = await User.create(userPayload, { transaction });
       }
+    } else {
+      log("FINALIZE_USER_SKIPPED", {
+        callSid,
+        meaningful,
+        customerPhone,
+      });
     }
 
     let ticket = null;
@@ -723,7 +763,18 @@ export async function finalizeManualCallProcessing({
         isManualCall: true,
       });
 
+      log("FINALIZE_TICKET_CREATE", {
+        callSid,
+        ticketPayload,
+      });
+
       ticket = await Ticket.create(ticketPayload, { transaction });
+    } else {
+      log("FINALIZE_TICKET_SKIPPED", {
+        callSid,
+        meaningful,
+        issueResolved: analysis?.issueResolved,
+      });
     }
 
     const nextMeta = buildManualMeta(currentMeta, {
@@ -772,14 +823,29 @@ export async function finalizeManualCallProcessing({
       outboundDetails: nextMeta,
     });
 
+    log("FINALIZE_CALL_UPDATE", {
+      callSid,
+      callPayloadKeys: Object.keys(callPayload),
+      userId: callPayload.userId || null,
+      ticketId: callPayload.ticketId || null,
+      summary: callPayload.summary || null,
+      languages: callPayload.languages || [],
+      callCategory: callPayload.callCategory || null,
+      isResolvedByAi: callPayload.isResolvedByAi,
+    });
+
     await call.update(callPayload, { transaction });
 
-    return {
+    const result = {
       callSid: call.callSid,
       userId: user?.id || null,
       ticketId: ticket?.id || null,
       meaningful,
     };
+
+    log("FINALIZE_MANUAL_CALL_PROCESSING_TRANSACTION_DONE", result);
+
+    return result;
   });
 }
 
