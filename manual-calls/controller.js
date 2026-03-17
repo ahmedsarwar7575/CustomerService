@@ -77,6 +77,8 @@ export async function inboundVoiceWebhook(req, res) {
     const twiml = buildInboundTwiml({
       identity: result.identity,
       from: req.body?.From || req.body?.Caller || "",
+      to: req.body?.To || req.body?.Called || "",
+      callSid: req.body?.CallSid || "",
       statusCallbackUrl: absoluteUrl(req, "/manual-calls/voice/status"),
       recordingStatusCallbackUrl: absoluteUrl(
         req,
