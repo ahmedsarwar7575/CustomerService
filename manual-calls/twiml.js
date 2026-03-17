@@ -1,83 +1,88 @@
 import twilio from "twilio";
 import { isE164, isSafeClientIdentity } from "./service.js";
 
-function createDial(statusCallbackUrl, recordingStatusCallbackUrl, extra = {}) {
-  const response = new twilio.twiml.VoiceResponse();
-
-  const dial = response.dial({
-    answerOnBridge: true,
-    timeout: 25,
-    method: "POST",
-    action: statusCallbackUrl,
-    record: "record-from-answer-dual",
-    recordingTrack: "both",
-    recordingStatusCallback: recordingStatusCallbackUrl,
-    recordingStatusCallbackMethod: "POST",
-    ...extra,
-  });
-
-  return { response, dial };
-}
-
 export function buildOutboundTwiml({
   to,
   callerId,
   statusCallbackUrl,
   recordingStatusCallbackUrl,
 }) {
-  const { response, dial } = createDial(statusCallbackUrl, recordingStatusCallbackUrl, {
+  const response = new twilio.twiml.VoiceResponse();
+
+  const dial = response.dial({
+    answerOnBridge: true,
+    timeout: 25,
     callerId,
+    record: "record-from-answer-dual",
+    recordingTrack: "both",
+    recordingStatusCallback: recordingStatusCallbackUrl,
+    recordingStatusCallbackMethod: "POST",
   });
 
-  const progressAttrs = {
+  const attrs = {
     statusCallbackEvent: "initiated ringing answered completed",
     statusCallback: statusCallbackUrl,
     statusCallbackMethod: "POST",
   };
 
   if (isE164(to)) {
-    dial.number(progressAttrs, to.replace(/\s+/g, ""));
+    dial.number(attrs, to.replace(/\s+/g, ""));
     return response.toString();
   }
 
   if (isSafeClientIdentity(to)) {
-    dial.client(progressAttrs, to);
+    dial.client(attrs, to);
     return response.toString();
   }
 
-  throw new Error("Destination is not a valid E.164 number or safe client identity.");
+  throw new Error(
+    "Destination is not a valid E.164 number or safe client identity."
+  );
 }
 
 export function buildInboundTwiml({
-  identities = [],
+  identity,
+  from,
   statusCallbackUrl,
   recordingStatusCallbackUrl,
   fallbackMessage,
 }) {
-  const cleanIdentities = identities.filter(Boolean);
+  const response = new twilio.twiml.VoiceResponse();
 
-  if (!cleanIdentities.length) {
-    return buildErrorTwiml(fallbackMessage || "No available agent.");
+  if (!identity) {
+    response.say({ voice: "alice" }, fallbackMessage || "No available agent.");
+    response.hangup();
+    return response.toString();
   }
 
-  const { response, dial } = createDial(statusCallbackUrl, recordingStatusCallbackUrl);
+  const dial = response.dial({
+    answerOnBridge: true,
+    timeout: 25,
+    callerId: from || undefined,
+    record: "record-from-answer-dual",
+    recordingTrack: "both",
+    recordingStatusCallback: recordingStatusCallbackUrl,
+    recordingStatusCallbackMethod: "POST",
+  });
 
-  const progressAttrs = {
-    statusCallbackEvent: "initiated ringing answered completed",
-    statusCallback: statusCallbackUrl,
-    statusCallbackMethod: "POST",
-  };
-
-  for (const identity of cleanIdentities) {
-    dial.client(progressAttrs, identity);
-  }
+  dial.client(
+    {
+      statusCallbackEvent: "initiated ringing answered completed",
+      statusCallback: statusCallbackUrl,
+      statusCallbackMethod: "POST",
+    },
+    identity
+  );
 
   return response.toString();
 }
 
 export function buildErrorTwiml(message) {
   const response = new twilio.twiml.VoiceResponse();
-  response.say({ voice: "alice" }, message || "We are unable to complete your request.");
+  response.say(
+    { voice: "alice" },
+    message || "We are unable to complete your request."
+  );
   response.hangup();
   return response.toString();
 }

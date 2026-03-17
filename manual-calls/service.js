@@ -175,7 +175,7 @@ function normalizeName(value) {
     .slice(0, 100);
 }
 
-function getAgentFromReq(req) {
+function getAgentFromReq() {
   return {
     id: 1,
     email: "testagent@getpie.com",
@@ -183,6 +183,7 @@ function getAgentFromReq(req) {
     lastName: "Agent",
   };
 }
+
 function buildAgentIdentity(agentId) {
   return `manual_agent_${agentId}`;
 }
@@ -334,22 +335,6 @@ export async function createVoiceAccessToken(req) {
   };
 }
 
-export async function resolveInboundIdentities() {
-  const singleIdentity = str(process.env.MANUAL_INBOUND_AGENT_IDENTITY);
-  if (singleIdentity) {
-    return [singleIdentity];
-  }
-
-  const agents = await Agent.findAll({
-    where: { isActive: true },
-    attributes: ["id"],
-    order: [["id", "ASC"]],
-    limit: 10,
-  });
-
-  return agents.map((agent) => buildAgentIdentity(agent.id));
-}
-
 export async function handleOutboundVoiceRequest(body) {
   const to = str(body.To);
   if (!to) {
@@ -385,14 +370,18 @@ export async function handleInboundVoiceRequest(body) {
   const callSid = str(body.CallSid);
   const from = str(body.From || body.Caller || "");
   const to = str(body.To || body.Called || "");
-  const identities = await resolveInboundIdentities();
+  const identity = str(
+    process.env.MANUAL_INBOUND_AGENT_IDENTITY || "manual_agent_1"
+  );
+
+  console.log("INBOUND TARGET IDENTITY", identity);
 
   await saveOrUpdateCall({
     callSid,
     direction: "inbound",
     from,
     to,
-    agentId: null,
+    agentId: parseAgentIdFromIdentity(identity),
     patchMeta: {
       status: "initiated",
       startedAt: new Date().toISOString(),
@@ -400,7 +389,7 @@ export async function handleInboundVoiceRequest(body) {
     },
   });
 
-  return { identities };
+  return { identity };
 }
 
 export async function handleCallStatusWebhook(body) {
