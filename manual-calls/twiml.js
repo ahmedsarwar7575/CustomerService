@@ -1,21 +1,6 @@
 import twilio from "twilio";
 import { isE164, isSafeClientIdentity } from "./service.js";
 
-function escapeXml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function buildClientParameter(name, value) {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  return `<Parameter name="${escapeXml(name)}" value="${escapeXml(text)}"/>`;
-}
-
 export function buildOutboundTwiml({
   to,
   callerId,
@@ -55,42 +40,23 @@ export function buildOutboundTwiml({
   );
 }
 
-export function buildInboundTwiml({
-  identity,
-  from,
-  to,
-  callSid,
-  statusCallbackUrl,
-  recordingStatusCallbackUrl,
-  fallbackMessage,
-}) {
+export function buildInboundTwiml({ identity, fallbackMessage }) {
+  const response = new twilio.twiml.VoiceResponse();
+
   if (!identity) {
-    const response = new twilio.twiml.VoiceResponse();
     response.say({ voice: "alice" }, fallbackMessage || "No available agent.");
     response.hangup();
     return response.toString();
   }
 
-  return [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    "<Response>",
-    `<Dial answerOnBridge="true" timeout="25" record="record-from-answer-dual" recordingTrack="both" recordingStatusCallback="${escapeXml(
-      recordingStatusCallbackUrl
-    )}" recordingStatusCallbackMethod="POST">`,
-    `<Client statusCallbackEvent="initiated ringing answered completed" statusCallback="${escapeXml(
-      statusCallbackUrl
-    )}" statusCallbackMethod="POST">`,
-    `<Identity>${escapeXml(identity)}</Identity>`,
-    buildClientParameter("caller", from),
-    buildClientParameter("from", from),
-    buildClientParameter("to", to),
-    buildClientParameter("callSid", callSid),
-    "</Client>",
-    "</Dial>",
-    "</Response>",
-  ]
-    .filter(Boolean)
-    .join("");
+  const dial = response.dial({
+    answerOnBridge: true,
+    timeout: 25,
+  });
+
+  dial.client(identity);
+
+  return response.toString();
 }
 
 export function buildErrorTwiml(message) {
