@@ -199,6 +199,10 @@ function buildAgentIdentity(agentId) {
   return `manual_agent_${agentId}`;
 }
 
+export function makeAgentIdentity(agentId) {
+  return buildAgentIdentity(agentId);
+}
+
 function buildManualMeta(existing, patch) {
   const current = obj(existing);
   const currentEvents = arr(current.events);
@@ -614,7 +618,8 @@ export async function handleInboundVoiceRequest(body, req) {
       inboundRouting: {
         type: routing.type,
         agentId: routing.type === "agent" ? routing.agent.id : null,
-        agentNumber: routing.type === "agent" ? routing.agent.twilioNumber : null,
+        agentNumber:
+          routing.type === "agent" ? routing.agent.twilioNumber : null,
         agentIndex: routing.type === "agent" ? routing.agentIndex : null,
         totalAgents: routing.agents.length,
       },
@@ -650,7 +655,8 @@ export async function handleNextAgentRequest(body, req) {
       inboundRouting: {
         type: routing.type,
         agentId: routing.type === "agent" ? routing.agent.id : null,
-        agentNumber: routing.type === "agent" ? routing.agent.twilioNumber : null,
+        agentNumber:
+          routing.type === "agent" ? routing.agent.twilioNumber : null,
         agentIndex: routing.type === "agent" ? routing.agentIndex : null,
         totalAgents: routing.agents.length,
       },
