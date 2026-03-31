@@ -16,23 +16,34 @@ import {
   MANUAL_CALL_ANALYSIS_SYSTEM,
 } from "./prompt.js";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-const s3 = new S3Client({
-  region: process.env.AWS_REGION,
-  credentials:
-    process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
-      ? {
-          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-        }
-      : undefined,
-});
-
-const BUCKET = process.env.AWS_S3_BUCKET || "customersupport";
 const MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024;
+
+function getOpenAI() {
+  const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+  if (!apiKey) {
+    throw new Error(
+      "OPENAI_API_KEY is missing. Please set it in your .env file."
+    );
+  }
+  return new OpenAI({ apiKey });
+}
+
+function getS3() {
+  return new S3Client({
+    region: process.env.AWS_REGION,
+    credentials:
+      process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
+        ? {
+            accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+          }
+        : undefined,
+  });
+}
+
+function getBucket() {
+  return process.env.AWS_S3_BUCKET || "customersupport";
+}
 
 function str(value) {
   return String(value || "").trim();
@@ -119,37 +130,26 @@ async function downloadRecordingToTemp({
     size: stats.size,
   });
 
-  return {
-    tempPath,
-    size: stats.size,
-  };
+  return { tempPath, size: stats.size };
 }
 
 async function uploadToS3({ callSid, recordingSid, tempPath }) {
   const date = new Date().toISOString().slice(0, 10);
   const key = `manual-calls/${date}/${callSid}/${recordingSid}.mp3`;
 
-  log("UPLOAD_TO_S3_START", {
-    callSid,
-    recordingSid,
-    key,
-  });
+  log("UPLOAD_TO_S3_START", { callSid, recordingSid, key });
 
   await new Upload({
-    client: s3,
+    client: getS3(),
     params: {
-      Bucket: BUCKET,
+      Bucket: getBucket(),
       Key: key,
       Body: fs.createReadStream(tempPath),
       ContentType: "audio/mpeg",
     },
   }).done();
 
-  log("UPLOAD_TO_S3_DONE", {
-    callSid,
-    recordingSid,
-    key,
-  });
+  log("UPLOAD_TO_S3_DONE", { callSid, recordingSid, key });
 
   return key;
 }
@@ -157,10 +157,7 @@ async function uploadToS3({ callSid, recordingSid, tempPath }) {
 async function transcribeAudio(tempPath) {
   const stats = await fs.promises.stat(tempPath);
 
-  log("TRANSCRIBE_AUDIO_START", {
-    tempPath,
-    size: stats.size,
-  });
+  log("TRANSCRIBE_AUDIO_START", { tempPath, size: stats.size });
 
   if (stats.size > MAX_TRANSCRIPTION_BYTES) {
     throw new Error(
@@ -168,7 +165,7 @@ async function transcribeAudio(tempPath) {
     );
   }
 
-  const result = await openai.audio.transcriptions.create({
+  const result = await getOpenAI().audio.transcriptions.create({
     file: fs.createReadStream(tempPath),
     model: process.env.OPENAI_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe",
   });
@@ -179,9 +176,7 @@ async function transcribeAudio(tempPath) {
     throw new Error("Transcription returned empty text.");
   }
 
-  log("TRANSCRIBE_AUDIO_DONE", {
-    transcriptLength: text.trim().length,
-  });
+  log("TRANSCRIBE_AUDIO_DONE", { transcriptLength: text.trim().length });
 
   return text.trim();
 }
@@ -213,7 +208,7 @@ async function analyzeTranscript(transcriptText) {
     transcriptLength: str(transcriptText).length,
   });
 
-  const response = await openai.responses.create({
+  const response = await getOpenAI().responses.create({
     model: process.env.OPENAI_ANALYSIS_MODEL || "gpt-4o-mini",
     input: [
       {
@@ -261,7 +256,6 @@ async function analyzeTranscript(transcriptText) {
 
 async function cleanupTempFile(tempPath) {
   if (!tempPath) return;
-
   try {
     await fs.promises.unlink(tempPath);
     log("CLEANUP_TEMP_FILE_DONE", { tempPath });
@@ -298,9 +292,7 @@ export async function runPostCallPipeline({
       analysisStatus: "pending",
     });
 
-    log("RUN_POST_CALL_PIPELINE_META_UPDATED_1", {
-      callSid,
-    });
+    log("RUN_POST_CALL_PIPELINE_META_UPDATED_1", { callSid });
 
     await downloadRecordingToTemp({
       recordingUrl,
@@ -308,11 +300,7 @@ export async function runPostCallPipeline({
       tempPath,
     });
 
-    const s3Key = await uploadToS3({
-      callSid,
-      recordingSid,
-      tempPath,
-    });
+    const s3Key = await uploadToS3({ callSid, recordingSid, tempPath });
 
     await updateCallRecordingMeta(callSid, {
       s3Key,
@@ -320,10 +308,7 @@ export async function runPostCallPipeline({
       analysisStatus: "pending",
     });
 
-    log("RUN_POST_CALL_PIPELINE_META_UPDATED_2", {
-      callSid,
-      s3Key,
-    });
+    log("RUN_POST_CALL_PIPELINE_META_UPDATED_2", { callSid, s3Key });
 
     const transcriptText = await transcribeAudio(tempPath);
 
@@ -332,9 +317,7 @@ export async function runPostCallPipeline({
       analysisStatus: "processing",
     });
 
-    log("RUN_POST_CALL_PIPELINE_META_UPDATED_3", {
-      callSid,
-    });
+    log("RUN_POST_CALL_PIPELINE_META_UPDATED_3", { callSid });
 
     const analysis = await analyzeTranscript(transcriptText);
 
@@ -351,16 +334,9 @@ export async function runPostCallPipeline({
       },
     });
 
-    log("RUN_POST_CALL_PIPELINE_DONE", {
-      callSid,
-      result,
-    });
+    log("RUN_POST_CALL_PIPELINE_DONE", { callSid, result });
 
-    return {
-      success: true,
-      callSid,
-      ...result,
-    };
+    return { success: true, callSid, ...result };
   } catch (error) {
     const stage = /transcription/i.test(error?.message || "")
       ? "transcription"

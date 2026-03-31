@@ -1,3 +1,4 @@
+import "dotenv/config";
 import Ticket from "../models/ticket.js";
 import Call from "../models/Call.js";
 import User from "../models/user.js";
