@@ -42,6 +42,7 @@ export function buildOutboundTwiml({
 
 export function buildPriorityInboundTwiml({
   agentNumber,
+  agentIdentity,
   statusCallbackUrl,
   recordingStatusCallbackUrl,
   nextAgentUrl,
@@ -61,16 +62,34 @@ export function buildPriorityInboundTwiml({
     method: isFallback ? undefined : "POST",
   });
 
-  const target = isFallback ? fallbackNumber : agentNumber;
-
-  dial.number(
-    {
-      statusCallbackEvent: "initiated ringing answered completed",
-      statusCallback: statusCallbackUrl,
-      statusCallbackMethod: "POST",
-    },
-    target.replace(/\s+/g, "")
-  );
+  if (isFallback) {
+    dial.number(
+      {
+        statusCallbackEvent: "initiated ringing answered completed",
+        statusCallback: statusCallbackUrl,
+        statusCallbackMethod: "POST",
+      },
+      fallbackNumber.replace(/\s+/g, "")
+    );
+  } else if (agentIdentity) {
+    dial.client(
+      {
+        statusCallbackEvent: "initiated ringing answered completed",
+        statusCallback: statusCallbackUrl,
+        statusCallbackMethod: "POST",
+      },
+      agentIdentity
+    );
+  } else {
+    dial.number(
+      {
+        statusCallbackEvent: "initiated ringing answered completed",
+        statusCallback: statusCallbackUrl,
+        statusCallbackMethod: "POST",
+      },
+      agentNumber.replace(/\s+/g, "")
+    );
+  }
 
   return response.toString();
 }

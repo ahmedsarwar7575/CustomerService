@@ -8,7 +8,12 @@ import {
   handleNextAgentRequest,
   handleOutboundVoiceRequest,
   handleRecordingWebhook,
+  makeAgentIdentity,
 } from "./service.js";
+
+function buildAgentIdentity(agentId) {
+  return makeAgentIdentity(agentId);
+}
 import {
   buildAllAgentsBusyTwiml,
   buildErrorTwiml,
@@ -130,8 +135,11 @@ export async function inboundVoiceWebhook(req, res) {
 
     const nextAgentUrl = absoluteUrl(req, "/manual-calls/voice/next-agent");
 
+    const agentIdentity = buildAgentIdentity(routing.agent.id);
+
     const twiml = buildPriorityInboundTwiml({
       agentNumber: routing.agent.twilioNumber,
+      agentIdentity,
       statusCallbackUrl: absoluteUrl(req, "/manual-calls/voice/status"),
       recordingStatusCallbackUrl: absoluteUrl(
         req,
@@ -144,6 +152,7 @@ export async function inboundVoiceWebhook(req, res) {
 
     log("INBOUND_TWIML", {
       agentNumber: routing.agent.twilioNumber,
+      agentIdentity,
       agentId: routing.agent.id,
       agentIndex: routing.agentIndex,
       twiml,
@@ -202,8 +211,11 @@ export async function nextAgentWebhook(req, res) {
 
     const nextAgentUrl = absoluteUrl(req, "/manual-calls/voice/next-agent");
 
+    const agentIdentityNext = buildAgentIdentity(routing.agent.id);
+
     const twiml = buildPriorityInboundTwiml({
       agentNumber: routing.agent.twilioNumber,
+      agentIdentity: agentIdentityNext,
       statusCallbackUrl: absoluteUrl(req, "/manual-calls/voice/status"),
       recordingStatusCallbackUrl: absoluteUrl(
         req,
@@ -216,6 +228,7 @@ export async function nextAgentWebhook(req, res) {
 
     log("NEXT_AGENT_TWIML", {
       agentNumber: routing.agent.twilioNumber,
+      agentIdentity: agentIdentityNext,
       agentId: routing.agent.id,
       agentIndex: routing.agentIndex,
       twiml,
