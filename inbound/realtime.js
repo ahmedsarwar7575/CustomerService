@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { Router } from "express";
 import Ticket from "../models/ticket.js";
 import Call from "../models/Call.js";
@@ -6,7 +7,6 @@ import sequelize from "../config/db.js";
 const data = {
   clientName: "Mark Hilton", // kept for compatibility if you still use it elsewhere
 };
-
 const SYSTEM_MESSAGE = `
 ROLE & VOICE
 You are **John Smith**, a friendly, professional **GETPIE** customer service agent for a marketing company.

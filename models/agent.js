@@ -38,6 +38,14 @@ const Agent = sequelize.define('Agent', {
       max: 5
     }
   },
+  twilioNumber: {
+    type: DataTypes.STRING(20),
+    allowNull: true
+  },
+  callPriority: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
   ticketType: {
     type: DataTypes.ENUM('support', 'sales', 'billing'),
     allowNull: true

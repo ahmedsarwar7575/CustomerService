@@ -1,8 +1,7 @@
-// automaticOutbound.js
+import "dotenv/config";
 import WebSocket, { WebSocketServer } from "ws";
 import twilio from "twilio";
-import dotenv from "dotenv";
-dotenv.config();
+
 
 import User from "../models/user.js";
 import Call from "../models/Call.js";

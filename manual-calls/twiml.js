@@ -40,6 +40,41 @@ export function buildOutboundTwiml({
   );
 }
 
+export function buildPriorityInboundTwiml({
+  agentNumber,
+  statusCallbackUrl,
+  recordingStatusCallbackUrl,
+  nextAgentUrl,
+  fallbackNumber,
+  isFallback,
+}) {
+  const response = new twilio.twiml.VoiceResponse();
+
+  const dial = response.dial({
+    answerOnBridge: true,
+    timeout: 30,
+    record: "record-from-answer-dual",
+    recordingTrack: "both",
+    recordingStatusCallback: recordingStatusCallbackUrl,
+    recordingStatusCallbackMethod: "POST",
+    action: isFallback ? undefined : nextAgentUrl,
+    method: isFallback ? undefined : "POST",
+  });
+
+  const target = isFallback ? fallbackNumber : agentNumber;
+
+  dial.number(
+    {
+      statusCallbackEvent: "initiated ringing answered completed",
+      statusCallback: statusCallbackUrl,
+      statusCallbackMethod: "POST",
+    },
+    target.replace(/\s+/g, "")
+  );
+
+  return response.toString();
+}
+
 export function buildInboundTwiml({
   identity,
   statusCallbackUrl,
@@ -82,5 +117,38 @@ export function buildErrorTwiml(message) {
     message || "We are unable to complete your request."
   );
   response.hangup();
+  return response.toString();
+}
+
+export function buildAllAgentsBusyTwiml({
+  fallbackNumber,
+  statusCallbackUrl,
+  recordingStatusCallbackUrl,
+}) {
+  const response = new twilio.twiml.VoiceResponse();
+
+  response.say(
+    { voice: "alice" },
+    "All agents are currently unavailable. Please hold while we connect you."
+  );
+
+  const dial = response.dial({
+    answerOnBridge: true,
+    timeout: 60,
+    record: "record-from-answer-dual",
+    recordingTrack: "both",
+    recordingStatusCallback: recordingStatusCallbackUrl,
+    recordingStatusCallbackMethod: "POST",
+  });
+
+  dial.number(
+    {
+      statusCallbackEvent: "initiated ringing answered completed",
+      statusCallback: statusCallbackUrl,
+      statusCallbackMethod: "POST",
+    },
+    fallbackNumber.replace(/\s+/g, "")
+  );
+
   return response.toString();
 }
