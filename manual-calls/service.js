@@ -332,30 +332,30 @@ export async function getAgentsByPriority() {
   return agents;
 }
 
-export async function isAgentBusy(twilioNumber) {
-  if (!twilioNumber) return true;
-
+export async function isAgentBusy(agentId) {
   try {
+    const identity = buildAgentIdentity(agentId);
     const client = getTwilioClient();
 
-    const [inboundCalls, outboundCalls] = await Promise.all([
-      client.calls.list({ to: twilioNumber, status: "in-progress" }),
-      client.calls.list({ from: twilioNumber, status: "in-progress" }),
+    const [inProgressCalls, ringingCalls] = await Promise.all([
+      client.calls.list({ to: `client:${identity}`, status: "in-progress" }),
+      client.calls.list({ to: `client:${identity}`, status: "ringing" }),
     ]);
 
-    const busy = inboundCalls.length > 0 || outboundCalls.length > 0;
+    const busy = inProgressCalls.length > 0 || ringingCalls.length > 0;
 
     log("IS_AGENT_BUSY", {
-      twilioNumber,
-      inboundActive: inboundCalls.length,
-      outboundActive: outboundCalls.length,
+      agentId,
+      identity,
+      inProgress: inProgressCalls.length,
+      ringing: ringingCalls.length,
       busy,
     });
 
     return busy;
   } catch (error) {
     log("IS_AGENT_BUSY_ERROR", {
-      twilioNumber,
+      agentId,
       message: error?.message || String(error),
     });
     return true;
@@ -365,9 +365,8 @@ export async function isAgentBusy(twilioNumber) {
 export async function getNextAvailableAgent(priorityList, alreadyTriedIndex) {
   for (let i = alreadyTriedIndex; i < priorityList.length; i++) {
     const agent = priorityList[i];
-    if (!agent.twilioNumber) continue;
 
-    const busy = await isAgentBusy(agent.twilioNumber);
+    const busy = await isAgentBusy(agent.id);
 
     log("GET_NEXT_AVAILABLE_AGENT_CHECK", {
       agentId: agent.id,

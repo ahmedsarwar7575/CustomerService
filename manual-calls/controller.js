@@ -113,6 +113,14 @@ export async function inboundVoiceWebhook(req, res) {
   try {
     log("INBOUND_VOICE_WEBHOOK_BODY", req.body);
 
+    const dialCallStatus = String(req.body?.DialCallStatus || "").toLowerCase();
+    if (dialCallStatus === "completed") {
+      log("INBOUND_VOICE_WEBHOOK_DIAL_COMPLETED_HANGUP", { dialCallStatus });
+      const response = new twilio.twiml.VoiceResponse();
+      response.hangup();
+      return xml(res, response.toString());
+    }
+
     const routing = await handleInboundVoiceRequest(req.body, req);
 
     if (routing.type === "fallback") {
@@ -178,9 +186,16 @@ export async function nextAgentWebhook(req, res) {
 
     const dialCallStatus = String(req.body?.DialCallStatus || "").toLowerCase();
 
-    if (dialCallStatus === "completed" || dialCallStatus === "answered") {
+    if (dialCallStatus === "answered") {
       log("NEXT_AGENT_WEBHOOK_CALL_ANSWERED", { dialCallStatus });
       const response = new twilio.twiml.VoiceResponse();
+      return xml(res, response.toString());
+    }
+
+    if (dialCallStatus === "completed") {
+      log("NEXT_AGENT_WEBHOOK_CALL_COMPLETED_HANGUP", { dialCallStatus });
+      const response = new twilio.twiml.VoiceResponse();
+      response.hangup();
       return xml(res, response.toString());
     }
 
