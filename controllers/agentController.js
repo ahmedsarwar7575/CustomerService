@@ -240,6 +240,8 @@ export const getAllAgents = async (req, res) => {
         "isActive",
         "rating",
         "ticketType",
+        "twilioNumber",
+        "callPriority"
       ],
       order: [["rating", "DESC"]],
     });
