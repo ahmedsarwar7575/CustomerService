@@ -53,7 +53,7 @@ export function buildPriorityInboundTwiml({
 
   const dial = response.dial({
     answerOnBridge: true,
-    timeout: 30,
+    timeout: 10,
     record: "record-from-answer-dual",
     recordingTrack: "both",
     recordingStatusCallback: recordingStatusCallbackUrl,
