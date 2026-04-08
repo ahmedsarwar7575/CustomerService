@@ -51,6 +51,19 @@ const Ticket = sequelize.define(
       type: DataTypes.BOOLEAN,
       defaultValue: false
     },
+    isManual: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false
+    },
+    createdByAgentId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'Agents',
+        key: 'id'
+      }
+    }
   },
   {
     tableName: "tickets",

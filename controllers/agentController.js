@@ -241,11 +241,11 @@ export const getAllAgents = async (req, res) => {
         "rating",
         "ticketType",
         "twilioNumber",
-        "callPriority"
+        "callPriority",
       ],
       order: [["rating", "DESC"]],
     });
-    console.log(JSON.stringify(agents));
+    // console.log(JSON.stringify(agents));
     const result = await Promise.all(
       agents.map(async (agent) => {
         // --- Get all tickets for this agent ---
@@ -615,6 +615,22 @@ export const getAllUsersByAgentId = async (req, res) => {
     ];
 
     return res.json({ agent, users });
+  } catch (error) {
+    console.error("Error fetching users by agent:", error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+export const getAllAgentAndUsers = async (req, res) => {
+  try {
+    const agent = await Agent.findAll({
+      attributes: ["id", "firstName", "lastName"],
+      where: { role: "agent" },
+    });
+    const Users = await User.findAll({
+      attributes: ["id", "name"],
+    });
+    res.json({ agent, Users });
   } catch (error) {
     console.error("Error fetching users by agent:", error);
     return res.status(500).json({ error: error.message });

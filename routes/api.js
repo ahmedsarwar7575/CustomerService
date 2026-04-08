@@ -11,6 +11,7 @@ import {
   getAllTicketsByAgentId,
   getAllUsersByAgentId,
   deleteAgent,
+  getAllAgentAndUsers,
 } from "../controllers/agentController.js";
 import {
   createTicket,
@@ -50,6 +51,12 @@ import {
 import { sendCallController } from "../outbound/sendCall.js";
 import { dashboardLite } from "../controllers/dashboard.js";
 import getRecordingUrlBySid from "../controllers/recoerding.js";
+import {
+  sendSmsMessage,
+  handleTwilioMessageStatus,
+  getMessagesByUserId,
+  handleIncomingSms
+} from "../controllers/twilioMessages.js";
 const router = express.Router();
 
 // Agent Routes
@@ -169,4 +176,12 @@ router.get(
   /* #swagger.tags = ['Calls'] */ getAllCallsForAgent
 );
 router.post("/api/send-call", sendCallController);
+router.get("/api/getAllAgentAndUsers", getAllAgentAndUsers);
+
+
+router.post("/api/twilio/messages/send", sendSmsMessage);
+router.get("/api/twilio/messages/user/:userId", getMessagesByUserId);
+router.post("/api/twilio/messages/status", handleTwilioMessageStatus);
+router.post("/api/twilio/messages/incoming", handleIncomingSms);
+
 export default router;

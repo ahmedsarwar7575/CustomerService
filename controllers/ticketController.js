@@ -2,47 +2,87 @@ import Ticket from "../models/ticket.js";
 import Agent from "../models/agent.js";
 import User from "../models/user.js";
 import Call from "../models/Call.js";
-import { randomUUID } from 'node:crypto';
+import { randomUUID } from "node:crypto";
 import { Email } from "../models/Email.js";
 import Rating from "../models/rating.js";
+import { Op } from "sequelize";
 const nz = (arr) => (Array.isArray(arr) ? arr : []);
 // Create new ticket
 export const createTicket = async (req, res) => {
   try {
-    const { callId, userId, ...rest } = req.body;
+    const {
+      status,
+      ticketType,
+      priority,
+      proposedSolution,
+      isSatisfied,
+      summary,
+      userId,
+      agentId,
+      isManual,
+      isManualCall,
+      createdByAgentId,
+    } = req.body;
 
-    const existingCall = await Call.findOne({ where: { id: callId } });
-    if (!existingCall) {
-      return res.status(404).json({ message: "Call not found" });
+    if (!userId || !summary || summary.trim().length < 10) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const validPriorities = ["low", "medium", "high", "critical"];
+    if (priority && !validPriorities.includes(priority)) {
+      return res.status(400).json({ error: "Invalid priority value" });
+    }
+
+    const parsedUserId = Number(userId);
+    const parsedAgentId = agentId ? Number(agentId) : null;
+    const parsedCreatedByAgentId = createdByAgentId
+      ? Number(createdByAgentId)
+      : null;
+
+    if (!Number.isInteger(parsedUserId) || parsedUserId <= 0) {
+      return res.status(400).json({ error: "Invalid userId" });
+    }
+
+    if (parsedAgentId !== null && (!Number.isInteger(parsedAgentId) || parsedAgentId <= 0)) {
+      return res.status(400).json({ error: "Invalid agentId" });
+    }
+
+    if (
+      parsedCreatedByAgentId !== null &&
+      (!Number.isInteger(parsedCreatedByAgentId) || parsedCreatedByAgentId <= 0)
+    ) {
+      return res.status(400).json({ error: "Invalid createdByAgentId" });
     }
 
     const ticket = await Ticket.create({
-      ...rest,
-      userId,
-      status: "open",
+      status: status || "open",
+      ticketType,
+      priority: priority || "medium",
+      proposedSolution: proposedSolution || null,
+      isSatisfied: isSatisfied === undefined ? null : isSatisfied,
+      summary: summary.trim(),
+      userId: parsedUserId,
+      agentId: parsedAgentId,
+      isManual: true,
+      isManualCall: true,
+      createdByAgentId: parsedCreatedByAgentId,
     });
 
-    const callData = existingCall.get({ plain: true });
-    delete callData.id;                 // important
-    callData.ticketId = ticket.id;
-
-    const newCall = await Call.create(callData);
-
-    return res.status(201).json({
-      message: "Ticket created successfully",
-      ticket,
-      call: newCall.id,
-    });
+    res.status(201).json({ message: "Manual ticket created", ticket });
   } catch (error) {
-    return res.status(400).json({ error: error.message });
+    res.status(500).json({ error: error.message });
   }
 };
-
 
 // Assign ticket to agent
 export const assignTicket = async (req, res) => {
   try {
-    const { ticketId, agentId } = req.params;
+    const ticketId = Number(req.params.ticketId);
+    const agentId = Number(req.params.agentId);
+
+    if (!Number.isInteger(ticketId) || !Number.isInteger(agentId)) {
+      return res.status(400).json({ error: "Invalid ticketId or agentId" });
+    }
 
     const ticket = await Ticket.findByPk(ticketId);
     if (!ticket) {
@@ -54,12 +94,7 @@ export const assignTicket = async (req, res) => {
       return res.status(404).json({ error: "Agent not found or inactive" });
     }
 
-    // Check if agent can handle this ticket type
-    if (agent.ticketType !== ticket.ticketType) {
-      return res.status(400).json({
-        error: `Agent can only handle ${agent.ticketType} tickets`,
-      });
-    }
+ 
 
     await ticket.update({
       agentId,
@@ -115,7 +150,13 @@ export const updatePiority = async (req, res) => {
       return res.status(404).json({ error: "Ticket not found" });
     }
 
+    const validPriorities = ["low", "medium", "high", "critical"];
+    if (!validPriorities.includes(req.body.priority)) {
+      return res.status(400).json({ error: "Invalid priority value" });
+    }
+
     await ticket.update({ priority: req.body.priority });
+
     res.json({
       message: "Ticket priority updated",
       ticketId: ticket.id,
@@ -146,7 +187,35 @@ export const getTicketsByStatus = async (req, res) => {
 
 export const getAllTickets = async (req, res) => {
   try {
+    const { type, userId } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    // Fetch the agent to determine role
+    const agent = await Agent.findByPk(userId);
+    if (!agent) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
+
+    const isAdmin = agent.role === "admin";
+
+    // Build base where clause for type filtering
+    const where = {};
+    if (type === "manual") {
+      where.isManual = true;
+    } else if (type === "system") {
+      where[Op.or] = [{ isManual: false }, { isManual: null }];
+    }
+
+    // If not admin, restrict to tickets assigned to this agent
+    if (!isAdmin) {
+      where.agentId = userId;
+    }
+
     const tickets = await Ticket.findAll({
+      where,
       include: [
         { model: Agent, attributes: ["id", "firstName", "lastName"] },
         { model: User, attributes: ["id", "name", "email"] },
@@ -163,9 +232,7 @@ export const getAllTickets = async (req, res) => {
       ],
       order: [["updatedAt", "DESC"]],
     });
-    if (!tickets) {
-      return res.status(404).json({ error: "Tickets not found" });
-    }
+
     res.json(tickets);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -245,10 +312,16 @@ export const getticketById = async (req, res) => {
       where: { id },
       include: [
         { model: Agent, attributes: ["id", "firstName", "lastName"] },
-        { model: User, attributes: ["id", "name", "email"] },
+        { model: User, attributes: ["id", "name", "email", "phone"] },
         {
           model: Call,
-          attributes: ["id", "type", "summary", "createdAt", "QuestionsAnswers"],
+          attributes: [
+            "id",
+            "type",
+            "summary",
+            "createdAt",
+            "QuestionsAnswers",
+          ],
         },
       ],
     });
@@ -301,8 +374,6 @@ export const deleteTicket = async (req, res) => {
   }
 };
 
-
-
 export const addNotes = async (req, res) => {
   try {
     const { id } = req.params;
@@ -313,8 +384,12 @@ export const addNotes = async (req, res) => {
     const ticket = await Ticket.findByPk(id);
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-    const note = { id: randomUUID(), text: String(text).trim(), timestamp: new Date().toISOString() };
-    ticket.set('notes', [...nz(ticket.notes), note]);
+    const note = {
+      id: randomUUID(),
+      text: String(text).trim(),
+      timestamp: new Date().toISOString(),
+    };
+    ticket.set("notes", [...nz(ticket.notes), note]);
     await ticket.save();
 
     res.json({ message: "Note added", note });
@@ -340,7 +415,7 @@ export const getNoteById = async (req, res) => {
     const { id, noteId } = req.params;
     const ticket = await Ticket.findByPk(id);
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
-    const note = nz(ticket.notes).find(n => n.id === noteId);
+    const note = nz(ticket.notes).find((n) => n.id === noteId);
     if (!note) return res.status(404).json({ error: "Note not found" });
     res.json({ note });
   } catch (e) {
@@ -358,12 +433,17 @@ export const updateNoteById = async (req, res) => {
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
     const notes = nz(ticket.notes);
-    const i = notes.findIndex(n => n.id === noteId);
+    const i = notes.findIndex((n) => n.id === noteId);
     if (i === -1) return res.status(404).json({ error: "Note not found" });
 
-    const updated = { ...notes[i], text: String(text).trim(), timestamp: new Date().toISOString() };
-    const next = notes.slice(); next[i] = updated;
-    ticket.set('notes', next);
+    const updated = {
+      ...notes[i],
+      text: String(text).trim(),
+      timestamp: new Date().toISOString(),
+    };
+    const next = notes.slice();
+    next[i] = updated;
+    ticket.set("notes", next);
     await ticket.save();
 
     res.json({ message: "Note updated", note: updated });
@@ -379,9 +459,13 @@ export const deleteNoteById = async (req, res) => {
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
     const notes = nz(ticket.notes);
-    if (!notes.some(n => n.id === noteId)) return res.status(404).json({ error: "Note not found" });
+    if (!notes.some((n) => n.id === noteId))
+      return res.status(404).json({ error: "Note not found" });
 
-    ticket.set('notes', notes.filter(n => n.id !== noteId));
+    ticket.set(
+      "notes",
+      notes.filter((n) => n.id !== noteId)
+    );
     await ticket.save();
 
     res.json({ message: "Note deleted", noteId });
