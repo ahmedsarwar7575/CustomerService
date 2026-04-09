@@ -1,8 +1,11 @@
 import dotenv from "dotenv";
 import twilio from "twilio";
+import axios from "axios";
+import { Op } from "sequelize";
 import User from "../models/user.js";
 import Agent from "../models/agent.js";
 import TwilioMessage from "../models/twilioMessage.js";
+import TwilioMessageMedia from "../models/twilioMessageMedia.js";
 
 dotenv.config();
 
@@ -11,19 +14,66 @@ const client = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
+const getEmptyTwiml = () => {
+  const twiml = new twilio.twiml.MessagingResponse();
+  return twiml.toString();
+};
+
+const getTwilioMediaAuth = () => {
+  if (process.env.TWILIO_API_KEY_SID && process.env.TWILIO_API_KEY_SECRET) {
+    return {
+      username: process.env.TWILIO_API_KEY_SID,
+      password: process.env.TWILIO_API_KEY_SECRET,
+    };
+  }
+
+  return {
+    username: process.env.TWILIO_ACCOUNT_SID,
+    password: process.env.TWILIO_AUTH_TOKEN,
+  };
+};
+
+const normalizeBaseUrl = (req) => {
+  const envBase = process.env.PUBLIC_BASE_URL?.trim();
+  if (envBase) {
+    return envBase.replace(/\/$/, "");
+  }
+  return `${req.protocol}://${req.get("host")}`.replace(/\/$/, "");
+};
+
+const inferFileName = (mediaSid, contentType, fallbackName) => {
+  if (fallbackName) return fallbackName;
+  const extension =
+    contentType?.split("/")[1]?.split(";")[0]?.trim()?.toLowerCase() || "bin";
+  return mediaSid ? `${mediaSid}.${extension}` : `attachment.${extension}`;
+};
+
+const extractMediaSid = (mediaUrl) => {
+  try {
+    const url = new URL(mediaUrl);
+    const parts = url.pathname.split("/").filter(Boolean);
+    return parts[parts.length - 1] || null;
+  } catch {
+    return null;
+  }
+};
+
 export const sendSmsMessage = async (req, res) => {
   try {
     const { userId, agentId: bodyAgentId, body } = req.body;
 
     const agentId = bodyAgentId || req.user?.id || null;
-    const messageBody = body?.trim();
+    const messageBody = typeof body === "string" ? body.trim() : "";
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
 
     if (!userId) {
       return res.status(400).json({ error: "userId is required" });
     }
 
-    if (!messageBody) {
-      return res.status(400).json({ error: "Message body is required" });
+    if (!messageBody && uploadedFiles.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Message body or at least one media file is required" });
     }
 
     if (!process.env.TWILIO_SMS_FROM) {
@@ -41,7 +91,9 @@ export const sendSmsMessage = async (req, res) => {
     }
 
     if (!user.phone) {
-      return res.status(400).json({ error: "User does not have a phone number" });
+      return res
+        .status(400)
+        .json({ error: "User does not have a phone number" });
     }
 
     let agent = null;
@@ -56,11 +108,23 @@ export const sendSmsMessage = async (req, res) => {
       }
     }
 
+    const baseUrl = normalizeBaseUrl(req);
+    const publicMediaUrls = uploadedFiles.map(
+      (file) => `${baseUrl}/uploads/mms/${file.filename}`
+    );
+
     const twilioPayload = {
       from: process.env.TWILIO_SMS_FROM,
       to: user.phone,
-      body: messageBody,
     };
+
+    if (messageBody) {
+      twilioPayload.body = messageBody;
+    }
+
+    if (publicMediaUrls.length) {
+      twilioPayload.mediaUrl = publicMediaUrls;
+    }
 
     if (process.env.TWILIO_SMS_STATUS_CALLBACK_URL) {
       twilioPayload.statusCallback = process.env.TWILIO_SMS_STATUS_CALLBACK_URL;
@@ -75,8 +139,10 @@ export const sendSmsMessage = async (req, res) => {
       direction: "outbound",
       fromNumber: process.env.TWILIO_SMS_FROM,
       toNumber: user.phone,
-      body: messageBody,
+      body: messageBody || "",
       status: twilioResponse.status || "queued",
+      hasMedia: publicMediaUrls.length > 0,
+      numMedia: publicMediaUrls.length,
       sentAt: twilioResponse.dateCreated
         ? new Date(twilioResponse.dateCreated)
         : new Date(),
@@ -89,12 +155,30 @@ export const sendSmsMessage = async (req, res) => {
       errorMessage: twilioResponse.errorMessage || null,
     });
 
+    if (uploadedFiles.length) {
+      await TwilioMessageMedia.bulkCreate(
+        uploadedFiles.map((file, index) => ({
+          twilioMessageId: savedMessage.id,
+          mediaSid: null,
+          mediaUrl: publicMediaUrls[index],
+          contentType: file.mimetype || "application/octet-stream",
+          fileName: file.originalname || file.filename,
+        }))
+      );
+    }
+
+    const media = await TwilioMessageMedia.findAll({
+      where: { twilioMessageId: savedMessage.id },
+      order: [["id", "ASC"]],
+    });
+
     return res.status(201).json({
       message: "SMS sent successfully",
       sms: {
         ...savedMessage.toJSON(),
         user: user.toJSON(),
         agent: agent ? agent.toJSON() : null,
+        media: media.map((item) => item.toJSON()),
       },
       twilio: {
         sid: twilioResponse.sid,
@@ -105,7 +189,6 @@ export const sendSmsMessage = async (req, res) => {
     });
   } catch (error) {
     console.error("sendSmsMessage error:", error);
-
     return res.status(error.status || 500).json({
       error: error.message || "Failed to send SMS",
     });
@@ -133,7 +216,22 @@ export const getMessagesByUserId = async (req, res) => {
       order: [["createdAt", "ASC"]],
     });
 
-    const agentIds = [...new Set(messages.map((msg) => msg.agentId).filter(Boolean))];
+    const messageIds = messages.map((message) => message.id);
+
+    const mediaRows = messageIds.length
+      ? await TwilioMessageMedia.findAll({
+          where: {
+            twilioMessageId: {
+              [Op.in]: messageIds,
+            },
+          },
+          order: [["id", "ASC"]],
+        })
+      : [];
+
+    const agentIds = [
+      ...new Set(messages.map((msg) => msg.agentId).filter(Boolean)),
+    ];
 
     const agents = agentIds.length
       ? await Agent.findAll({
@@ -143,12 +241,23 @@ export const getMessagesByUserId = async (req, res) => {
       : [];
 
     const agentMap = new Map(agents.map((agent) => [agent.id, agent.toJSON()]));
+    const mediaMap = new Map();
+
+    mediaRows.forEach((media) => {
+      const mediaJson = media.toJSON();
+      if (!mediaMap.has(mediaJson.twilioMessageId)) {
+        mediaMap.set(mediaJson.twilioMessageId, []);
+      }
+      mediaMap.get(mediaJson.twilioMessageId).push(mediaJson);
+    });
+
     const userJson = user.toJSON();
 
     const enrichedMessages = messages.map((message) => ({
       ...message.toJSON(),
       user: userJson,
       agent: message.agentId ? agentMap.get(message.agentId) || null : null,
+      media: mediaMap.get(message.id) || [],
     }));
 
     return res.status(200).json({
@@ -209,68 +318,130 @@ export const handleTwilioMessageStatus = async (req, res) => {
   }
 };
 
-
-
 export const handleIncomingSms = async (req, res) => {
-    try {
-      const { MessageSid, From, To, Body } = req.body;
-  
-      if (!MessageSid || !From || !To) {
-        return res
-          .status(200)
-          .type("text/xml")
-          .send("<Response></Response>");
-      }
-  
-      const existingMessage = await TwilioMessage.findOne({
-        where: { twilioMessageSid: MessageSid },
-      });
-  
-      if (existingMessage) {
-        return res
-          .status(200)
-          .type("text/xml")
-          .send("<Response></Response>");
-      }
-  
-      const user = await User.findOne({
-        where: { phone: From },
-        attributes: ["id", "name", "phone", "email"],
-      });
-  
-      await TwilioMessage.create({
-        userId: user?.id || null,
-        agentId: null,
-        twilioMessageSid: MessageSid,
-        direction: "inbound",
-        fromNumber: From,
-        toNumber: To,
-        body: Body || "",
-        status: "received",
-        sentAt: null,
-        receivedAt: new Date(),
-        deliveredAt: null,
-        errorCode: null,
-        errorMessage: null,
-      });
-  
-      return res
-        .status(200)
-        .type("text/xml")
-        .send("<Response></Response>");
-    } catch (error) {
-      console.error("handleIncomingSms error:", error);
-      return res
-        .status(200)
-        .type("text/xml")
-        .send("<Response></Response>");
+  try {
+    const { MessageSid, From, To, Body, NumMedia } = req.body;
+
+    if (!MessageSid || !From || !To) {
+      return res.status(200).type("text/xml").send(getEmptyTwiml());
     }
-  };
 
+    const existingMessage = await TwilioMessage.findOne({
+      where: { twilioMessageSid: MessageSid },
+    });
 
+    if (existingMessage) {
+      return res.status(200).type("text/xml").send(getEmptyTwiml());
+    }
 
+    const user = await User.findOne({
+      where: { phone: From },
+      attributes: ["id", "name", "phone", "email"],
+    });
 
+    const mediaCount = Number(NumMedia || 0);
 
+    const savedMessage = await TwilioMessage.create({
+      userId: user?.id || null,
+      agentId: null,
+      twilioMessageSid: MessageSid,
+      direction: "inbound",
+      fromNumber: From,
+      toNumber: To,
+      body: Body || "",
+      status: "received",
+      hasMedia: mediaCount > 0,
+      numMedia: mediaCount,
+      sentAt: null,
+      receivedAt: new Date(),
+      deliveredAt: null,
+      errorCode: null,
+      errorMessage: null,
+    });
 
+    if (mediaCount > 0) {
+      const mediaItems = [];
 
+      for (let i = 0; i < mediaCount; i += 1) {
+        const mediaUrl = req.body[`MediaUrl${i}`];
+        const contentType = req.body[`MediaContentType${i}`];
 
+        if (!mediaUrl || !contentType) {
+          continue;
+        }
+
+        const mediaSid = extractMediaSid(mediaUrl);
+
+        mediaItems.push({
+          twilioMessageId: savedMessage.id,
+          mediaSid,
+          mediaUrl,
+          contentType,
+          fileName: inferFileName(mediaSid, contentType),
+        });
+      }
+
+      if (mediaItems.length) {
+        await TwilioMessageMedia.bulkCreate(mediaItems);
+      }
+    }
+
+    return res.status(200).type("text/xml").send(getEmptyTwiml());
+  } catch (error) {
+    console.error("handleIncomingSms error:", error);
+    return res.status(200).type("text/xml").send(getEmptyTwiml());
+  }
+};
+
+export const streamMessageMedia = async (req, res) => {
+  try {
+    const { mediaId } = req.params;
+    const download = req.query.download === "1";
+
+    const media = await TwilioMessageMedia.findByPk(mediaId);
+
+    if (!media) {
+      return res.status(404).json({ error: "Media not found" });
+    }
+
+    const isTwilioHostedMedia =
+      typeof media.mediaUrl === "string" &&
+      media.mediaUrl.includes("api.twilio.com");
+
+    if (!isTwilioHostedMedia) {
+      const normalizedBase = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
+      if (
+        normalizedBase &&
+        typeof media.mediaUrl === "string" &&
+        media.mediaUrl.startsWith(normalizedBase)
+      ) {
+        return res.redirect(media.mediaUrl + (download ? "?download=1" : ""));
+      }
+
+      return res.redirect(media.mediaUrl);
+    }
+
+    const mediaResponse = await axios.get(media.mediaUrl, {
+      responseType: "stream",
+      auth: getTwilioMediaAuth(),
+    });
+
+    const contentType =
+      media.contentType ||
+      mediaResponse.headers["content-type"] ||
+      "application/octet-stream";
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader(
+      "Content-Disposition",
+      `${download ? "attachment" : "inline"}; filename="${
+        media.fileName || `attachment-${media.id}`
+      }"`
+    );
+
+    mediaResponse.data.pipe(res);
+  } catch (error) {
+    console.error("streamMessageMedia error:", error);
+    return res.status(500).json({ error: "Failed to load media" });
+  }
+};

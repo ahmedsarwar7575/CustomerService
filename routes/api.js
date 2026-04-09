@@ -1,4 +1,7 @@
 import express from "express";
+import path from "path";
+import fs from "fs";
+import multer from "multer";
 import {
   login as agentLogin,
   createAgent,
@@ -53,10 +56,31 @@ import { dashboardLite } from "../controllers/dashboard.js";
 import getRecordingUrlBySid from "../controllers/recoerding.js";
 import {
   sendSmsMessage,
-  handleTwilioMessageStatus,
   getMessagesByUserId,
-  handleIncomingSms
+  handleTwilioMessageStatus,
+  handleIncomingSms,
+  streamMessageMedia,
 } from "../controllers/twilioMessages.js";
+const uploadDir = path.join(process.cwd(), "public", "uploads", "mms");
+fs.mkdirSync(uploadDir, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (_req, file, cb) => {
+    const safeName = `${Date.now()}-${Math.round(
+      Math.random() * 1e9
+    )}-${file.originalname.replace(/\s+/g, "-")}`;
+    cb(null, safeName);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 15 * 1024 * 1024,
+    files: 10,
+  },
+});
 const router = express.Router();
 
 // Agent Routes
@@ -178,10 +202,14 @@ router.get(
 router.post("/api/send-call", sendCallController);
 router.get("/api/getAllAgentAndUsers", getAllAgentAndUsers);
 
-
-router.post("/api/twilio/messages/send", sendSmsMessage);
+router.post(
+  "/api/twilio/messages/send",
+  upload.array("media", 10),
+  sendSmsMessage
+);
 router.get("/api/twilio/messages/user/:userId", getMessagesByUserId);
 router.post("/api/twilio/messages/status", handleTwilioMessageStatus);
 router.post("/api/twilio/messages/incoming", handleIncomingSms);
+router.get("/api/twilio/messages/media/:mediaId", streamMessageMedia);
 
 export default router;

@@ -14,7 +14,7 @@ import outboundFlow from "./outbound/outboundRoutes.js";
 import dailer from "./routes/dialer.js";
 import manualCallsRouter from "./manual-calls/index.js";
 import twilioVoiceRoutes from "./routes/twilioVoice.js";
-
+import path from "path";
 // import seedDatabase from "./config/seed.js";
 import gmailRoutes from "./routes/gmail.js";
 const app = express();
@@ -42,6 +42,7 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.urlencoded({ extended: false }));
+app.use("/uploads", express.static(path.join(process.cwd(), "public", "uploads")));
 app.use(express.json());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));

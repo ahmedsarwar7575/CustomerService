@@ -35,13 +35,23 @@ const TwilioMessage = sequelize.define(
       allowNull: false,
     },
     body: {
-      type: DataTypes.TEXT,
-      allowNull: false,
+      type: DataTypes.TEXT("long"),
+      allowNull: true,
     },
     status: {
       type: DataTypes.STRING(50),
       allowNull: false,
       defaultValue: "queued",
+    },
+    hasMedia: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
+    numMedia: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
     },
     sentAt: {
       type: DataTypes.DATE,
@@ -74,6 +84,7 @@ const TwilioMessage = sequelize.define(
       { fields: ["status"] },
       { fields: ["fromNumber"] },
       { fields: ["toNumber"] },
+      { fields: ["hasMedia"] },
     ],
   }
 );
