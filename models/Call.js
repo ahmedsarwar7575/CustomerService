@@ -49,7 +49,7 @@ const Call = sequelize.define('Call', {
   },
   callCategory: {
     // what kind of call was this?
-    type: DataTypes.ENUM('satisfaction', 'upsell', 'both', 'other'),
+    type: DataTypes.ENUM('satisfaction', 'upsell', 'both', 'other', "manual"),
     allowNull: true,
   },
   customerSatisfied: {

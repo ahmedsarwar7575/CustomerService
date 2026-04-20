@@ -1,6 +1,5 @@
 import express, { Router } from "express";
 import twilio from "twilio";
-// import auth from "../middleware/auth.js";
 import * as controller from "./controller.js";
 import { getBaseUrl } from "./service.js";
 
@@ -53,12 +52,34 @@ function validateTwilioWebhook(req, res, next) {
 }
 
 router.post("/token", controller.getToken);
+router.post("/device/offline", controller.deviceOffline);
 
-router.post("/voice/outbound", validateTwilioWebhook, controller.outboundVoiceWebhook);
-router.post("/voice/incoming", validateTwilioWebhook, controller.inboundVoiceWebhook);
-router.post("/voice/status", validateTwilioWebhook, controller.callStatusWebhook);
-router.post("/recording/status", validateTwilioWebhook, controller.recordingStatusWebhook);
+router.post(
+  "/voice/outbound",
+  validateTwilioWebhook,
+  controller.outboundVoiceWebhook
+);
+router.post(
+  "/voice/incoming",
+  validateTwilioWebhook,
+  controller.inboundVoiceWebhook
+);
+router.post(
+  "/voice/fallback",
+  validateTwilioWebhook,
+  controller.fallbackVoiceWebhook
+);
+router.post(
+  "/voice/status",
+  validateTwilioWebhook,
+  controller.callStatusWebhook
+);
+router.post(
+  "/recording/status",
+  validateTwilioWebhook,
+  controller.recordingStatusWebhook
+);
 
-router.get("/recording/:callSid",  controller.getPlaybackUrl);
+router.get("/recording/:callSid", controller.getPlaybackUrl);
 
 export default router;

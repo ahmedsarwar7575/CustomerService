@@ -1,51 +1,59 @@
-  import dotenv from "dotenv";
-  import http from "http";
-  import app from "./app.js";
-  import { createUpsellWSS } from "./outbound/automaticOutbound.js";
-  import { attachMediaStreamServer } from "./inbound/mediaStream.js";
-  // import { startUpsellCron } from "./outbound/cronJob.js"; 
+import dotenv from "dotenv";
+import http from "http";
+import app from "./app.js";
+import { createUpsellWSS } from "./outbound/automaticOutbound.js";
+import { attachMediaStreamServer } from "./inbound/mediaStream.js";
+import { initSocket } from "./socket.js";
+import { bootTokens } from "./Email/Email.js";
 
-  import { bootTokens } from './Email/Email.js';
-  dotenv.config();
+dotenv.config();
 
-  const PORT = process.env.PORT || 3000;
-  const server = http.createServer(app);
-  app.use((req, _res, next) => {
+const PORT = process.env.PORT || 3000;
+
+app.use((req, _res, next) => {
   console.log(req.url);
-    const [path, qs] = req.url.split("?", 2);
-    const normalized = path.replace(/^\/+/, "/"); // e.g. //outbound... -> /outbound...
-    req.url = qs ? `${normalized}?${qs}` : normalized;
-    next();
-  });
-  const inboundWSS = attachMediaStreamServer(); // /media-stream
-  const outboundWSS = createUpsellWSS(); // /upsell-stream
+  const [path, qs] = req.url.split("?", 2);
+  const normalized = path.replace(/^\/+/, "/");
+  req.url = qs ? `${normalized}?${qs}` : normalized;
+  next();
+});
 
-  if (!inboundWSS) throw new Error("inboundWSS not created");
-  if (!outboundWSS) throw new Error("outboundWSS not created");
+const server = http.createServer(app);
 
-  server.on("upgrade", (req, socket, head) => {
-    // const path = new URL(req.url || "/", "http://x").pathname;
-      const url = new URL(req.url || "/", "http://x");
-      const path = url.pathname;
+initSocket(server);
 
-    if (path === "/media-stream") {
-      inboundWSS.handleUpgrade(req, socket, head, (ws) => {
-        inboundWSS.emit("connection", ws, req);
-      });
-      return;
-    }
+const inboundWSS = attachMediaStreamServer();
+const outboundWSS = createUpsellWSS();
 
-    if (path.startsWith("/upsell-stream")) {
-      outboundWSS.handleUpgrade(req, socket, head, (ws) => {
-        outboundWSS.emit("connection", ws, req);
-      });
-      return;
-    }
+if (!inboundWSS) throw new Error("inboundWSS not created");
+if (!outboundWSS) throw new Error("outboundWSS not created");
 
-    socket.destroy();
-  });
-  // startUpsellCron();
-  server.listen(PORT, () => {
-    bootTokens();
-    console.log(`Server running on port ${PORT}`);
-  });
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL(req.url || "/", "http://x");
+  const path = url.pathname;
+
+  if (path.startsWith("/socket.io")) {
+    return;
+  }
+
+  if (path === "/media-stream") {
+    inboundWSS.handleUpgrade(req, socket, head, (ws) => {
+      inboundWSS.emit("connection", ws, req);
+    });
+    return;
+  }
+
+  if (path.startsWith("/upsell-stream")) {
+    outboundWSS.handleUpgrade(req, socket, head, (ws) => {
+      outboundWSS.emit("connection", ws, req);
+    });
+    return;
+  }
+
+  socket.destroy();
+});
+
+server.listen(PORT, () => {
+  bootTokens();
+  console.log(`Server running on port ${PORT}`);
+});

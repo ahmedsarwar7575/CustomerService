@@ -6,6 +6,7 @@ import User from "../models/user.js";
 import Agent from "../models/agent.js";
 import TwilioMessage from "../models/twilioMessage.js";
 import TwilioMessageMedia from "../models/twilioMessageMedia.js";
+import { getIo } from "../socket.js";
 
 dotenv.config();
 
@@ -55,6 +56,16 @@ const extractMediaSid = (mediaUrl) => {
     return parts[parts.length - 1] || null;
   } catch {
     return null;
+  }
+};
+
+const emitToSmsRoom = (userId, event, payload) => {
+  if (!userId) return;
+
+  try {
+    getIo().to(`sms:user:${userId}`).emit(event, payload);
+  } catch (error) {
+    console.error("Socket emit error:", error.message);
   }
 };
 
@@ -172,14 +183,18 @@ export const sendSmsMessage = async (req, res) => {
       order: [["id", "ASC"]],
     });
 
+    const enrichedSms = {
+      ...savedMessage.toJSON(),
+      user: user.toJSON(),
+      agent: agent ? agent.toJSON() : null,
+      media: media.map((item) => item.toJSON()),
+    };
+
+    emitToSmsRoom(user.id, "sms:new", enrichedSms);
+
     return res.status(201).json({
       message: "SMS sent successfully",
-      sms: {
-        ...savedMessage.toJSON(),
-        user: user.toJSON(),
-        agent: agent ? agent.toJSON() : null,
-        media: media.map((item) => item.toJSON()),
-      },
+      sms: enrichedSms,
       twilio: {
         sid: twilioResponse.sid,
         status: twilioResponse.status,
@@ -311,6 +326,16 @@ export const handleTwilioMessageStatus = async (req, res) => {
 
     await sms.update(updates);
 
+    emitToSmsRoom(sms.userId, "sms:status", {
+      id: sms.id,
+      twilioMessageSid: sms.twilioMessageSid,
+      status: updates.status,
+      errorCode: updates.errorCode,
+      errorMessage: updates.errorMessage || sms.errorMessage || null,
+      deliveredAt: updates.deliveredAt || sms.deliveredAt || null,
+      sentAt: updates.sentAt || sms.sentAt || null,
+    });
+
     return res.sendStatus(200);
   } catch (error) {
     console.error("handleTwilioMessageStatus error:", error);
@@ -384,6 +409,20 @@ export const handleIncomingSms = async (req, res) => {
       if (mediaItems.length) {
         await TwilioMessageMedia.bulkCreate(mediaItems);
       }
+    }
+
+    if (user?.id) {
+      const media = await TwilioMessageMedia.findAll({
+        where: { twilioMessageId: savedMessage.id },
+        order: [["id", "ASC"]],
+      });
+
+      emitToSmsRoom(user.id, "sms:new", {
+        ...savedMessage.toJSON(),
+        user: user.toJSON(),
+        agent: null,
+        media: media.map((item) => item.toJSON()),
+      });
     }
 
     return res.status(200).type("text/xml").send(getEmptyTwiml());

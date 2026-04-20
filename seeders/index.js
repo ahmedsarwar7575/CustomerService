@@ -1,232 +1,150 @@
-// scripts/seed.js
-import bcrypt from "bcryptjs";
+// seeders/index.js
+
 import { faker } from "@faker-js/faker";
 import sequelize from "../config/db.js";
+import Ticket from "../models/ticket.js";
+import Call from "../models/Call.js";
 
-// IMPORTANT: import associations before using models
-// so all .belongsTo / .hasMany are registered.
-import { Agent, User, Ticket, Rating, Call } from "../models/index.js";
+const USER_IDS = [32, 33, 34, 35, 36, 37];
+const AGENT_IDS = [22, 23, 24, 25, 26, 27];
 
-// ---- helpers ---------------------------------------------------------
-const randomPick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-const randBool = (p = 0.5) => Math.random() < p;
-const hash = (plain) => bcrypt.hashSync(plain, 10);
-
-const AGENT_TICKET_TYPES = ["support", "sales", "billing"];
-const TICKET_STATUS = ["open", "in_progress", "resolved", "closed"];
-const TICKET_PRIORITY = ["low", "medium", "high", "critical"];
+const TICKET_STATUSES = ["open", "in_progress", "resolved", "closed"];
+const TICKET_TYPES = ["support", "sales", "billing"];
+const PRIORITIES = ["low", "medium", "high", "critical"];
 const CALL_TYPES = ["inbound", "outbound"];
+const CALL_CATEGORIES = ["satisfaction", "upsell", "both", "other"];
+const LANGUAGES = ["en", "ur"];
 
-// Generates a Twilio-looking Call SID (not real)
-const genCallSid = () =>
-  "CA" + faker.string.hexadecimal({ length: 32, casing: "lower", prefix: "" });
+function buildQaPairs() {
+  const qaPairs = [];
+  const count = faker.number.int({ min: 3, max: 5 });
 
-// Sample Q&A JSON
-const genQA = () => [
-  {
-    q: "What is my order status?",
-    a: randomPick(["Shipped", "Processing", "Delivered"]),
-  },
-  { q: "Can I change my address?", a: randomPick(["Yes", "No"]) },
-];
+  for (let i = 0; i < count; i++) {
+    qaPairs.push({
+      q: faker.helpers.arrayElement([
+        "Can you describe your issue?",
+        "When did the issue start?",
+        "Did you try restarting the service?",
+        "Do you want us to escalate this?",
+        "Are you interested in an upgraded plan?",
+        "Anything else you need help with?",
+      ]),
+      a: faker.helpers.arrayElement([
+        faker.lorem.sentence(),
+        "It started this morning.",
+        "Yes, but it did not fix the issue.",
+        "Please escalate it.",
+        "Yes, I want to know more.",
+        "No, that is all.",
+      ]),
+    });
+  }
 
-const genLanguagesJSON = () =>
-  [
-    randomPick(["en", "es", "fr", "de", "it", "pt", "ar", "ur"]),
-    randBool()
-      ? randomPick(["en", "es", "fr", "de", "it", "pt", "ar", "ur"])
-      : null,
-  ].filter(Boolean);
+  return qaPairs;
+}
 
-const genRecordingUrl = () =>
-  `https://media.example.com/recordings/${faker.string.uuid()}.mp3`;
-
-// ---- seeders ---------------------------------------------------------
-async function seedAgents() {
-  const adminEmail = "admin@acmehelpdesk.com";
-  const [admin, created] = await Agent.findOrCreate({
-    where: { email: adminEmail },
-    defaults: {
-      firstName: "System",
-      lastName: "Admin",
-      email: adminEmail,
-      password: hash("Admin@12345"),
-      isActive: true,
-      role: "admin",
-      rating: 5.0,
-      ticketType: "support",
+function buildNotes(agentId) {
+  return [
+    {
+      by: agentId,
+      text: faker.lorem.sentence(),
+      at: new Date().toISOString(),
     },
-  });
-
-  const agents = [admin];
-
-  // 9 more non-admin agents (total 10)
-  for (let i = 0; i < 9; i++) {
-    const firstName = faker.person.firstName();
-    const lastName = faker.person.lastName();
-    const email = faker.internet.email({ firstName, lastName }).toLowerCase();
-
-    const agent = await Agent.create({
-      firstName,
-      lastName,
-      email,
-      password: hash(faker.internet.password({ length: 12 })),
-      isActive: randBool(0.9),
-      role: "agent",
-      rating: Number((Math.random() * 5).toFixed(1)),
-      ticketType: randomPick(AGENT_TICKET_TYPES),
-    });
-    agents.push(agent);
-  }
-
-  return agents;
+  ];
 }
 
-async function seedUsers() {
-  const users = [];
-  for (let i = 0; i < 10; i++) {
-    const name = faker.person.fullName();
-    const email = faker.internet
-      .email({
-        firstName: name.split(" ")[0],
-        lastName: name.split(" ")[1] || "",
-      })
-      .toLowerCase();
-    const user = await User.create({
-      name,
-      email,
-      role: "user",
-      phone: genPhone(),
-      status: randomPick(["active", "inactive", "pending"]),
-      isUpSellCall: randBool(0.3),
-      isSatisfactionCall: randBool(0.3),
-      isBothCall: randBool(0.15),
-    });
-    users.push(user);
-  }
-  return users;
-}
+function buildOutboundDetails(type) {
+  if (type !== "outbound") return null;
 
-async function seedTickets(users, agents) {
-  const tickets = [];
-  for (let i = 0; i < 10; i++) {
-    const user = randomPick(users);
-    const agent = randomPick(agents);
-
-    const ticket = await Ticket.create({
-      status: randomPick(TICKET_STATUS),
-      ticketType: randomPick(AGENT_TICKET_TYPES),
-      priority: randomPick(TICKET_PRIORITY),
-      proposedSolution: randBool(0.6)
-        ? faker.lorem.sentences({ min: 1, max: 3 })
-        : null,
-      isSatisfied: randBool(0.5) ? randBool(0.7) : null, // sometimes unknown
-      summary: faker.lorem.sentence({ min: 8, max: 16 }),
-      userId: user.id,
-      agentId: agent.id,
-    });
-
-    tickets.push(ticket);
-  }
-  return tickets;
-}
-// put near your other helpers
-const genPhone = () => {
-    // Example: Pakistani-style E.164 (+92XXXXXXXXXX) or switch to +1 if you prefer
-    const subscriber = faker.number.int({ min: 3000000000, max: 3999999999 }).toString(); // 10 digits starting with '3'
-    return `+92${subscriber}`; // total length: 13
+  return {
+    dialedNumber: faker.phone.number("+92##########"),
+    attempts: faker.number.int({ min: 1, max: 3 }),
+    connected: faker.datatype.boolean(),
+    campaign: faker.helpers.arrayElement([
+      "retention",
+      "upsell",
+      "feedback",
+      "support-followup",
+    ]),
   };
-  
-async function seedCalls(users, tickets) {
-  const calls = [];
-  for (let i = 0; i < 10; i++) {
-    const user = randomPick(users);
-    const ticket = randomPick(tickets);
+}
 
-    const call = await Call.create({
-      type: randomPick(CALL_TYPES),
-      userId: user.id,
-      ticketId: ticket?.id ?? null,
-      QuestionsAnswers: genQA(),
-      languages: genLanguagesJSON(),
-      isResolvedByAi: randBool(0.5),
-      summary: faker.lorem.paragraph({ min: 1, max: 3 }),
-      recordingUrl: randBool(0.7) ? genRecordingUrl() : null,
-      callSid: genCallSid(),
-      outboundDetails: randBool(0.5)
-        ? {
-            dialedAt: faker.date.recent({ days: 10 }),
-            durationSec: faker.number.int({ min: 30, max: 1800 }),
-            disposition: randomPick([
-              "answered",
-              "no_answer",
-              "busy",
-              "voicemail",
+async function seed() {
+  try {
+    await sequelize.authenticate();
+    console.log("DB connected");
+
+    await sequelize.transaction(async (transaction) => {
+      for (let i = 0; i < 10; i++) {
+        const userId = USER_IDS[i % USER_IDS.length];
+        const agentId = AGENT_IDS[i % AGENT_IDS.length];
+        const status = faker.helpers.arrayElement(TICKET_STATUSES);
+        const type = faker.helpers.arrayElement(CALL_TYPES);
+        const callCategory = faker.helpers.arrayElement(CALL_CATEGORIES);
+
+        const ticket = await Ticket.create(
+          {
+            status,
+            ticketType: faker.helpers.arrayElement(TICKET_TYPES),
+            priority: faker.helpers.arrayElement(PRIORITIES),
+            proposedSolution: faker.helpers.arrayElement([
+              "Restart the service and try again.",
+              "Escalate issue to technical team.",
+              "Verify billing details and invoice status.",
+              "Offer upgraded plan with discount.",
+              "Collect logs and schedule callback.",
             ]),
-          }
-        : null,
+            isSatisfied: ["resolved", "closed"].includes(status)
+              ? faker.datatype.boolean()
+              : null,
+            summary: `Seeded ticket ${i + 1} - ${faker.lorem.sentence()}`,
+            userId,
+            agentId,
+            notes: buildNotes(agentId),
+            isManualCall: false,
+            isManual: false,
+            createdByAgentId: agentId,
+          },
+          { transaction }
+        );
+
+        await Call.create(
+          {
+            type,
+            userId: ticket.userId,
+            ticketId: ticket.id, // attach call with ticket
+            QuestionsAnswers: buildQaPairs(), // [{ q: "...", a: "..." }]
+            languages: [faker.helpers.arrayElement(LANGUAGES)],
+            isResolvedByAi: faker.datatype.boolean(),
+            summary: `Seeded call ${i + 1} for ticket ${ticket.id}`,
+            recordingUrl: `https://example.com/recordings/${faker.string.uuid()}.mp3`,
+            callSid: `CA${faker.string.alphanumeric(30)}`,
+            outboundDetails: buildOutboundDetails(type),
+            callCategory,
+            customerSatisfied: ["satisfaction", "both"].includes(callCategory)
+              ? faker.datatype.boolean()
+              : null,
+            customerInterestedInUpsell: ["upsell", "both"].includes(
+              callCategory
+            )
+              ? faker.datatype.boolean()
+              : null,
+            isManualCall: false,
+          },
+          { transaction }
+        );
+
+        console.log(`Created ticket ${ticket.id} with linked call`);
+      }
     });
 
-    calls.push(call);
+    console.log("Seeding completed successfully");
+  } catch (error) {
+    console.error("Seeding failed:", error);
+  } finally {
+    await sequelize.close();
+    console.log("DB connection closed");
   }
-  return calls;
 }
 
-async function seedRatings(users, agents, tickets) {
-  const ratings = [];
-  for (let i = 0; i < 10; i++) {
-    const user = randomPick(users);
-    const agent = randomPick(agents);
-    const ticket = randomPick(tickets);
-
-    const rating = await Rating.create({
-      score: faker.number.int({ min: 1, max: 5 }),
-      comments: randBool(0.7) ? faker.lorem.sentence({ min: 6, max: 16 }) : "",
-      userId: user.id,
-      agentId: agent.id,
-      ticketId: ticket.id,
-    });
-
-    ratings.push(rating);
-  }
-  return ratings;
-}
-
-// ---- main ------------------------------------------------------------
-async function main() {
-  console.log("🔄 Connecting to DB…");
-  await sequelize.authenticate();
-  // Do not drop tables; just ensure they exist.
-  await sequelize.sync();
-
-  console.log("👤 Seeding Agents (first is admin)…");
-  const agents = await seedAgents();
-
-  console.log("🙋 Seeding Users…");
-  const users = await seedUsers();
-
-  console.log("🎫 Seeding Tickets…");
-  const tickets = await seedTickets(users, agents);
-
-  console.log("📞 Seeding Calls…");
-  const calls = await seedCalls(users, tickets);
-
-  console.log("⭐ Seeding Ratings…");
-  const ratings = await seedRatings(users, agents, tickets);
-
-  console.log("✅ Done!");
-  console.log({
-    agents: agents.length,
-    users: users.length,
-    tickets: tickets.length,
-    calls: calls.length,
-    ratings: ratings.length,
-  });
-
-  await sequelize.close();
-}
-
-main().catch((err) => {
-  console.error("❌ Seeder failed:", err);
-  process.exit(1);
-});
+seed();

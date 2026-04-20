@@ -5,10 +5,22 @@ import Call from "../models/Call.js";
 import { randomUUID } from "node:crypto";
 import { Email } from "../models/Email.js";
 import Rating from "../models/rating.js";
+import sequelize from "../config/db.js";
+import Sequelize from "sequelize";
 import { Op } from "sequelize";
+import { uploadAudioToS3 } from "../utils/s3.js";
+import { extractManualCallDataFromAudio } from "../utils/openaiCallParser.js";
 const nz = (arr) => (Array.isArray(arr) ? arr : []);
 // Create new ticket
+const parseNullableBoolean = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  if (value === true || value === "true") return true;
+  if (value === false || value === "false") return false;
+  return null;
+};
 export const createTicket = async (req, res) => {
+  let transaction;
+
   try {
     const {
       status,
@@ -19,14 +31,12 @@ export const createTicket = async (req, res) => {
       summary,
       userId,
       agentId,
-      isManual,
-      isManualCall,
       createdByAgentId,
     } = req.body;
 
-    if (!userId || !summary || summary.trim().length < 10) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
+    const recordingFile = req.file || null;
+    console.log(recordingFile);
+    const manualSummary = (summary || "").trim();
 
     const validPriorities = ["low", "medium", "high", "critical"];
     if (priority && !validPriorities.includes(priority)) {
@@ -38,12 +48,16 @@ export const createTicket = async (req, res) => {
     const parsedCreatedByAgentId = createdByAgentId
       ? Number(createdByAgentId)
       : null;
+    const parsedIsSatisfied = parseNullableBoolean(isSatisfied);
 
     if (!Number.isInteger(parsedUserId) || parsedUserId <= 0) {
       return res.status(400).json({ error: "Invalid userId" });
     }
 
-    if (parsedAgentId !== null && (!Number.isInteger(parsedAgentId) || parsedAgentId <= 0)) {
+    if (
+      parsedAgentId !== null &&
+      (!Number.isInteger(parsedAgentId) || parsedAgentId <= 0)
+    ) {
       return res.status(400).json({ error: "Invalid agentId" });
     }
 
@@ -54,23 +68,91 @@ export const createTicket = async (req, res) => {
       return res.status(400).json({ error: "Invalid createdByAgentId" });
     }
 
-    const ticket = await Ticket.create({
-      status: status || "open",
-      ticketType,
-      priority: priority || "medium",
-      proposedSolution: proposedSolution || null,
-      isSatisfied: isSatisfied === undefined ? null : isSatisfied,
-      summary: summary.trim(),
-      userId: parsedUserId,
-      agentId: parsedAgentId,
-      isManual: true,
-      isManualCall: true,
-      createdByAgentId: parsedCreatedByAgentId,
-    });
+    if (!recordingFile && manualSummary.length < 10) {
+      return res.status(400).json({
+        error:
+          "Summary must be at least 10 characters when no recording is uploaded",
+      });
+    }
 
-    res.status(201).json({ message: "Manual ticket created", ticket });
+    let uploadedAudio = null;
+    let aiData = null;
+
+    if (recordingFile) {
+      uploadedAudio = await uploadAudioToS3(recordingFile);
+
+      try {
+        aiData = await extractManualCallDataFromAudio(recordingFile);
+      } catch (aiError) {
+        console.error("Audio processing failed:", aiError.message);
+        aiData = null;
+      }
+    }
+
+    const finalTicketSummary =
+      manualSummary || aiData?.Summary?.trim() || "Manual call ticket created";
+
+    transaction = await sequelize.transaction();
+
+    await Ticket.update(
+      { order: sequelize.literal("`order` + 1") },
+      { where: {}, transaction }
+    );
+
+    const ticket = await Ticket.create(
+      {
+        status: status || "open",
+        ticketType: ticketType || "support",
+        priority: priority || "medium",
+        proposedSolution: proposedSolution?.trim() || null,
+        isSatisfied: parsedIsSatisfied,
+        summary: finalTicketSummary,
+        userId: parsedUserId,
+        agentId: parsedAgentId,
+        isManual: true,
+        isManualCall: true,
+        createdByAgentId: parsedCreatedByAgentId,
+        order: 1,
+      },
+      { transaction }
+    );
+
+    let call = null;
+
+    // Only create Call when audio is uploaded
+    if (recordingFile) {
+      call = await Call.create(
+        {
+          type: "outbound",
+          userId: parsedUserId,
+          ticketId: ticket.id,
+          QuestionsAnswers: aiData?.QuestionsAnswers || [],
+          languages: aiData?.LANGUAGES || [],
+          summary: aiData?.Summary || finalTicketSummary,
+          recordingUrl: uploadedAudio?.key || null, // store S3 key, not signed URL
+          callCategory: "manual",
+          customerSatisfied: parsedIsSatisfied,
+          isManualCall: true,
+        },
+        { transaction }
+      );
+    }
+
+    await transaction.commit();
+
+    return res.status(201).json({
+      message: "Manual ticket created successfully",
+      ticket,
+      call,
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (transaction) {
+      await transaction.rollback();
+    }
+
+    return res.status(500).json({
+      error: error.message || "Failed to create manual ticket",
+    });
   }
 };
 
@@ -93,8 +175,6 @@ export const assignTicket = async (req, res) => {
     if (!agent || !agent.isActive) {
       return res.status(404).json({ error: "Agent not found or inactive" });
     }
-
- 
 
     await ticket.update({
       agentId,
@@ -176,7 +256,7 @@ export const getTicketsByStatus = async (req, res) => {
         { model: Agent, attributes: ["id", "firstName", "lastName"] },
         { model: User, attributes: ["id", "name", "email"] },
       ],
-      order: [["updatedAt", "DESC"]],
+      order: [["order", "ASC"]],
     });
 
     res.json(tickets);
@@ -193,7 +273,6 @@ export const getAllTickets = async (req, res) => {
       return res.status(400).json({ error: "userId is required" });
     }
 
-    // Fetch the agent to determine role
     const agent = await Agent.findByPk(userId);
     if (!agent) {
       return res.status(404).json({ error: "Agent not found" });
@@ -201,7 +280,6 @@ export const getAllTickets = async (req, res) => {
 
     const isAdmin = agent.role === "admin";
 
-    // Build base where clause for type filtering
     const where = {};
     if (type === "manual") {
       where.isManual = true;
@@ -209,7 +287,6 @@ export const getAllTickets = async (req, res) => {
       where[Op.or] = [{ isManual: false }, { isManual: null }];
     }
 
-    // If not admin, restrict to tickets assigned to this agent
     if (!isAdmin) {
       where.agentId = userId;
     }
@@ -230,7 +307,7 @@ export const getAllTickets = async (req, res) => {
           ],
         },
       ],
-      order: [["updatedAt", "DESC"]],
+      order: [["order", "ASC"]],
     });
 
     res.json(tickets);
@@ -471,5 +548,120 @@ export const deleteNoteById = async (req, res) => {
     res.json({ message: "Note deleted", noteId });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+};
+export const reorderAllTickets = async (req, res) => {
+  const { ticketIds } = req.body;
+
+  if (!Array.isArray(ticketIds) || ticketIds.length === 0) {
+    return res.status(400).json({ error: "ticketIds array required" });
+  }
+
+  const transaction = await sequelize.transaction();
+  try {
+    const cases = ticketIds
+      .map((id, idx) => `WHEN id = ${id} THEN ${idx + 1}`)
+      .join(" ");
+    const idsList = ticketIds.join(",");
+
+    await sequelize.query(
+      `UPDATE tickets SET \`order\` = CASE ${cases} ELSE \`order\` END WHERE id IN (${idsList})`,
+      { transaction }
+    );
+
+    await transaction.commit();
+    res.json({ success: true });
+  } catch (error) {
+    await transaction.rollback();
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getPaginatedTickets = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 10,
+      search = "",
+      status = "",
+      priority = "",
+      ticketType = "",
+      agentId = "",
+      sortBy = "order",
+      sortOrder = "ASC",
+      userId,
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = (pageNum - 1) * limitNum;
+
+    const agent = await Agent.findByPk(userId);
+    if (!agent) {
+      return res.status(404).json({ error: "Agent not found" });
+    }
+    const isAdmin = agent.role === "admin";
+
+    const where = {};
+
+    if (!isAdmin) {
+      where.agentId = userId;
+    } else if (agentId) {
+      where.agentId = agentId;
+    }
+
+    if (status) where.status = status;
+    if (priority) where.priority = priority;
+    if (ticketType) where.ticketType = ticketType;
+
+    const include = [
+      {
+        model: User,
+        as: "User",
+        attributes: ["id", "name", "email", "phone"],
+        required: !!search,
+        where: search
+          ? {
+              [Op.or]: [
+                { name: { [Op.like]: `%${search}%` } },
+                { email: { [Op.like]: `%${search}%` } },
+                { phone: { [Op.like]: `%${search}%` } },
+              ],
+            }
+          : undefined,
+      },
+      {
+        model: Agent,
+        as: "Agent",
+        attributes: ["id", "firstName", "lastName"],
+        required: false,
+      },
+      {
+        model: Call,
+        as: "Calls",
+        attributes: ["id", "type", "summary", "createdAt", "QuestionsAnswers"],
+        required: false,
+      },
+    ];
+
+    const { count, rows } = await Ticket.findAndCountAll({
+      where,
+      include,
+      order: [[sortBy, sortOrder]],
+      limit: limitNum,
+      offset,
+      distinct: true,
+    });
+
+    res.json({
+      tickets: rows,
+      total: count,
+      page: pageNum,
+      totalPages: Math.ceil(count / limitNum),
+      limit: limitNum,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
   }
 };

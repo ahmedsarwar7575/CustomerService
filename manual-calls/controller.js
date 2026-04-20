@@ -5,21 +5,17 @@ import {
   getPlaybackUrlByCallSid,
   handleCallStatusWebhook,
   handleInboundVoiceRequest,
-  handleNextAgentRequest,
   handleOutboundVoiceRequest,
   handleRecordingWebhook,
   makeAgentIdentity,
+  setAgentActive,
 } from "./service.js";
-
-function buildAgentIdentity(agentId) {
-  return makeAgentIdentity(agentId);
-}
 import {
-  buildAllAgentsBusyTwiml,
   buildErrorTwiml,
-  buildInboundTwiml,
+  buildFallbackTwiml,
+  buildHangupTwiml,
+  buildInboundAgentTwiml,
   buildOutboundTwiml,
-  buildPriorityInboundTwiml,
 } from "./twiml.js";
 import { runPostCallPipeline } from "./worker.js";
 
@@ -60,16 +56,39 @@ export async function getToken(req, res) {
       ...data,
     });
   } catch (error) {
-    log("TOKEN_ERROR", {
-      message: error?.message || String(error),
-    });
-
+    log("TOKEN_ERROR", { message: error?.message || String(error) });
     return jsonError(
       res,
       401,
       "Failed to generate manual calling token.",
       error
     );
+  }
+}
+
+export async function deviceOffline(req, res) {
+  try {
+    const agentId =
+      req?.user?.id || req?.query?.agentId || req?.body?.agentId || null;
+
+    if (!agentId) {
+      return res
+        .status(400)
+        .json({ success: false, message: "agentId is required." });
+    }
+
+    await setAgentActive(agentId, false);
+
+    log("DEVICE_OFFLINE", { agentId });
+
+    return res.status(200).json({
+      success: true,
+      message: "Agent marked offline.",
+      agentId,
+    });
+  } catch (error) {
+    log("DEVICE_OFFLINE_ERROR", { message: error?.message || String(error) });
+    return jsonError(res, 500, "Failed to mark agent offline.", error);
   }
 }
 
@@ -89,11 +108,7 @@ export async function outboundVoiceWebhook(req, res) {
       ),
     });
 
-    log("OUTBOUND_TWIML", {
-      to: result.to,
-      callerId: result.callerId,
-      twiml,
-    });
+    log("OUTBOUND_TWIML", { to: result.to, callerId: result.callerId });
 
     return xml(res, twiml);
   } catch (error) {
@@ -101,11 +116,12 @@ export async function outboundVoiceWebhook(req, res) {
       message: error?.message || String(error),
       body: req.body,
     });
-
-    const twiml = buildErrorTwiml(
-      error?.message || "We could not place your call right now."
+    return xml(
+      res,
+      buildErrorTwiml(
+        error?.message || "We could not place your call right now."
+      )
     );
-    return xml(res, twiml);
   }
 }
 
@@ -114,14 +130,19 @@ export async function inboundVoiceWebhook(req, res) {
     log("INBOUND_VOICE_WEBHOOK_BODY", req.body);
 
     const dialCallStatus = String(req.body?.DialCallStatus || "").toLowerCase();
+
     if (dialCallStatus === "completed") {
-      log("INBOUND_VOICE_WEBHOOK_DIAL_COMPLETED_HANGUP", { dialCallStatus });
+      log("INBOUND_VOICE_WEBHOOK_COMPLETED_HANGUP", { dialCallStatus });
+      return xml(res, buildHangupTwiml());
+    }
+
+    if (dialCallStatus === "answered") {
+      log("INBOUND_VOICE_WEBHOOK_ALREADY_ANSWERED", { dialCallStatus });
       const response = new twilio.twiml.VoiceResponse();
-      response.hangup();
       return xml(res, response.toString());
     }
 
-    const routing = await handleInboundVoiceRequest(req.body, req);
+    const routing = await handleInboundVoiceRequest(req.body);
 
     if (routing.type === "fallback") {
       log("INBOUND_ROUTING_FALLBACK", {
@@ -129,40 +150,35 @@ export async function inboundVoiceWebhook(req, res) {
         fallbackNumber: routing.fallbackNumber,
       });
 
-      const twiml = buildAllAgentsBusyTwiml({
-        fallbackNumber: routing.fallbackNumber,
-        statusCallbackUrl: absoluteUrl(req, "/manual-calls/voice/status"),
-        recordingStatusCallbackUrl: absoluteUrl(
-          req,
-          "/manual-calls/recording/status"
-        ),
-      });
-
-      return xml(res, twiml);
+      return xml(
+        res,
+        buildFallbackTwiml({
+          fallbackNumber: routing.fallbackNumber,
+          statusCallbackUrl: absoluteUrl(req, "/manual-calls/voice/status"),
+          recordingStatusCallbackUrl: absoluteUrl(
+            req,
+            "/manual-calls/recording/status"
+          ),
+        })
+      );
     }
 
-    const nextAgentUrl = absoluteUrl(req, "/manual-calls/voice/next-agent");
+    const agentIdentity = makeAgentIdentity(routing.agent.id);
+    const fallbackUrl = absoluteUrl(req, "/manual-calls/voice/fallback");
 
-    const agentIdentity = buildAgentIdentity(routing.agent.id);
-
-    const twiml = buildPriorityInboundTwiml({
-      agentNumber: routing.agent.twilioNumber,
+    const twiml = buildInboundAgentTwiml({
       agentIdentity,
       statusCallbackUrl: absoluteUrl(req, "/manual-calls/voice/status"),
       recordingStatusCallbackUrl: absoluteUrl(
         req,
         "/manual-calls/recording/status"
       ),
-      nextAgentUrl,
-      fallbackNumber: routing.fallbackNumber,
-      isFallback: false,
+      fallbackUrl,
     });
 
     log("INBOUND_TWIML", {
-      agentNumber: routing.agent.twilioNumber,
       agentIdentity,
       agentId: routing.agent.id,
-      agentIndex: routing.agentIndex,
       twiml,
     });
 
@@ -172,94 +188,53 @@ export async function inboundVoiceWebhook(req, res) {
       message: error?.message || String(error),
       body: req.body,
     });
-
-    const twiml = buildErrorTwiml(
-      error?.message || "We could not connect your call right now."
+    return xml(
+      res,
+      buildErrorTwiml(
+        error?.message || "We could not connect your call right now."
+      )
     );
-    return xml(res, twiml);
   }
 }
 
-export async function nextAgentWebhook(req, res) {
+export async function fallbackVoiceWebhook(req, res) {
   try {
-    log("NEXT_AGENT_WEBHOOK_BODY", req.body);
+    log("FALLBACK_VOICE_WEBHOOK_BODY", req.body);
 
     const dialCallStatus = String(req.body?.DialCallStatus || "").toLowerCase();
 
-    if (dialCallStatus === "answered") {
-      log("NEXT_AGENT_WEBHOOK_CALL_ANSWERED", { dialCallStatus });
+    if (dialCallStatus === "answered" || dialCallStatus === "completed") {
+      log("FALLBACK_VOICE_WEBHOOK_DONE", { dialCallStatus });
+      if (dialCallStatus === "completed") return xml(res, buildHangupTwiml());
       const response = new twilio.twiml.VoiceResponse();
       return xml(res, response.toString());
     }
 
-    if (dialCallStatus === "completed") {
-      log("NEXT_AGENT_WEBHOOK_CALL_COMPLETED_HANGUP", { dialCallStatus });
-      const response = new twilio.twiml.VoiceResponse();
-      response.hangup();
-      return xml(res, response.toString());
-    }
+    const fallbackNumber =
+      process.env.INBOUND_FALLBACK_NUMBER || "+18557201568";
 
-    const routing = await handleNextAgentRequest(req.body, req);
+    log("FALLBACK_VOICE_WEBHOOK_ROUTING_TO_FALLBACK", { fallbackNumber });
 
-    if (routing.type === "done") {
-      const response = new twilio.twiml.VoiceResponse();
-      return xml(res, response.toString());
-    }
-
-    if (routing.type === "fallback") {
-      log("NEXT_AGENT_WEBHOOK_FALLBACK", {
-        callSid: req.body?.CallSid,
-        fallbackNumber: routing.fallbackNumber,
-      });
-
-      const twiml = buildAllAgentsBusyTwiml({
-        fallbackNumber: routing.fallbackNumber,
+    return xml(
+      res,
+      buildFallbackTwiml({
+        fallbackNumber,
         statusCallbackUrl: absoluteUrl(req, "/manual-calls/voice/status"),
         recordingStatusCallbackUrl: absoluteUrl(
           req,
           "/manual-calls/recording/status"
         ),
-      });
-
-      return xml(res, twiml);
-    }
-
-    const nextAgentUrl = absoluteUrl(req, "/manual-calls/voice/next-agent");
-
-    const agentIdentityNext = buildAgentIdentity(routing.agent.id);
-
-    const twiml = buildPriorityInboundTwiml({
-      agentNumber: routing.agent.twilioNumber,
-      agentIdentity: agentIdentityNext,
-      statusCallbackUrl: absoluteUrl(req, "/manual-calls/voice/status"),
-      recordingStatusCallbackUrl: absoluteUrl(
-        req,
-        "/manual-calls/recording/status"
-      ),
-      nextAgentUrl,
-      fallbackNumber: routing.fallbackNumber,
-      isFallback: false,
-    });
-
-    log("NEXT_AGENT_TWIML", {
-      agentNumber: routing.agent.twilioNumber,
-      agentIdentity: agentIdentityNext,
-      agentId: routing.agent.id,
-      agentIndex: routing.agentIndex,
-      twiml,
-    });
-
-    return xml(res, twiml);
+      })
+    );
   } catch (error) {
-    log("NEXT_AGENT_WEBHOOK_ERROR", {
+    log("FALLBACK_VOICE_WEBHOOK_ERROR", {
       message: error?.message || String(error),
       body: req.body,
     });
-
-    const twiml = buildErrorTwiml(
-      error?.message || "We could not connect your call right now."
+    return xml(
+      res,
+      buildErrorTwiml("We could not connect your call right now.")
     );
-    return xml(res, twiml);
   }
 }
 
@@ -281,7 +256,6 @@ export async function callStatusWebhook(req, res) {
       message: error?.message || String(error),
       body: req.body,
     });
-
     return jsonError(res, 500, "Failed to process call status webhook.", error);
   }
 }
@@ -327,7 +301,6 @@ export async function recordingStatusWebhook(req, res) {
       message: error?.message || String(error),
       body: req.body,
     });
-
     return jsonError(res, 500, "Failed to process recording webhook.", error);
   }
 }
@@ -353,7 +326,6 @@ export async function getPlaybackUrl(req, res) {
       callSid: req.params?.callSid,
       message: error?.message || String(error),
     });
-
     const status = error?.statusCode || 404;
     return jsonError(res, status, "Failed to generate playback URL.", error);
   }

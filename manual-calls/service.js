@@ -67,9 +67,7 @@ function mask(value) {
 
 export function getBaseUrl(req) {
   const envUrl = str(process.env.PUBLIC_BASE_URL);
-  if (envUrl) {
-    return envUrl.replace(/\/+$/, "");
-  }
+  if (envUrl) return envUrl.replace(/\/+$/, "");
   const forwardedProto = str(req.headers["x-forwarded-proto"])
     .split(",")[0]
     .trim();
@@ -195,12 +193,8 @@ function normalizeName(value) {
     .slice(0, 100);
 }
 
-function buildAgentIdentity(agentId) {
-  return `manual_agent_${agentId}`;
-}
-
 export function makeAgentIdentity(agentId) {
-  return buildAgentIdentity(agentId);
+  return `manual_agent_${agentId}`;
 }
 
 function buildManualMeta(existing, patch) {
@@ -240,22 +234,16 @@ async function findCallByAnySid(candidates) {
 function inferDirection(from, to) {
   const fromRaw = str(from);
   const toRaw = str(to);
-  if (fromRaw.startsWith("client:") && !toRaw.startsWith("client:")) {
+  if (fromRaw.startsWith("client:") && !toRaw.startsWith("client:"))
     return "outbound";
-  }
-  if (!fromRaw.startsWith("client:") && toRaw.startsWith("client:")) {
+  if (!fromRaw.startsWith("client:") && toRaw.startsWith("client:"))
     return "inbound";
-  }
   return "outbound";
 }
 
 function inferCustomerPhone(direction, from, to) {
-  if (direction === "inbound") {
-    return normalizePhone(from);
-  }
-  if (direction === "outbound") {
-    return normalizePhone(to);
-  }
+  if (direction === "inbound") return normalizePhone(from);
+  if (direction === "outbound") return normalizePhone(to);
   return normalizePhone(from) || normalizePhone(to);
 }
 
@@ -267,9 +255,8 @@ async function saveOrUpdateCall({
   agentId,
   patchMeta = {},
 }) {
-  if (!str(callSid)) {
+  if (!str(callSid))
     throw new Error("CallSid is required to save a manual call.");
-  }
 
   const existing = await Call.findOne({ where: { callSid } });
   const type = resolveCallType(direction);
@@ -309,32 +296,23 @@ async function saveOrUpdateCall({
     return existing.reload();
   }
 
-  const created = await Call.create(payload);
-  return created;
+  return Call.create(payload);
 }
 
-export async function getAgentsByPriority() {
-  const agents = await Agent.findAll({
-    where: { isActive: true },
-    order: [["callPriority", "ASC"]],
-  });
+export async function setAgentActive(agentId, active) {
+  const agent = await Agent.findByPk(agentId);
+  if (!agent) throw new Error(`Agent ${agentId} not found.`);
 
-  log("GET_AGENTS_BY_PRIORITY", {
-    count: agents.length,
-    agents: agents.map((a) => ({
-      id: a.id,
-      name: `${a.firstName} ${a.lastName}`,
-      twilioNumber: a.twilioNumber || null,
-      callPriority: a.callPriority ?? null,
-    })),
-  });
+  await agent.update({ activeStatus: active });
 
-  return agents;
+  log("SET_AGENT_ACTIVE", { agentId, active });
+
+  return agent.reload();
 }
 
 export async function isAgentBusy(agentId) {
   try {
-    const identity = buildAgentIdentity(agentId);
+    const identity = makeAgentIdentity(agentId);
     const client = getTwilioClient();
 
     const [inProgressCalls, ringingCalls] = await Promise.all([
@@ -362,105 +340,49 @@ export async function isAgentBusy(agentId) {
   }
 }
 
-export async function getNextAvailableAgent(priorityList, alreadyTriedIndex) {
-  for (let i = alreadyTriedIndex; i < priorityList.length; i++) {
-    const agent = priorityList[i];
+export async function resolveInboundRouting(callSid) {
+  const activeAgents = await Agent.findAll({
+    where: { isActive: true, activeStatus: true },
+    order: [["callPriority", "ASC"]],
+  });
 
+  log("RESOLVE_INBOUND_ROUTING_ACTIVE_AGENTS", {
+    callSid,
+    count: activeAgents.length,
+    agents: activeAgents.map((a) => ({
+      id: a.id,
+      name: `${a.firstName} ${a.lastName}`,
+      callPriority: a.callPriority,
+    })),
+  });
+
+  if (activeAgents.length === 0) {
+    log("RESOLVE_INBOUND_ROUTING_NO_ACTIVE_AGENTS", { callSid });
+    return { type: "fallback", fallbackNumber: FALLBACK_NUMBER };
+  }
+
+  for (const agent of activeAgents) {
     const busy = await isAgentBusy(agent.id);
 
-    log("GET_NEXT_AVAILABLE_AGENT_CHECK", {
+    log("RESOLVE_INBOUND_ROUTING_CHECK", {
+      callSid,
       agentId: agent.id,
-      twilioNumber: agent.twilioNumber,
-      priority: agent.callPriority,
+      callPriority: agent.callPriority,
       busy,
     });
 
     if (!busy) {
-      return { agent, index: i };
+      log("RESOLVE_INBOUND_ROUTING_AGENT_FOUND", {
+        callSid,
+        agentId: agent.id,
+        callPriority: agent.callPriority,
+      });
+      return { type: "agent", agent };
     }
   }
 
-  return null;
-}
-
-export async function resolveInboundRouting(callSid, req) {
-  const agents = await getAgentsByPriority();
-
-  if (agents.length === 0) {
-    log("RESOLVE_INBOUND_ROUTING_NO_AGENTS", { callSid });
-    return {
-      type: "fallback",
-      fallbackNumber: FALLBACK_NUMBER,
-      agents: [],
-    };
-  }
-
-  const result = await getNextAvailableAgent(agents, 0);
-
-  if (!result) {
-    log("RESOLVE_INBOUND_ROUTING_ALL_BUSY", { callSid });
-    return {
-      type: "fallback",
-      fallbackNumber: FALLBACK_NUMBER,
-      agents,
-    };
-  }
-
-  log("RESOLVE_INBOUND_ROUTING_AGENT_FOUND", {
-    callSid,
-    agentId: result.agent.id,
-    twilioNumber: result.agent.twilioNumber,
-    priority: result.agent.callPriority,
-    agentIndex: result.index,
-  });
-
-  return {
-    type: "agent",
-    agent: result.agent,
-    agentIndex: result.index,
-    agents,
-    fallbackNumber: FALLBACK_NUMBER,
-  };
-}
-
-export async function resolveNextAgentRouting(callSid, currentIndex) {
-  const agents = await getAgentsByPriority();
-  const nextIndex = currentIndex + 1;
-
-  if (nextIndex >= agents.length) {
-    log("RESOLVE_NEXT_AGENT_ROUTING_EXHAUSTED", { callSid, nextIndex });
-    return {
-      type: "fallback",
-      fallbackNumber: FALLBACK_NUMBER,
-      agents,
-    };
-  }
-
-  const result = await getNextAvailableAgent(agents, nextIndex);
-
-  if (!result) {
-    log("RESOLVE_NEXT_AGENT_ROUTING_ALL_BUSY", { callSid });
-    return {
-      type: "fallback",
-      fallbackNumber: FALLBACK_NUMBER,
-      agents,
-    };
-  }
-
-  log("RESOLVE_NEXT_AGENT_ROUTING_FOUND", {
-    callSid,
-    agentId: result.agent.id,
-    twilioNumber: result.agent.twilioNumber,
-    agentIndex: result.index,
-  });
-
-  return {
-    type: "agent",
-    agent: result.agent,
-    agentIndex: result.index,
-    agents,
-    fallbackNumber: FALLBACK_NUMBER,
-  };
+  log("RESOLVE_INBOUND_ROUTING_ALL_BUSY", { callSid });
+  return { type: "fallback", fallbackNumber: FALLBACK_NUMBER };
 }
 
 export async function getAgentForRequest(req) {
@@ -479,19 +401,8 @@ export async function getAgentForRequest(req) {
 
   const agent = await Agent.findByPk(agentId);
 
-  if (!agent) {
-    throw new Error(`Agent with id ${agentId} not found.`);
-  }
-
-  if (!agent.isActive) {
-    throw new Error(`Agent ${agentId} is inactive and cannot place calls.`);
-  }
-
-  if (!agent.twilioNumber) {
-    throw new Error(
-      `Agent ${agentId} does not have a Twilio number assigned. Please set twilioNumber in the agents table.`
-    );
-  }
+  if (!agent) throw new Error(`Agent with id ${agentId} not found.`);
+  if (!agent.isActive) throw new Error(`Agent ${agentId} is inactive.`);
 
   return agent;
 }
@@ -510,7 +421,7 @@ export async function createVoiceAccessToken(req) {
     );
   }
 
-  const identity = buildAgentIdentity(agent.id);
+  const identity = makeAgentIdentity(agent.id);
 
   log("VOICE_TOKEN_CONFIG", {
     accountSid: mask(accountSid),
@@ -518,7 +429,6 @@ export async function createVoiceAccessToken(req) {
     twimlAppSid: mask(twimlAppSid),
     identity,
     twilioNumber: agent.twilioNumber || null,
-    baseUrl: getBaseUrl(req),
   });
 
   const token = new AccessToken(accountSid, apiKeySid, apiKeySecret, {
@@ -532,6 +442,8 @@ export async function createVoiceAccessToken(req) {
       incomingAllow: true,
     })
   );
+
+  await setAgentActive(agent.id, true);
 
   return {
     token: token.toJwt(),
@@ -550,9 +462,7 @@ export async function createVoiceAccessToken(req) {
 
 export async function handleOutboundVoiceRequest(body) {
   const to = str(body.To);
-  if (!to) {
-    throw new Error("Missing destination number or client identity.");
-  }
+  if (!to) throw new Error("Missing destination number or client identity.");
 
   const from = str(body.From || body.Caller || "");
   const agentId = parseAgentIdFromIdentity(from);
@@ -566,9 +476,8 @@ export async function handleOutboundVoiceRequest(body) {
     }
   }
 
-  if (!callerId) {
+  if (!callerId)
     throw new Error("No callerId could be resolved for this outbound call.");
-  }
 
   const callSid = str(body.CallSid);
 
@@ -596,14 +505,14 @@ export async function handleOutboundVoiceRequest(body) {
   return { to, callerId };
 }
 
-export async function handleInboundVoiceRequest(body, req) {
+export async function handleInboundVoiceRequest(body) {
   const callSid = str(body.CallSid);
   const from = str(body.From || body.Caller || "");
   const to = str(body.To || body.Called || "");
 
   log("HANDLE_INBOUND_VOICE_REQUEST", { callSid, from, to });
 
-  const routing = await resolveInboundRouting(callSid, req);
+  const routing = await resolveInboundRouting(callSid);
 
   await saveOrUpdateCall({
     callSid,
@@ -617,58 +526,10 @@ export async function handleInboundVoiceRequest(body, req) {
       inboundRouting: {
         type: routing.type,
         agentId: routing.type === "agent" ? routing.agent.id : null,
-        agentNumber:
-          routing.type === "agent" ? routing.agent.twilioNumber : null,
-        agentIndex: routing.type === "agent" ? routing.agentIndex : null,
-        totalAgents: routing.agents.length,
       },
       events: [buildWebhookEvent(body, "inbound_voice_request")],
     },
   });
-
-  return routing;
-}
-
-export async function handleNextAgentRequest(body, req) {
-  const callSid = str(body.CallSid || body.ParentCallSid || "");
-  const dialCallStatus = str(body.DialCallStatus || "").toLowerCase();
-
-  log("HANDLE_NEXT_AGENT_REQUEST", {
-    callSid,
-    dialCallStatus,
-    body,
-  });
-
-  if (dialCallStatus === "completed" || dialCallStatus === "answered") {
-    log("HANDLE_NEXT_AGENT_REQUEST_ALREADY_ANSWERED", { callSid });
-    return { type: "done" };
-  }
-
-  const call = await findCallByAnySid([callSid]);
-  const currentIndex = call?.outboundDetails?.inboundRouting?.agentIndex ?? -1;
-
-  const routing = await resolveNextAgentRouting(callSid, currentIndex);
-
-  if (call) {
-    const nextMeta = buildManualMeta(call.outboundDetails, {
-      inboundRouting: {
-        type: routing.type,
-        agentId: routing.type === "agent" ? routing.agent.id : null,
-        agentNumber:
-          routing.type === "agent" ? routing.agent.twilioNumber : null,
-        agentIndex: routing.type === "agent" ? routing.agentIndex : null,
-        totalAgents: routing.agents.length,
-      },
-      events: [buildWebhookEvent(body, "next_agent_routing")],
-    });
-
-    await call.update(
-      pickAllowedFields(Call, {
-        outboundDetails: nextMeta,
-        isManualCall: true,
-      })
-    );
-  }
 
   return routing;
 }
@@ -685,7 +546,6 @@ export async function handleCallStatusWebhook(body) {
     candidateSid,
     callSid: str(body.CallSid),
     parentCallSid: str(body.ParentCallSid),
-    dialCallSid: str(body.DialCallSid),
     callStatus: str(body.CallStatus),
     dialCallStatus: str(body.DialCallStatus),
     from,
@@ -698,10 +558,6 @@ export async function handleCallStatusWebhook(body) {
     body.CallSid,
     body.DialCallSid,
   ]);
-
-  log("HANDLE_CALL_STATUS_WEBHOOK_LOOKUP", {
-    foundCallSid: call?.callSid || null,
-  });
 
   if (!call) {
     call = await saveOrUpdateCall({
@@ -746,12 +602,9 @@ export async function handleCallStatusWebhook(body) {
     events: [buildWebhookEvent(body, "status_webhook")],
   });
 
-  const payload = pickAllowedFields(Call, {
-    outboundDetails: nextMeta,
-    isManualCall: true,
-  });
-
-  await call.update(payload);
+  await call.update(
+    pickAllowedFields(Call, { outboundDetails: nextMeta, isManualCall: true })
+  );
 
   log("HANDLE_CALL_STATUS_WEBHOOK_DONE", {
     storedCallSid: call.callSid,
@@ -776,9 +629,7 @@ export async function handleRecordingWebhook(body) {
     recordingChannels: parseIntSafe(body.RecordingChannels),
   });
 
-  if (!callSid) {
-    throw new Error("Recording webhook is missing CallSid.");
-  }
+  if (!callSid) throw new Error("Recording webhook is missing CallSid.");
 
   let call = await findCallByAnySid([body.CallSid, body.ParentCallSid]);
 
@@ -813,10 +664,7 @@ export async function handleRecordingWebhook(body) {
   });
 
   await call.update(
-    pickAllowedFields(Call, {
-      outboundDetails: meta,
-      isManualCall: true,
-    })
+    pickAllowedFields(Call, { outboundDetails: meta, isManualCall: true })
   );
 
   const result = {
@@ -839,9 +687,7 @@ export async function handleRecordingWebhook(body) {
 
 export async function updateCallRecordingMeta(callSid, patch) {
   const call = await findCallByAnySid([callSid]);
-  if (!call) {
-    throw new Error(`Call not found for CallSid ${callSid}.`);
-  }
+  if (!call) throw new Error(`Call not found for CallSid ${callSid}.`);
 
   const nextMeta = buildManualMeta(call.outboundDetails, patch);
 
@@ -890,10 +736,7 @@ export async function markManualCallProcessingFailed(callSid, stage, error) {
   });
 
   await call.update(
-    pickAllowedFields(Call, {
-      outboundDetails: meta,
-      isManualCall: true,
-    })
+    pickAllowedFields(Call, { outboundDetails: meta, isManualCall: true })
   );
 
   return call.reload();
@@ -907,10 +750,8 @@ export async function finalizeManualCallProcessing({
   recordingMeta = {},
 }) {
   const call = await findCallByAnySid([callSid]);
-
-  if (!call) {
+  if (!call)
     throw new Error(`Call not found while finalizing CallSid ${callSid}.`);
-  }
 
   const meaningful =
     Boolean(analysis?.isMeaningfulConversation) &&
@@ -921,17 +762,9 @@ export async function finalizeManualCallProcessing({
     s3Key,
     transcriptLength: str(transcriptText).length,
     meaningful,
-    issueResolved: analysis?.issueResolved,
-    customerName: analysis?.customerName || "",
-    languages: analysis?.languages || [],
-    ticketType: analysis?.ticketType || null,
-    priority: analysis?.priority || null,
-    callCategory: analysis?.callCategory || null,
   });
 
   return sequelize.transaction(async (transaction) => {
-    log("FINALIZE_MANUAL_CALL_PROCESSING_TRANSACTION_BEGIN", { callSid });
-
     const currentMeta = obj(call.outboundDetails);
     const customerPhone = str(currentMeta.customerPhone) || null;
     const agentId = currentMeta.agentId || null;
@@ -944,12 +777,6 @@ export async function finalizeManualCallProcessing({
         transaction,
       });
 
-      log("FINALIZE_USER_LOOKUP", {
-        callSid,
-        customerPhone,
-        foundUserId: user?.id || null,
-      });
-
       if (!user) {
         const userPayload = pickAllowedFields(User, {
           name: normalizeName(analysis?.customerName),
@@ -957,13 +784,8 @@ export async function finalizeManualCallProcessing({
           role: "user",
           status: "active",
         });
-
-        log("FINALIZE_USER_CREATE", { callSid, userPayload });
-
         user = await User.create(userPayload, { transaction });
       }
-    } else {
-      log("FINALIZE_USER_SKIPPED", { callSid, meaningful, customerPhone });
     }
 
     let ticket = null;
@@ -979,16 +801,7 @@ export async function finalizeManualCallProcessing({
         agentId: agentId || null,
         isManualCall: true,
       });
-
-      log("FINALIZE_TICKET_CREATE", { callSid, ticketPayload });
-
       ticket = await Ticket.create(ticketPayload, { transaction });
-    } else {
-      log("FINALIZE_TICKET_SKIPPED", {
-        callSid,
-        meaningful,
-        issueResolved: analysis?.issueResolved,
-      });
     }
 
     const nextMeta = buildManualMeta(currentMeta, {
@@ -1011,21 +824,13 @@ export async function finalizeManualCallProcessing({
       meaningful,
       processedAt: new Date().toISOString(),
       s3Key,
-      events: [
-        {
-          kind: "post_call_completed",
-          at: new Date().toISOString(),
-        },
-      ],
+      events: [{ kind: "post_call_completed", at: new Date().toISOString() }],
     });
 
     const callPayload = pickAllowedFields(Call, {
       userId: user?.id || call.userId || null,
       ticketId: ticket?.id || call.ticketId || null,
-      QuestionsAnswers: {
-        rawTranscript: transcriptText,
-        analysis,
-      },
+      QuestionsAnswers: { rawTranscript: transcriptText, analysis },
       languages: arr(analysis?.languages),
       summary: meaningful
         ? str(analysis?.summary) || "Manual call processed."
@@ -1035,17 +840,6 @@ export async function finalizeManualCallProcessing({
       isResolvedByAi: meaningful ? Boolean(analysis?.issueResolved) : null,
       isManualCall: true,
       outboundDetails: nextMeta,
-    });
-
-    log("FINALIZE_CALL_UPDATE", {
-      callSid,
-      callPayloadKeys: Object.keys(callPayload),
-      userId: callPayload.userId || null,
-      ticketId: callPayload.ticketId || null,
-      summary: callPayload.summary || null,
-      languages: callPayload.languages || [],
-      callCategory: callPayload.callCategory || null,
-      isResolvedByAi: callPayload.isResolvedByAi,
     });
 
     await call.update(callPayload, { transaction });
@@ -1082,7 +876,6 @@ export async function getPlaybackUrlByCallSid(callSid) {
     Bucket: BUCKET,
     Key: call.recordingUrl,
   });
-
   const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
 
   return {

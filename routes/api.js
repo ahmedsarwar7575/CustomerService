@@ -30,6 +30,8 @@ import {
   getNotes,
   updateNoteById,
   deleteNoteById,
+  reorderAllTickets,
+  getPaginatedTickets
 } from "../controllers/ticketController.js";
 import {
   createUser,
@@ -77,7 +79,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: {
-    fileSize: 15 * 1024 * 1024,
+    fileSize: 25 * 1024 * 1024,
     files: 10,
   },
 });
@@ -109,7 +111,7 @@ router.get(
 );
 
 // Ticket Routes
-router.post("/api/tickets", /* #swagger.tags = ['Tickets'] */ createTicket);
+router.post("/api/tickets", upload.single("recording"), createTicket);
 router.patch(
   "/api/tickets/:ticketId/assign/:agentId",
   /* #swagger.tags = ['Tickets'] */ assignTicket
@@ -126,12 +128,14 @@ router.get(
   "/api/tickets/status/:status",
   /* #swagger.tags = ['Tickets'] */ getTicketsByStatus
 );
+router.get("/api/tickets/paginated", getPaginatedTickets);
 router.get("/api/tickets", /* #swagger.tags = ['Tickets'] */ getAllTickets);
 router.patch(
   "/api/tickets/:id/escalate",
   /* #swagger.tags = ['Tickets'] */ escalateTicket
 );
 router.get("/api/ticket/:id", /* #swagger.tags = ['Tickets'] */ getticketById);
+router.patch("/api/tickets/reorder", reorderAllTickets);
 router.delete(
   "/api/ticket/:id",
   /* #swagger.tags = ['Tickets'] */ deleteTicket

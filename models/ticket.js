@@ -38,6 +38,11 @@ const Ticket = sequelize.define(
       type: DataTypes.INTEGER, // ✅ INTEGER (not NUMBER)
       allowNull: true,
     },
+    order: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
+    },
     agentId: {
       type: DataTypes.INTEGER,
       allowNull: true,
