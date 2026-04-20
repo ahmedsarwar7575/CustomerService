@@ -106,9 +106,7 @@ export function isSafeClientIdentity(value) {
 }
 
 function getVoiceAccountSid() {
-  return str(
-    process.env.TWILIO_ACCOUNT_SID_SDK || process.env.TWILIO_ACCOUNT_SID
-  );
+  return str(process.env.TWILIO_ACCOUNT_SID_SDK || process.env.TWILIO_ACCOUNT_SID);
 }
 
 function getVoiceApiKeySid() {
@@ -120,9 +118,7 @@ function getVoiceApiKeySecret() {
 }
 
 function getVoiceAppSid() {
-  return str(
-    process.env.TWILIO_TWIML_APP_SID_SDK || process.env.TWILIO_TWIML_APP_SID
-  );
+  return str(process.env.TWILIO_TWIML_APP_SID_SDK || process.env.TWILIO_TWIML_APP_SID);
 }
 
 function getCallerId() {
@@ -148,8 +144,7 @@ function getEnumValues(Model, field) {
 
 function resolveCallType(direction) {
   const values = getEnumValues(Call, "type");
-  const preferred =
-    direction === "inbound" ? "manual_inbound" : "manual_outbound";
+  const preferred = direction === "inbound" ? "manual_inbound" : "manual_outbound";
   if (values.includes(preferred)) return preferred;
   if (values.includes(direction)) return direction;
   return undefined;
@@ -234,10 +229,8 @@ async function findCallByAnySid(candidates) {
 function inferDirection(from, to) {
   const fromRaw = str(from);
   const toRaw = str(to);
-  if (fromRaw.startsWith("client:") && !toRaw.startsWith("client:"))
-    return "outbound";
-  if (!fromRaw.startsWith("client:") && toRaw.startsWith("client:"))
-    return "inbound";
+  if (fromRaw.startsWith("client:") && !toRaw.startsWith("client:")) return "outbound";
+  if (!fromRaw.startsWith("client:") && toRaw.startsWith("client:")) return "inbound";
   return "outbound";
 }
 
@@ -247,16 +240,8 @@ function inferCustomerPhone(direction, from, to) {
   return normalizePhone(from) || normalizePhone(to);
 }
 
-async function saveOrUpdateCall({
-  callSid,
-  direction,
-  from,
-  to,
-  agentId,
-  patchMeta = {},
-}) {
-  if (!str(callSid))
-    throw new Error("CallSid is required to save a manual call.");
+async function saveOrUpdateCall({ callSid, direction, from, to, agentId, patchMeta = {} }) {
+  if (!str(callSid)) throw new Error("CallSid is required to save a manual call.");
 
   const existing = await Call.findOne({ where: { callSid } });
   const type = resolveCallType(direction);
@@ -452,9 +437,7 @@ export async function createVoiceAccessToken(req) {
     agent: {
       id: agent.id,
       email: agent.email,
-      name:
-        [agent.firstName, agent.lastName].filter(Boolean).join(" ").trim() ||
-        null,
+      name: [agent.firstName, agent.lastName].filter(Boolean).join(" ").trim() || null,
       twilioNumber: agent.twilioNumber || null,
     },
   };
@@ -476,18 +459,11 @@ export async function handleOutboundVoiceRequest(body) {
     }
   }
 
-  if (!callerId)
-    throw new Error("No callerId could be resolved for this outbound call.");
+  if (!callerId) throw new Error("No callerId could be resolved for this outbound call.");
 
   const callSid = str(body.CallSid);
 
-  log("HANDLE_OUTBOUND_VOICE_REQUEST", {
-    callSid,
-    from,
-    to,
-    callerId,
-    agentId,
-  });
+  log("HANDLE_OUTBOUND_VOICE_REQUEST", { callSid, from, to, callerId, agentId });
 
   await saveOrUpdateCall({
     callSid,
@@ -535,9 +511,7 @@ export async function handleInboundVoiceRequest(body) {
 }
 
 export async function handleCallStatusWebhook(body) {
-  const candidateSid = str(
-    body.ParentCallSid || body.CallSid || body.DialCallSid
-  );
+  const candidateSid = str(body.ParentCallSid || body.CallSid || body.DialCallSid);
   const from = str(body.From || body.Caller || "");
   const to = str(body.To || body.Called || "");
   const direction = inferDirection(from, to);
@@ -553,11 +527,7 @@ export async function handleCallStatusWebhook(body) {
     direction,
   });
 
-  let call = await findCallByAnySid([
-    body.ParentCallSid,
-    body.CallSid,
-    body.DialCallSid,
-  ]);
+  let call = await findCallByAnySid([body.ParentCallSid, body.CallSid, body.DialCallSid]);
 
   if (!call) {
     call = await saveOrUpdateCall({
@@ -574,13 +544,10 @@ export async function handleCallStatusWebhook(body) {
   }
 
   const meta = obj(call.outboundDetails);
-  const durationSeconds =
-    parseIntSafe(body.CallDuration) || parseIntSafe(body.DialCallDuration);
+  const durationSeconds = parseIntSafe(body.CallDuration) || parseIntSafe(body.DialCallDuration);
 
   const nextMeta = buildManualMeta(meta, {
-    status: str(
-      body.DialCallStatus || body.CallStatus || meta.status || "unknown"
-    ),
+    status: str(body.DialCallStatus || body.CallStatus || meta.status || "unknown"),
     answeredAt:
       str(body.CallStatus).toLowerCase() === "in-progress" ||
       str(body.DialCallStatus).toLowerCase() === "answered"
@@ -602,9 +569,7 @@ export async function handleCallStatusWebhook(body) {
     events: [buildWebhookEvent(body, "status_webhook")],
   });
 
-  await call.update(
-    pickAllowedFields(Call, { outboundDetails: nextMeta, isManualCall: true })
-  );
+  await call.update(pickAllowedFields(Call, { outboundDetails: nextMeta, isManualCall: true }));
 
   log("HANDLE_CALL_STATUS_WEBHOOK_DONE", {
     storedCallSid: call.callSid,
@@ -648,10 +613,8 @@ export async function handleRecordingWebhook(body) {
   }
 
   const meta = buildManualMeta(call.outboundDetails, {
-    recordingSid:
-      recordingSid || obj(call.outboundDetails).recordingSid || null,
-    recordingStatus:
-      recordingStatus || obj(call.outboundDetails).recordingStatus || null,
+    recordingSid: recordingSid || obj(call.outboundDetails).recordingSid || null,
+    recordingStatus: recordingStatus || obj(call.outboundDetails).recordingStatus || null,
     recordingDurationSeconds:
       parseIntSafe(body.RecordingDuration) ||
       obj(call.outboundDetails).recordingDurationSeconds ||
@@ -663,9 +626,7 @@ export async function handleRecordingWebhook(body) {
     events: [buildWebhookEvent(body, "recording_webhook")],
   });
 
-  await call.update(
-    pickAllowedFields(Call, { outboundDetails: meta, isManualCall: true })
-  );
+  await call.update(pickAllowedFields(Call, { outboundDetails: meta, isManualCall: true }));
 
   const result = {
     shouldProcess:
@@ -716,13 +677,9 @@ export async function markManualCallProcessingFailed(callSid, stage, error) {
 
   const meta = buildManualMeta(call.outboundDetails, {
     transcriptionStatus:
-      stage === "transcription"
-        ? "failed"
-        : obj(call.outboundDetails).transcriptionStatus || null,
+      stage === "transcription" ? "failed" : obj(call.outboundDetails).transcriptionStatus || null,
     analysisStatus:
-      stage === "analysis"
-        ? "failed"
-        : obj(call.outboundDetails).analysisStatus || null,
+      stage === "analysis" ? "failed" : obj(call.outboundDetails).analysisStatus || null,
     lastProcessingError: error?.message || String(error),
     lastFailedStage: stage,
     events: [
@@ -735,9 +692,7 @@ export async function markManualCallProcessingFailed(callSid, stage, error) {
     ],
   });
 
-  await call.update(
-    pickAllowedFields(Call, { outboundDetails: meta, isManualCall: true })
-  );
+  await call.update(pickAllowedFields(Call, { outboundDetails: meta, isManualCall: true }));
 
   return call.reload();
 }
@@ -750,12 +705,10 @@ export async function finalizeManualCallProcessing({
   recordingMeta = {},
 }) {
   const call = await findCallByAnySid([callSid]);
-  if (!call)
-    throw new Error(`Call not found while finalizing CallSid ${callSid}.`);
+  if (!call) throw new Error(`Call not found while finalizing CallSid ${callSid}.`);
 
   const meaningful =
-    Boolean(analysis?.isMeaningfulConversation) &&
-    str(transcriptText).length >= 15;
+    Boolean(analysis?.isMeaningfulConversation) && str(transcriptText).length >= 15;
 
   log("FINALIZE_MANUAL_CALL_PROCESSING_START", {
     callSid,
@@ -772,10 +725,7 @@ export async function finalizeManualCallProcessing({
     let user = null;
 
     if (meaningful && customerPhone) {
-      user = await User.findOne({
-        where: { phone: customerPhone },
-        transaction,
-      });
+      user = await User.findOne({ where: { phone: customerPhone }, transaction });
 
       if (!user) {
         const userPayload = pickAllowedFields(User, {
@@ -805,20 +755,11 @@ export async function finalizeManualCallProcessing({
     }
 
     const nextMeta = buildManualMeta(currentMeta, {
-      recordingSid:
-        recordingMeta.recordingSid || currentMeta.recordingSid || null,
-      recordingStatus:
-        recordingMeta.recordingStatus ||
-        currentMeta.recordingStatus ||
-        "completed",
+      recordingSid: recordingMeta.recordingSid || currentMeta.recordingSid || null,
+      recordingStatus: recordingMeta.recordingStatus || currentMeta.recordingStatus || "completed",
       recordingDurationSeconds:
-        recordingMeta.recordingDuration ||
-        currentMeta.recordingDurationSeconds ||
-        null,
-      recordingChannels:
-        recordingMeta.recordingChannels ||
-        currentMeta.recordingChannels ||
-        null,
+        recordingMeta.recordingDuration || currentMeta.recordingDurationSeconds || null,
+      recordingChannels: recordingMeta.recordingChannels || currentMeta.recordingChannels || null,
       transcriptionStatus: "completed",
       analysisStatus: "completed",
       meaningful,
@@ -872,15 +813,8 @@ export async function getPlaybackUrlByCallSid(callSid) {
     throw error;
   }
 
-  const command = new GetObjectCommand({
-    Bucket: BUCKET,
-    Key: call.recordingUrl,
-  });
+  const command = new GetObjectCommand({ Bucket: BUCKET, Key: call.recordingUrl });
   const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
 
-  return {
-    callSid: call.callSid,
-    playbackUrl: url,
-    recordingKey: call.recordingUrl,
-  };
+  return { callSid: call.callSid, playbackUrl: url, recordingKey: call.recordingUrl };
 }
